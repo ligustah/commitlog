@@ -1,9 +1,0 @@
-nats:
-  servers:
-    - nats://localhost:4222
-  user: user
-  password: pass
-  tls:
-    cert: ./configs/certs/server/server-cert.pem
-    key:  ./configs/certs/server/server-key.pem
-    ca:   ./configs/certs/ca-cert.pem

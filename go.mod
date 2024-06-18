@@ -1,4 +1,4 @@
-module github.com/liftbridge-io/liftbridge
+module github.com/ligustah/commitlog
 
 go 1.17
 
