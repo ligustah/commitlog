@@ -3,8 +3,6 @@ package commitlog
 import (
 	"errors"
 	"hash/crc32"
-
-	client "github.com/liftbridge-io/liftbridge-api/go"
 )
 
 var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
@@ -23,7 +21,6 @@ type Message struct {
 	LeaderEpoch   uint64
 	AckInbox      string
 	CorrelationID string
-	AckPolicy     client.AckPolicy
 	Offset        int64
 }
 
