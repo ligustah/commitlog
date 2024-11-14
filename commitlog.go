@@ -829,5 +829,12 @@ func (l *commitLog) checkpointHW() error {
 		r    = strings.NewReader(strconv.FormatInt(hw, 10))
 		file = filepath.Join(l.Path, hwFileName)
 	)
+
+	// fsync the log file before writing the HW to disk
+	err := l.activeSegment().log.Sync()
+	if err != nil {
+		return errors.Wrap(err, "failed to sync log file")
+	}
+
 	return atomic_file.WriteFile(file, r)
 }
