@@ -7,9 +7,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func createSegment(t require.TestingT, dir string, baseOffset, maxBytes int64) *segment {
+func createSegment(t *testing.T, dir string, baseOffset, maxBytes int64) *segment {
 	s, err := newSegment(dir, baseOffset, maxBytes, false, "")
 	require.NoError(t, err)
+	t.Cleanup(func() { s.Close() })
 	return s
 }
 
@@ -28,7 +29,6 @@ func TestDeleteCleanerNoRetentionSet(t *testing.T) {
 	opts := deleteCleanerOptions{Name: "foo"}
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	expected := []*segment{createSegment(t, dir, 0, 100)}
 	actual, err := cleaner.Clean(expected)
@@ -42,7 +42,6 @@ func TestDeleteCleanerOneSegment(t *testing.T) {
 	opts.Retention.Bytes = 100
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	expected := []*segment{createSegment(t, dir, 0, 100)}
 	actual, err := cleaner.Clean(expected)
@@ -56,7 +55,6 @@ func TestDeleteCleanerBytes(t *testing.T) {
 	opts.Retention.Bytes = 100
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	segs := make([]*segment, 5)
 	for i := 0; i < 5; i++ {
@@ -77,7 +75,6 @@ func TestDeleteCleanerBytesBelowLimit(t *testing.T) {
 	opts.Retention.Bytes = 50
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	expected := make([]*segment, 5)
 	for i := 0; i < 5; i++ {
@@ -94,7 +91,6 @@ func TestDeleteCleanerMessages(t *testing.T) {
 	opts.Retention.Messages = 10
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	segs := make([]*segment, 20)
 	for i := 0; i < 20; i++ {
@@ -116,7 +112,6 @@ func TestDeleteCleanerMessagesKeepActiveSegment(t *testing.T) {
 	opts.Retention.Messages = 5
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	segs := []*segment{
 		createSegment(t, dir, 0, 128),
@@ -143,7 +138,6 @@ func TestDeleteCleanerMessagesBelowLimit(t *testing.T) {
 	opts.Retention.Messages = 100
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	expected := make([]*segment, 5)
 	for i := 0; i < 5; i++ {
@@ -161,7 +155,6 @@ func TestDeleteCleanerBytesMessages(t *testing.T) {
 	opts.Retention.Bytes = 240
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	segs := make([]*segment, 20)
 	for i := 0; i < 20; i++ {
@@ -190,7 +183,6 @@ func TestDeleteCleanerAge(t *testing.T) {
 	opts.Retention.Age = 100
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	segs := make([]*segment, 20)
 	for i := 0; i < 20; i++ {
@@ -223,7 +215,6 @@ func TestDeleteCleanerMessagesBelowAgeLimit(t *testing.T) {
 	opts.Retention.Age = 50
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	expected := make([]*segment, 5)
 	for i := 0; i < 5; i++ {
@@ -245,7 +236,6 @@ func TestDeleteCleanerMessagesCompacted(t *testing.T) {
 	opts.Retention.Messages = 10
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	// Write segment with gaps in the offsets to emulate compaction.
 	seg1 := createSegment(t, dir, 0, 1024)

@@ -12,7 +12,6 @@ import (
 // true when the log segment is full.
 func TestSegmentCheckSplitFull(t *testing.T) {
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	s := createSegment(t, dir, 0, 10)
 	require.False(t, s.CheckSplit(1))
@@ -26,7 +25,6 @@ func TestSegmentCheckSplitFull(t *testing.T) {
 // full.
 func TestSegmentCheckSplitLogRollTimeZero(t *testing.T) {
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	s := createSegment(t, dir, 0, 10)
 	require.False(t, s.CheckSplit(0))
@@ -36,7 +34,6 @@ func TestSegmentCheckSplitLogRollTimeZero(t *testing.T) {
 // has not been exceeded.
 func TestSegmentCheckSplitNotFull(t *testing.T) {
 	dir := tempDir(t)
-	defer remove(t, dir)
 	timestampBefore := timestamp
 	timestamp = func() int64 {
 		return 2
@@ -56,7 +53,6 @@ func TestSegmentCheckSplitNotFull(t *testing.T) {
 // has been exceeded.
 func TestSegmentCheckSplitLogRollTimeExceeded(t *testing.T) {
 	dir := tempDir(t)
-	defer remove(t, dir)
 	timestampBefore := timestamp
 	timestamp = func() int64 {
 		return 2
@@ -82,7 +78,6 @@ func (m *mockContextReader) Read(ctx context.Context, buf []byte) (int, error) {
 // index.
 func TestSegmentSeal(t *testing.T) {
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	s := createSegment(t, dir, 0, 10)
 	// Ensure index file is pre-allocated to 10MB.
@@ -113,7 +108,6 @@ func TestSegmentSeal(t *testing.T) {
 // Ensure calling Seal on a sealed Segment is a no-op.
 func TestSegmentSealIdempotent(t *testing.T) {
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	s := createSegment(t, dir, 0, 10)
 
@@ -141,7 +135,6 @@ func TestSegmentSealIdempotent(t *testing.T) {
 // is closed when the LEO changes or the segment is sealed.
 func TestSegmentWaitForLEO(t *testing.T) {
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	s := createSegment(t, dir, 0, 100)
 

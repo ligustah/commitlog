@@ -196,15 +196,19 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 		}
 		idx.size = newSize
 
-		// Re-mmap the index.
+		// Unmap the old index BEFORE creating the new mapping. On Windows,
+		// gommap stores mmap handles keyed by virtual address in a package-level
+		// map. If MapViewOfFile returns the same address as the old mapping,
+		// the new handle overwrites the old one; the subsequent UnsafeUnmap of
+		// the old slice then closes the new handle, leaving idx.mmap with an
+		// invalid entry and causing ERROR_INVALID_HANDLE on the next Sync.
 		oldMmap := idx.mmap
+		if err := oldMmap.UnsafeUnmap(); err != nil {
+			return errors.Wrap(err, "failed to unmap memory mapped index file")
+		}
 		idx.mmap, err = gommap.Map(idx.file.Fd(), gommap.PROT_READ|gommap.PROT_WRITE, gommap.MAP_SHARED)
 		if err != nil {
 			panic(errors.Wrap(err, "failed to mmap expanded index file"))
-		}
-		// Unmap the old index.
-		if err := oldMmap.UnsafeUnmap(); err != nil {
-			return errors.Wrap(err, "failed to unmap memory mapped index file")
 		}
 	}
 
@@ -222,13 +226,7 @@ func (idx *index) sync() error {
 	if idx.closed {
 		return ErrSegmentClosed
 	}
-	if err := idx.file.Sync(); err != nil {
-		return errors.Wrap(err, "file sync failed")
-	}
-	if err := idx.mmap.Sync(gommap.MS_SYNC); err != nil {
-		return errors.Wrap(err, "mmap sync failed")
-	}
-	return nil
+	return syncMmap(idx.mmap, idx.file)
 }
 
 func (idx *index) Close() error {
@@ -240,13 +238,19 @@ func (idx *index) Close() error {
 	if err := idx.sync(); err != nil {
 		return err
 	}
+	// Unmap before shrinking: on Windows, SetEndOfFile fails with
+	// ERROR_USER_MAPPED_FILE if any view of the file mapping is still open.
+	// idx.mmap may already be nil if Shrink() was called on an empty index.
+	if idx.mmap != nil {
+		if err := idx.mmap.UnsafeUnmap(); err != nil {
+			return err
+		}
+		idx.mmap = nil
+	}
 	if err := idx.shrink(); err != nil {
 		return err
 	}
 	if err := idx.file.Close(); err != nil {
-		return err
-	}
-	if err := idx.mmap.UnsafeUnmap(); err != nil {
 		return err
 	}
 	idx.closed = true
@@ -254,14 +258,11 @@ func (idx *index) Close() error {
 }
 
 // Shrink truncates the memory-mapped index file to the size of its contents.
+// Uses a write lock because the Windows implementation remaps idx.mmap.
 func (idx *index) Shrink() error {
-	idx.mu.RLock()
-	defer idx.mu.RUnlock()
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	return idx.shrink()
-}
-
-func (idx *index) shrink() error {
-	return idx.file.Truncate(idx.position)
 }
 
 func (idx *index) Name() string {

@@ -34,7 +34,6 @@ func TestCompactCleanerOneSegment(t *testing.T) {
 	opts := compactCleanerOptions{Name: "foo"}
 	cleaner := newCompactCleaner(opts)
 	dir := tempDir(t)
-	defer remove(t, dir)
 
 	expected := []*segment{createSegment(t, dir, 0, 100)}
 	actual, epochCache, err := cleaner.Compact(0, expected)

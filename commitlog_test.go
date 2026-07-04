@@ -767,7 +767,7 @@ func TestSetReadonlyWakeHWEqualsLEO(t *testing.T) {
 	require.Equal(t, ErrCommitLogReadonly, err)
 }
 
-func setup(t require.TestingT) (*commitLog, func()) {
+func setup(t testing.TB) (*commitLog, func()) {
 	opts := Options{
 		Path:            tempDir(t),
 		MaxSegmentBytes: 6,
@@ -776,7 +776,7 @@ func setup(t require.TestingT) (*commitLog, func()) {
 	return setupWithOptions(t, opts)
 }
 
-func setupWithOptions(t require.TestingT, opts Options) (*commitLog, func()) {
+func setupWithOptions(t testing.TB, opts Options) (*commitLog, func()) {
 	l, err := New(opts)
 	require.NoError(t, err)
 	return l.(*commitLog), func() {
@@ -785,9 +785,15 @@ func setupWithOptions(t require.TestingT, opts Options) (*commitLog, func()) {
 	}
 }
 
-func tempDir(t require.TestingT) string {
+// tempDir creates a temporary directory and registers its removal as a
+// t.Cleanup callback. Using t.Cleanup (rather than defer) ensures the
+// directory is removed after all other cleanup callbacks (e.g., segment
+// Close calls registered by createSegment) have run, preventing
+// "file in use" errors on Windows when the mmap is still active.
+func tempDir(t testing.TB) string {
 	p, err := ioutil.TempDir("", "lift_")
 	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(p) })
 	return p
 }
 

@@ -137,6 +137,7 @@ func TestReadLeaderEpochOffsets(t *testing.T) {
 
 	f, err := os.Open(filepath.Join(dir, leaderEpochFileName))
 	require.NoError(t, err)
+	defer f.Close()
 
 	offsets, err := readLeaderEpochOffsets(f)
 	require.NoError(t, err)
