@@ -96,6 +96,7 @@ type uncommittedReader struct {
 	seg *segment
 	mu  sync.Mutex
 	pos int64
+	br  bufReader
 }
 
 func (r *uncommittedReader) Read(ctx context.Context, p []byte) (n int, err error) {
@@ -108,11 +109,16 @@ func (r *uncommittedReader) Read(ctx context.Context, p []byte) (n int, err erro
 		waiting  bool
 	)
 
+	// Initialise buffered reader on first use.
+	if r.br.seg == nil {
+		r.br.reset(r.seg, r.pos)
+	}
+
 LOOP:
 	for {
-		readSize, err = r.seg.ReadAt(p[n:], r.pos)
+		readSize, err = r.br.Read(p[n:])
 		n += readSize
-		r.pos += int64(readSize)
+		r.pos = r.br.pos
 		if err != nil && err != io.EOF {
 			break
 		}
@@ -130,7 +136,7 @@ LOOP:
 			nextSeg := findSegmentByBaseOffset(segments, r.seg.BaseOffset+1)
 			if nextSeg != nil {
 				r.seg = nextSeg
-				r.pos = 0
+				r.br.reset(nextSeg, 0)
 				continue
 			}
 			// Otherwise, wait for segment to be written to (or split).
@@ -139,9 +145,8 @@ LOOP:
 				err = io.EOF
 				break
 			}
-			// At this point, either the segment has more data or, if it was
-			// full, a new segment was rolled. Try to read from the segment
-			// again.
+			// The segment may have more data now. Refill buffer.
+			r.br.reset(r.seg, r.pos)
 			continue
 		}
 
@@ -161,6 +166,7 @@ LOOP:
 			nextSeg = findSegmentByBaseOffset(segments, r.seg.BaseOffset+1)
 		}
 		r.seg = nextSeg
+		r.br.reset(nextSeg, 0)
 		r.pos = 0
 		waiting = false
 	}
@@ -201,6 +207,7 @@ func (l *commitLog) newReaderUncommitted(offset int64) (contextReader, error) {
 		cl:  l,
 		seg: seg,
 		pos: position,
+		br:  bufReader{seg: seg, pos: position, bufStart: position},
 	}, nil
 }
 
@@ -212,6 +219,7 @@ type committedReader struct {
 	pos   int64
 	hwPos int64
 	hw    int64
+	br    bufReader
 }
 
 func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error) {
@@ -219,19 +227,14 @@ func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error)
 	defer r.mu.Unlock()
 	segments := r.cl.Segments()
 
-	// If seg is nil then the reader offset exceeded the HW, i.e. the log is
-	// either empty or the offset overflows the HW. This means we need to wait
-	// for data.
 	if r.seg == nil {
-		offset := r.hw + 1 // We want to read the next committed message.
+		offset := r.hw + 1
 		hw := r.cl.HighWatermark()
 		for hw == r.hw {
-			// The HW has not changed, so wait for it to update.
 			err = r.waitForHW(ctx, hw)
 			if err != nil {
 				return
 			}
-			// Sync the HW.
 			hw = r.cl.HighWatermark()
 		}
 		r.hw = hw
@@ -251,6 +254,7 @@ func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error)
 			return 0, err
 		}
 		r.pos = entry.Position
+		r.br.reset(r.seg, r.pos)
 	}
 
 	return r.readLoop(ctx, p, segments)
@@ -264,12 +268,42 @@ LOOP:
 	for {
 		lim := int64(len(p[n:]))
 		if r.seg == r.hwSeg {
-			// If we're reading from the HW segment, read up to the HW pos.
 			lim = min(lim, r.hwPos-r.pos)
 		}
-		readSize, err = r.seg.ReadAt(p[n:lim], r.pos)
-		n += readSize
-		r.pos += int64(readSize)
+		if lim <= 0 {
+			// HW boundary reached — sync.
+			hw := r.cl.HighWatermark()
+			for hw == r.hw {
+				err = r.waitForHW(ctx, hw)
+				if err != nil {
+					break LOOP
+				}
+				hw = r.cl.HighWatermark()
+			}
+			r.hw = hw
+			segments = r.cl.Segments()
+			hwIdx, hwPos, err := getHWPos(segments, r.hw)
+			if err != nil {
+				break
+			}
+			r.hwPos = hwPos
+			r.hwSeg = segments[hwIdx]
+			continue
+		}
+
+		// For small reads within our buffered window, use br. For reads
+		// that cross the HW boundary or are larger than the buffer, fall
+		// through to direct ReadAt.
+		if r.br.seg != nil && lim <= int64(bufReadSize) {
+			buf := p[n:int(int64(n)+lim)]
+			readSize, err = r.br.Read(buf)
+			n += readSize
+			r.pos = r.br.pos
+		} else {
+			readSize, err = r.seg.ReadAt(p[n:int(int64(n)+lim)], r.pos)
+			n += readSize
+			r.pos += int64(readSize)
+		}
 		if err != nil && err != io.EOF {
 			break
 		}
@@ -284,24 +318,22 @@ LOOP:
 		if err == io.EOF {
 			nextSeg := findSegmentByBaseOffset(segments, r.seg.BaseOffset+1)
 			if nextSeg == nil {
-				// QUESTION: Should this ever happen?
 				err = errors.New("no segment to consume")
 				break
 			}
 			r.seg = nextSeg
 			r.pos = 0
+			r.br.reset(nextSeg, 0)
 			continue
 		}
 
 		// We hit the HW, so sync the latest.
 		hw := r.cl.HighWatermark()
 		for hw == r.hw {
-			// The HW has not changed, so wait for it to update.
 			err = r.waitForHW(ctx, hw)
 			if err != nil {
 				break LOOP
 			}
-			// Sync the HW.
 			hw = r.cl.HighWatermark()
 		}
 		r.hw = hw
@@ -382,6 +414,7 @@ func (l *commitLog) newReaderCommitted(offset int64) (contextReader, error) {
 		hwSeg: hwSeg,
 		hwPos: hwPos,
 		hw:    hw,
+		br:    bufReader{seg: seg, pos: position, bufStart: position},
 	}, nil
 }
 
