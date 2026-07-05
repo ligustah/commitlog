@@ -21,23 +21,21 @@ func appendMsgs(t *testing.T, l CommitLog, n int) []int64 {
 	return offsets
 }
 
-// readAll reads all committed messages up through NewestOffset and returns
-// their offsets. It uses a cancellable context so it stops once it reads
-// the last record rather than blocking indefinitely.
+// readAll reads all records in the log up to NewestOffset and returns their
+// offsets. Uses an uncommitted reader with a break on the newest known offset
+// so we never block waiting for data on the active segment.
 func readAll(t *testing.T, l CommitLog) []int64 {
 	t.Helper()
-	newest := l.NewestOffset()
-	if newest < 0 {
+	if l.OldestOffset() < 0 {
 		return nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	r, err := l.NewReader(l.OldestOffset(), false)
+	newest := l.NewestOffset()
+	r, err := l.NewReader(l.OldestOffset(), true)
 	require.NoError(t, err)
 	hdr := make([]byte, 28)
 	var got []int64
 	for {
-		_, off, _, _, err := r.ReadMessage(ctx, hdr)
+		_, off, _, _, err := r.ReadMessage(context.Background(), hdr)
 		if err != nil {
 			break
 		}

@@ -300,8 +300,10 @@ func (s *segment) waitForData(waiter interface{}, pos int64) <-chan struct{} {
 		return wait
 	}
 	wait = make(chan struct{})
-	// Check if data has been written and/or the segment was filled.
-	if s.position > pos || s.position >= s.maxBytes {
+	// Unblock immediately if the segment is sealed (no more data will be
+	// written), if new data has been written past our position, or if the
+	// segment has reached its maximum capacity.
+	if s.sealed || s.position > pos || s.position >= s.maxBytes {
 		close(wait)
 	} else {
 		s.waiters[waiter] = wait

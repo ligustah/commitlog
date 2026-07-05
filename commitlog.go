@@ -674,6 +674,10 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 					trimmed.Delete()
 					return errors.Wrap(err, "finalize trimmed segment failed")
 				}
+				// Seal so that uncommitted readers hitting EOF on this
+				// segment immediately move to the next one instead of
+				// waiting for more data that will never come.
+				trimmed.Seal()
 				if err := boundary.Delete(); err != nil {
 					return err
 				}
