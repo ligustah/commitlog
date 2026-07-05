@@ -91,6 +91,43 @@ RETRY:
 	return msg, offset, timestamp, leaderEpoch, err
 }
 
+// ReadMessageMetadata reads a single message and returns only its metadata —
+// offset, attributes, and headers — without CRC-validating the payload or
+// retaining the value bytes. The payloadBuf slice is reused across calls;
+// callers should pass the returned slice back on the next call to avoid
+// per-message allocations.
+//
+// This is intended for metadata-only scans such as LSO rebuild where only the
+// Attributes byte and message headers (producer ID, epoch, sequence) are needed.
+func (r *Reader) ReadMessageMetadata(ctx context.Context, headersBuf []byte, payloadBuf []byte) (MessageMetadata, []byte, error) {
+RETRY:
+	meta, newBuf, err := readMessageMetadata(ctx, r.ctxReader, headersBuf, payloadBuf)
+	if err != nil {
+		if r.log.IsDeleted() {
+			return MessageMetadata{}, newBuf, ErrCommitLogDeleted
+		} else if r.log.IsClosed() {
+			return MessageMetadata{}, newBuf, ErrCommitLogClosed
+		} else if pkgErrors.Cause(err) == ErrCommitLogReadonly && r.log.IsReadonly() {
+			return MessageMetadata{}, newBuf, ErrCommitLogReadonly
+		} else if pkgErrors.Cause(err) == ErrSegmentReplaced {
+			if r.uncommitted {
+				r.ctxReader, err = r.log.newReaderUncommitted(r.offset)
+			} else {
+				r.ctxReader, err = r.log.newReaderCommitted(r.offset)
+			}
+			if err != nil {
+				return MessageMetadata{}, newBuf, pkgErrors.Wrap(err, "failed to reinitialize reader")
+			}
+			payloadBuf = newBuf
+			goto RETRY
+		} else {
+			return MessageMetadata{}, newBuf, err
+		}
+	}
+	r.offset = meta.Offset + 1
+	return meta, newBuf, nil
+}
+
 type uncommittedReader struct {
 	cl  *commitLog
 	seg *segment

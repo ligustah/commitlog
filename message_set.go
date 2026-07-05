@@ -139,6 +139,84 @@ func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (
 	return m, offset, timestamp, leaderEpoch, nil
 }
 
+// MessageMetadata is the result of a header-only read — offset, attributes,
+// and headers without CRC validation.
+type MessageMetadata struct {
+	Offset      int64
+	Timestamp   int64
+	LeaderEpoch uint64
+	Attributes  int8
+	Headers     map[string][]byte
+	Raw         SerializedMessage // full raw message bytes (Key() + Value() available)
+}
+
+// readMessageMetadata reads a message from the log, parses headers and
+// attributes, and returns them without CRC-validating the payload. The
+// payloadBuf slice is reused across calls to avoid per-message allocations.
+// Callers should pass the returned slice back on the next call.
+//
+// This is intended for metadata-only scans (LSO rebuild, offset tracking)
+// where the value bytes are not needed and full deserialization is wasteful.
+func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byte, payloadBuf []byte) (MessageMetadata, []byte, error) {
+	if _, err := reader.Read(ctx, hdrBuf); err != nil {
+		return MessageMetadata{}, payloadBuf, errors.Wrap(err, "failed to read message headers")
+	}
+	var (
+		offset      = int64(encoding.Uint64(hdrBuf[offsetPos:]))
+		timestamp   = int64(encoding.Uint64(hdrBuf[timestampPos:]))
+		leaderEpoch = encoding.Uint64(hdrBuf[leaderEpochPos:])
+		size        = encoding.Uint32(hdrBuf[sizePos:])
+	)
+	if cap(payloadBuf) < int(size) {
+		payloadBuf = make([]byte, int(size))
+	}
+	buf := payloadBuf[:int(size)]
+	if _, err := reader.Read(ctx, buf); err != nil {
+		return MessageMetadata{}, payloadBuf, errors.Wrap(err, "failed to read message payload")
+	}
+	return MessageMetadata{
+		Offset:      offset,
+		Timestamp:   timestamp,
+		LeaderEpoch: leaderEpoch,
+		Attributes:  int8(buf[5]),
+		Headers:     parseHeadersAfterValue(buf),
+		Raw:         SerializedMessage(buf),
+	}, payloadBuf, nil
+}
+
+// parseHeadersAfterValue skips CRC, magic, attributes, key, and value to
+// extract message headers from the raw serialized form.
+func parseHeadersAfterValue(buf []byte) map[string][]byte {
+	// Key length at offset 6
+	keyLen := int32(encoding.Uint32(buf[6:10]))
+	keyEnd := int32(10)
+	if keyLen != -1 {
+		keyEnd += keyLen
+	}
+	// Value length at keyEnd
+	valLen := int32(encoding.Uint32(buf[keyEnd : keyEnd+4]))
+	valEnd := keyEnd + 4
+	if valLen != -1 {
+		valEnd += valLen
+	}
+	n := valEnd
+	numHeaders := encoding.Uint16(buf[n:])
+	n += 2
+	headers := make(map[string][]byte, numHeaders)
+	for i := uint16(0); i < numHeaders; i++ {
+		keySize := encoding.Uint16(buf[n:])
+		n += 2
+		key := string(buf[n : n+int32(keySize)])
+		n += int32(keySize)
+		valueSize := encoding.Uint32(buf[n:])
+		n += 4
+		value := buf[n : n+int32(valueSize)]
+		n += int32(valueSize)
+		headers[key] = value
+	}
+	return headers
+}
+
 func (ms messageSet) Offset() int64 {
 	return int64(encoding.Uint64(ms[offsetPos : offsetPos+8]))
 }
