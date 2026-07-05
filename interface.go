@@ -14,6 +14,13 @@ type CommitLog interface {
 	// Truncate removes all messages from the log starting at the given offset.
 	Truncate(offset int64) error
 
+	// TruncateBefore removes all messages from the log with offset strictly less
+	// than minOffset, freeing the disk space they occupied. After this call,
+	// OldestOffset() >= minOffset. Sealed segments entirely before minOffset are
+	// deleted; a boundary sealed segment is rewritten to keep only records at or
+	// after minOffset. The active (most-recent) segment is never rewritten.
+	TruncateBefore(minOffset int64) error
+
 	// NewestOffset returns the offset of the last message in the log or -1 if
 	// empty.
 	NewestOffset() int64

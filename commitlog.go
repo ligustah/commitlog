@@ -608,6 +608,90 @@ func (l *commitLog) Truncate(offset int64) error {
 	return l.leaderEpochCache.ClearLatest(offset)
 }
 
+// TruncateBefore removes all messages from the log with offset < minOffset.
+// Sealed segments entirely before minOffset are deleted. A boundary sealed
+// segment (one that straddles minOffset) is rewritten keeping only records at
+// or after minOffset. The active segment is never rewritten.
+func (l *commitLog) TruncateBefore(minOffset int64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if len(l.segments) == 0 || minOffset <= 0 {
+		return nil
+	}
+
+	// Find the first sealed segment whose last offset >= minOffset (the boundary).
+	// All sealed segments before it are entirely obsolete.
+	// If no sealed segment qualifies, boundaryIdx = len-1 (the active segment),
+	// and we just delete all sealed segments.
+	boundaryIdx := len(l.segments) - 1
+	for i := 0; i < len(l.segments)-1; i++ {
+		if l.segments[i].LastOffset() >= minOffset {
+			boundaryIdx = i
+			break
+		}
+	}
+
+	// Delete all sealed segments before the boundary.
+	for i := 0; i < boundaryIdx; i++ {
+		if err := l.segments[i].Delete(); err != nil {
+			return err
+		}
+	}
+
+	// Rewrite the boundary segment if it's a sealed segment whose BaseOffset
+	// falls before minOffset (meaning it straddles the cut point).
+	if boundaryIdx < len(l.segments)-1 {
+		boundary := l.segments[boundaryIdx]
+		if boundary.BaseOffset < minOffset {
+			ss := newSegmentScanner(boundary)
+			var (
+				newBaseOffset int64 = -1
+				kept          []messageSet
+			)
+			for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
+				if ms.Offset() >= minOffset {
+					if newBaseOffset < 0 {
+						newBaseOffset = ms.Offset()
+					}
+					kept = append(kept, ms)
+				}
+			}
+
+			if newBaseOffset >= 0 {
+				trimmed, err := boundary.Trimmed(newBaseOffset)
+				if err != nil {
+					return errors.Wrap(err, "create trimmed segment failed")
+				}
+				for _, ms := range kept {
+					entries := entriesForMessageSet(trimmed.Position(), ms)
+					if err := trimmed.WriteMessageSet(ms, entries); err != nil {
+						trimmed.Delete()
+						return errors.Wrap(err, "write trimmed segment failed")
+					}
+				}
+				if err := trimmed.Finalize(); err != nil {
+					trimmed.Delete()
+					return errors.Wrap(err, "finalize trimmed segment failed")
+				}
+				if err := boundary.Delete(); err != nil {
+					return err
+				}
+				l.segments[boundaryIdx] = trimmed
+			} else {
+				// Boundary segment had no records >= minOffset; delete it entirely.
+				if err := boundary.Delete(); err != nil {
+					return err
+				}
+				boundaryIdx++
+			}
+		}
+	}
+
+	l.segments = l.segments[boundaryIdx:]
+	return l.leaderEpochCache.ClearEarliest(minOffset)
+}
+
 func (l *commitLog) Segments() []*segment {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

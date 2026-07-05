@@ -17,6 +17,7 @@ const (
 	logSuffix       = ".log"
 	cleanedSuffix   = ".cleaned"
 	truncatedSuffix = ".truncated"
+	trimmedSuffix   = ".trimmed"
 	indexSuffix     = ".index"
 )
 
@@ -345,6 +346,42 @@ func (s *segment) Cleaned() (*segment, error) {
 // Truncated creates a truncated segment for this segment.
 func (s *segment) Truncated() (*segment, error) {
 	return newSegment(s.path, s.BaseOffset, s.maxBytes, false, truncatedSuffix)
+}
+
+// Trimmed creates a new segment at baseOffset with trimmedSuffix, used when
+// rewriting a segment to drop records before a given offset during TruncateBefore.
+// The new segment has a different BaseOffset than the receiver.
+func (s *segment) Trimmed(baseOffset int64) (*segment, error) {
+	return newSegment(s.path, baseOffset, s.maxBytes, false, trimmedSuffix)
+}
+
+// Finalize promotes a trimmed segment (one with trimmedSuffix) to its final
+// name by renaming the backing files to remove the suffix, then reopens it.
+// Called after writing kept records into a Trimmed segment.
+func (s *segment) Finalize() error {
+	s.Lock()
+	defer s.Unlock()
+	if err := s.close(); err != nil {
+		return err
+	}
+	finalLog := filepath.Join(s.path, fmt.Sprintf(fileFormat, s.BaseOffset, logSuffix))
+	finalIdx := filepath.Join(s.path, fmt.Sprintf(fileFormat, s.BaseOffset, indexSuffix))
+	if err := os.Rename(s.logPath(), finalLog); err != nil {
+		return errors.Wrap(err, "rename trimmed log failed")
+	}
+	if err := os.Rename(s.indexPath(), finalIdx); err != nil {
+		return errors.Wrap(err, "rename trimmed index failed")
+	}
+	s.suffix = ""
+	log, err := os.OpenFile(s.logPath(), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return errors.Wrap(err, "reopen trimmed segment failed")
+	}
+	s.log = log
+	s.writer = log
+	s.reader = log
+	s.closed = false
+	return s.setupIndex()
 }
 
 // Replace replaces the given segment with the callee.
