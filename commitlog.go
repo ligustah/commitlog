@@ -44,6 +44,9 @@ type commitLog struct {
 	mu               sync.RWMutex
 	hw               int64
 	closed           chan struct{}
+	closeOnce        sync.Once      // guards close(l.closed)
+	bgWG             sync.WaitGroup // tracks the checkpoint + cleaner loops
+	segmentsClosed   bool           // guards closeSegments (under mu)
 	segments         []*segment
 	vActiveSegment   *segment
 	hwWaiters        map[contextReader]chan bool
@@ -138,8 +141,13 @@ func New(opts Options) (CommitLog, error) {
 		return nil, err
 	}
 
-	go l.checkpointHWLoop()
-	go l.cleanerLoop()
+	// Track the background loops so Close/Delete can wait for them to exit before
+	// closing segments (otherwise a loop mid-iteration keeps operating on segment
+	// files after they are closed, which on Windows holds file handles/mmaps and
+	// makes reopening the same path fail).
+	l.bgWG.Add(2)
+	go func() { defer l.bgWG.Done(); l.checkpointHWLoop() }()
+	go func() { defer l.bgWG.Done(); l.cleanerLoop() }()
 
 	return l, nil
 }
@@ -478,41 +486,64 @@ func (l *commitLog) activeSegment() *segment {
 	return (*segment)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&l.vActiveSegment))))
 }
 
-func (l *commitLog) close() error {
-	select {
-	case <-l.closed:
+// stopBackgroundLoops signals the checkpoint and cleaner loops to stop and blocks
+// until both have returned. It is idempotent and safe for concurrent callers.
+//
+// It MUST NOT be called while holding l.mu: the loops acquire l.mu mid-iteration
+// (checkpointHWLoop RLocks; cleanerLoop's Clean RLocks then Locks), so waiting for
+// them to finish while holding l.mu would deadlock.
+func (l *commitLog) stopBackgroundLoops() {
+	l.closeOnce.Do(func() { close(l.closed) })
+	l.bgWG.Wait()
+}
+
+// closeSegments checkpoints the high watermark and closes every segment. The
+// caller must hold l.mu. Idempotent: a second call is a no-op.
+func (l *commitLog) closeSegments() error {
+	if l.segmentsClosed {
 		return nil
-	default:
 	}
 	if err := l.checkpointHW(); err != nil {
 		return err
 	}
-	close(l.closed)
 	for _, segment := range l.segments {
 		if err := segment.Close(); err != nil {
 			return err
 		}
 	}
+	l.segmentsClosed = true
 	return nil
 }
 
-// Close closes each log segment file and stops the background goroutine
-// checkpointing the high watermark to disk.
+// Close stops the background goroutines (checkpoint + cleaner), then checkpoints
+// the high watermark and closes each log segment file. It waits for the
+// background loops to exit before touching segments so no goroutine operates on a
+// closed segment.
 func (l *commitLog) Close() error {
+	// Stop and join the background loops without l.mu held (see the doc on
+	// stopBackgroundLoops), then close segments under l.mu.
+	l.stopBackgroundLoops()
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	return l.close()
+	return l.closeSegments()
 }
 
 // Delete closes the log and removes all data associated with it from the
 // filesystem.
 func (l *commitLog) Delete() error {
+	// Mark deleted before signaling close so a reader that unblocks on l.closed
+	// reports ErrCommitLogDeleted rather than ErrCommitLogClosed, and so the
+	// checkpoint loop skips writing to a directory about to be removed.
+	l.mu.Lock()
+	l.deleted = true
+	l.mu.Unlock()
+
+	l.stopBackgroundLoops()
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	l.deleted = true
-	if err := l.close(); err != nil {
+	if err := l.closeSegments(); err != nil {
 		return err
 	}
 	return os.RemoveAll(l.Path)
