@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ligustah/commitlog/compress"
 	"github.com/pkg/errors"
 )
 
@@ -71,10 +72,22 @@ type segment struct {
 	closed         bool
 	replaced       bool
 
+	// Block compression. When blockMode is set, each WriteMessageSet is stored
+	// as a compressed block and the log's logical byte space (position, index
+	// positions, message framing) is decoupled from the physical file layout.
+	// position stays logical; physPosition tracks the actual file size. blocks
+	// maps logical ranges to physical block locations for reads. codec is the
+	// configured codec for new blocks (per-block codec is recorded in headers).
+	codec        compress.Codec
+	blockMode    bool
+	blocks       []blockRef
+	physPosition int64
+	cache        *blockCache
+
 	sync.RWMutex
 }
 
-func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix string) (*segment, error) {
+func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec) (*segment, error) {
 	s := &segment{
 		maxBytes:    maxBytes,
 		BaseOffset:  baseOffset,
@@ -82,6 +95,7 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 		lastOffset:  -1,
 		path:        path,
 		suffix:      suffix,
+		codec:       codec,
 		waiters:     make(map[interface{}]chan struct{}),
 	}
 	// If this is a new segment, ensure the file doesn't already exist.
@@ -92,16 +106,83 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 	if err != nil {
 		return nil, errors.Wrap(err, "open file failed")
 	}
-	info, err := log.Stat()
-	if err != nil {
-		return nil, errors.Wrap(err, "stat file failed")
-	}
 	s.log = log
-	s.position = info.Size()
+	if err := s.initPositions(); err != nil {
+		return nil, err
+	}
 	s.writer = log
 	s.reader = log
 	err = s.setupIndex()
 	return s, err
+}
+
+// initPositions inspects the (already-open) log file, detects whether it uses
+// block compression, and initializes position/physPosition/blocks. A fresh
+// (empty) segment uses the block format only when a codec is configured, so a
+// None codec is byte-for-byte compatible with pre-compression logs. An existing
+// segment is classified by its first byte: blockMagic means a compressed
+// segment (scan its block headers), anything else is a legacy raw segment, which
+// stays raw even if a codec is now configured so formats never mix in one file.
+func (s *segment) initPositions() error {
+	info, err := s.log.Stat()
+	if err != nil {
+		return errors.Wrap(err, "stat file failed")
+	}
+	size := info.Size()
+	s.physPosition = size
+	s.cache = newBlockCache()
+	s.blocks = s.blocks[:0]
+	if size == 0 {
+		s.blockMode = s.codec != compress.None
+		s.position = 0
+		return nil
+	}
+	var magic [1]byte
+	if _, err := s.log.ReadAt(magic[:], 0); err != nil {
+		return errors.Wrap(err, "read format magic failed")
+	}
+	if magic[0] == blockMagic {
+		s.blockMode = true
+		return s.scanBlocks(size)
+	}
+	s.blockMode = false
+	s.position = size
+	return nil
+}
+
+// scanBlocks reconstructs the in-memory block index by walking the block headers
+// in the file, and sets position (logical total) and physPosition (file size).
+func (s *segment) scanBlocks(size int64) error {
+	var (
+		phys    int64
+		logical int64
+		hdr     [blockHeaderLen]byte
+	)
+	for phys < size {
+		if _, err := s.log.ReadAt(hdr[:], phys); err != nil {
+			return errors.Wrap(err, "read block header failed")
+		}
+		codec, uLen, cLen, err := parseBlockHeader(hdr[:])
+		if err != nil {
+			return err
+		}
+		physLen := int64(blockHeaderLen) + int64(cLen)
+		s.blocks = append(s.blocks, blockRef{
+			logicalStart: logical,
+			logicalLen:   int64(uLen),
+			physStart:    phys,
+			physLen:      physLen,
+			codec:        codec,
+		})
+		phys += physLen
+		logical += int64(uLen)
+	}
+	if phys != size {
+		return fmt.Errorf("commitlog: block scan overran segment (%d != %d)", phys, size)
+	}
+	s.position = logical
+	s.physPosition = size
+	return nil
 }
 
 // setupIndex creates and initializes an index.
@@ -235,11 +316,18 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 	if s.closed {
 		return 0, ErrSegmentClosed
 	}
-	n, err = s.writer.Write(p)
-	if err != nil {
-		return n, errors.Wrap(err, "log write failed")
+	if s.blockMode {
+		if err = s.appendBlock(p); err != nil {
+			return 0, err
+		}
+		n = len(p)
+	} else {
+		n, err = s.writer.Write(p)
+		if err != nil {
+			return n, errors.Wrap(err, "log write failed")
+		}
+		s.position += int64(n)
 	}
-	s.position += int64(n)
 	if s.firstWriteTime == 0 {
 		first := entries[0]
 		s.firstOffset = first.Offset
@@ -252,6 +340,40 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 	return n, nil
 }
 
+// appendBlock compresses p into a self-describing block and appends it. If the
+// compressed form isn't smaller than the input the block is stored raw (codec
+// None) so we never inflate incompressible data. position advances by the
+// logical (uncompressed) length; physPosition advances by the physical length.
+func (s *segment) appendBlock(p []byte) error {
+	codec := s.codec
+	payload := codec.Compress(p)
+	if len(payload) >= len(p) {
+		codec = compress.None
+		payload = p
+	}
+	hdr := encodeBlockHeader(codec, uint32(len(p)), uint32(len(payload)))
+	buf := make([]byte, 0, len(hdr)+len(payload))
+	buf = append(buf, hdr...)
+	buf = append(buf, payload...)
+	n, err := s.writer.Write(buf)
+	if err != nil {
+		return errors.Wrap(err, "block write failed")
+	}
+	s.blocks = append(s.blocks, blockRef{
+		logicalStart: s.position,
+		logicalLen:   int64(len(p)),
+		physStart:    s.physPosition,
+		physLen:      int64(n),
+		codec:        codec,
+	})
+	s.position += int64(len(p))
+	s.physPosition += int64(n)
+	return nil
+}
+
+// ReadAt reads len(p) bytes from the segment's logical byte space starting at
+// off. For a raw segment this is a direct file read; for a block-compressed
+// segment it maps the logical range onto the decompressed block(s).
 func (s *segment) ReadAt(p []byte, off int64) (n int, err error) {
 	s.RLock()
 	defer s.RUnlock()
@@ -261,7 +383,72 @@ func (s *segment) ReadAt(p []byte, off int64) (n int, err error) {
 		}
 		return 0, ErrSegmentClosed
 	}
-	return s.log.ReadAt(p, off)
+	if !s.blockMode {
+		return s.log.ReadAt(p, off)
+	}
+	return s.readBlocks(p, off)
+}
+
+// readBlocks serves a read from the logical byte space of a block-compressed
+// segment, decompressing and copying across as many blocks as the request
+// spans. It mirrors os.File.ReadAt semantics: a short read returns io.EOF.
+func (s *segment) readBlocks(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, fmt.Errorf("commitlog: negative read offset %d", off)
+	}
+	if off >= s.position {
+		return 0, io.EOF
+	}
+	n := 0
+	for n < len(p) {
+		cur := off + int64(n)
+		if cur >= s.position {
+			return n, io.EOF
+		}
+		blk := s.findBlock(cur)
+		if blk == nil {
+			return n, io.EOF
+		}
+		data, err := s.blockData(*blk)
+		if err != nil {
+			return n, err
+		}
+		n += copy(p[n:], data[cur-blk.logicalStart:])
+	}
+	return n, nil
+}
+
+// findBlock returns the block whose logical range contains the given logical
+// offset, or nil if none does.
+func (s *segment) findBlock(logical int64) *blockRef {
+	i := sort.Search(len(s.blocks), func(i int) bool {
+		return s.blocks[i].logicalStart+s.blocks[i].logicalLen > logical
+	})
+	if i >= len(s.blocks) || logical < s.blocks[i].logicalStart {
+		return nil
+	}
+	return &s.blocks[i]
+}
+
+// blockData returns the decompressed bytes of a block, serving the most-recently
+// decompressed block from the cache to avoid re-inflating on sequential reads.
+func (s *segment) blockData(b blockRef) ([]byte, error) {
+	if cached := s.cache.get(b.physStart); cached != nil {
+		return cached, nil
+	}
+	raw := make([]byte, b.payloadLen())
+	if _, err := s.log.ReadAt(raw, b.payloadStart()); err != nil {
+		return nil, errors.Wrap(err, "read block payload failed")
+	}
+	data, err := b.codec.Decompress(raw)
+	if err != nil {
+		return nil, errors.Wrap(err, "decompress block failed")
+	}
+	if int64(len(data)) != b.logicalLen {
+		return nil, fmt.Errorf("commitlog: block decompressed to %d bytes, want %d", len(data), b.logicalLen)
+	}
+	s.cache.put(b.physStart, data)
+	return data, nil
 }
 
 func (s *segment) notifyWaiters() {
@@ -342,19 +529,19 @@ func (s *segment) close() error {
 
 // Cleaned creates a cleaned segment for this segment.
 func (s *segment) Cleaned() (*segment, error) {
-	return newSegment(s.path, s.BaseOffset, s.maxBytes, false, cleanedSuffix)
+	return newSegment(s.path, s.BaseOffset, s.maxBytes, false, cleanedSuffix, s.codec)
 }
 
 // Truncated creates a truncated segment for this segment.
 func (s *segment) Truncated() (*segment, error) {
-	return newSegment(s.path, s.BaseOffset, s.maxBytes, false, truncatedSuffix)
+	return newSegment(s.path, s.BaseOffset, s.maxBytes, false, truncatedSuffix, s.codec)
 }
 
 // Trimmed creates a new segment at baseOffset with trimmedSuffix, used when
 // rewriting a segment to drop records before a given offset during TruncateBefore.
 // The new segment has a different BaseOffset than the receiver.
 func (s *segment) Trimmed(baseOffset int64) (*segment, error) {
-	return newSegment(s.path, baseOffset, s.maxBytes, false, trimmedSuffix)
+	return newSegment(s.path, baseOffset, s.maxBytes, false, trimmedSuffix, s.codec)
 }
 
 // Finalize promotes a trimmed segment (one with trimmedSuffix) to its final
@@ -383,6 +570,9 @@ func (s *segment) Finalize() error {
 	s.writer = log
 	s.reader = log
 	s.closed = false
+	if err := s.initPositions(); err != nil {
+		return err
+	}
 	return s.setupIndex()
 }
 
@@ -414,6 +604,9 @@ func (s *segment) Replace(old *segment) error {
 	s.reader = log
 	s.closed = false
 	old.replaced = true
+	if err := s.initPositions(); err != nil {
+		return err
+	}
 	return s.setupIndex()
 }
 

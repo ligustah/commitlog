@@ -4,11 +4,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ligustah/commitlog/compress"
 	"github.com/stretchr/testify/require"
 )
 
 func createSegment(t *testing.T, dir string, baseOffset, maxBytes int64) *segment {
-	s, err := newSegment(dir, baseOffset, maxBytes, false, "")
+	s, err := newSegment(dir, baseOffset, maxBytes, false, "", compress.None)
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
 	return s

@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ligustah/commitlog/compress"
 	"github.com/stretchr/testify/require"
 )
 
@@ -145,7 +146,7 @@ func TestIndexExpandWindows(t *testing.T) {
 func TestSegmentCloseWindows(t *testing.T) {
 	dir := tempDir(t)
 
-	s, err := newSegment(dir, 0, 512, true, "")
+	s, err := newSegment(dir, 0, 512, true, "", compress.None)
 	require.NoError(t, err)
 
 	ms, entries, err := newMessageSetFromProto(0, 0,

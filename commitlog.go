@@ -14,6 +14,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/ligustah/commitlog/compress"
 	atomic_file "github.com/natefinch/atomic"
 	"github.com/pkg/errors"
 )
@@ -69,6 +70,11 @@ type Options struct {
 	CleanerInterval      time.Duration // Frequency to enforce retention policy
 	HWCheckpointInterval time.Duration // Frequency to checkpoint HW to disk
 	ConcurrencyControl   bool          // Optimistic Concurrency Control
+	// Compression selects the block-compression codec for newly created
+	// segments. The zero value (compress.None) disables compression and is
+	// byte-for-byte compatible with logs written before compression existed;
+	// existing segments keep whatever format they were written in.
+	Compression compress.Codec
 }
 
 // New creates a new CommitLog and starts a background goroutine which
@@ -184,7 +190,7 @@ func (l *commitLog) open() error {
 			if err != nil {
 				return err
 			}
-			segment, err := newSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, false, "")
+			segment, err := newSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, false, "", l.Compression)
 			if err != nil {
 				return err
 			}
@@ -203,7 +209,7 @@ func (l *commitLog) open() error {
 		}
 	}
 	if len(l.segments) == 0 {
-		segment, err := newSegment(l.Path, 0, l.MaxSegmentBytes, true, "")
+		segment, err := newSegment(l.Path, 0, l.MaxSegmentBytes, true, "", l.Compression)
 		if err != nil {
 			return err
 		}
@@ -802,7 +808,7 @@ func (l *commitLog) checkAndPerformSplit() (bool, error) {
 
 func (l *commitLog) split(oldActiveSegment *segment) error {
 	offset := l.NewestOffset() + 1
-	segment, err := newSegment(l.Path, offset, l.MaxSegmentBytes, true, "")
+	segment, err := newSegment(l.Path, offset, l.MaxSegmentBytes, true, "", l.Compression)
 	if err != nil {
 		return err
 	}
