@@ -15,6 +15,9 @@ const defaultCompactMaxGoroutines = 10
 type compactCleanerOptions struct {
 	Name          string
 	MaxGoroutines int
+	// MinAge protects a compaction horizon: a segment whose most recent write is
+	// newer than MinAge is kept intact rather than compacted. Zero disables it.
+	MinAge time.Duration
 }
 
 // compactCleaner implements the compaction policy which replaces segments with
@@ -88,7 +91,6 @@ func (c *compactCleaner) compact(hw int64, segments []*segment) ([]*segment,
 
 	// Compact messages up to the last segment or HW, whichever is first, by
 	// scanning keys and retaining only the latest.
-	// TODO: Implement option for configuring minimum compaction lag.
 	var (
 		compacted  = make([]*segment, 0, len(segments))
 		epochCache = newLeaderEpochCacheNoFile(c.Name)
@@ -96,9 +98,25 @@ func (c *compactCleaner) compact(hw int64, segments []*segment) ([]*segment,
 		keyOffsets = c.scanKeys(hw, segments)
 	)
 
+	// A protected compaction horizon: a segment whose newest write is within
+	// MinAge is kept intact. keyOffsets still records the latest offset per key
+	// across all segments (including protected ones), so compacting an older
+	// segment correctly drops a key whose latest copy lives in a protected recent
+	// segment. Segments are ordered oldest→newest, so protection naturally covers
+	// the recent tail.
+	var horizon int64
+	if c.MinAge > 0 {
+		horizon = timestamp() - int64(c.MinAge)
+	}
+
 	// Write new segments. Skip the last segment since we will not compact it.
 	// TODO: Join segments that are below the bytes limit.
 	for _, seg := range segments[:len(segments)-1] {
+		if horizon > 0 && seg.LastWriteTime() > horizon {
+			// Within the protected horizon — keep whole.
+			compacted = append(compacted, seg)
+			continue
+		}
 		cleaned, msgsRemoved, err := c.cleanSegment(seg, keyOffsets, hw, epochCache)
 		if err != nil {
 			return nil, nil, 0, err

@@ -67,6 +67,11 @@ type Options struct {
 	MaxLogAge            time.Duration // Retention by age
 	Compact              bool          // Run compaction on log clean
 	CompactMaxGoroutines int           // Max number of goroutines to use in a log compaction
+	// CompactMinAge is a protected compaction horizon: a segment is not eligible
+	// for compaction until its most recent write is at least this old, so recent
+	// segments are kept intact (preserving their full per-record history). Zero
+	// disables the lag (any sealed segment may be compacted).
+	CompactMinAge        time.Duration
 	CleanerInterval      time.Duration // Frequency to enforce retention policy
 	HWCheckpointInterval time.Duration // Frequency to checkpoint HW to disk
 	ConcurrencyControl   bool          // Optimistic Concurrency Control
@@ -105,6 +110,7 @@ func New(opts Options) (CommitLog, error) {
 	compactCleanerOpts := compactCleanerOptions{
 		Name:          opts.Name,
 		MaxGoroutines: opts.CompactMaxGoroutines,
+		MinAge:        opts.CompactMinAge,
 	}
 	compactCleaner := newCompactCleaner(compactCleanerOpts)
 
