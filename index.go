@@ -305,25 +305,3 @@ func (idx *index) InitializePosition() (*entry, error) {
 	}
 	return entry, nil
 }
-
-type indexScanner struct {
-	idx    *index
-	entry  *entry
-	offset int64
-}
-
-func newIndexScanner(idx *index) *indexScanner {
-	return &indexScanner{idx: idx, entry: &entry{}}
-}
-
-func (s *indexScanner) Scan() (*entry, error) {
-	err := s.idx.ReadEntryAtLogOffset(s.entry, s.offset)
-	if err != nil {
-		return nil, err
-	}
-	if s.entry.Offset == 0 && s.offset != 0 {
-		return nil, io.EOF
-	}
-	s.offset++
-	return s.entry, err
-}

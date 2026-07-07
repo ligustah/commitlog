@@ -203,18 +203,76 @@ func (s *segment) setupIndex() (err error) {
 		return err
 	}
 	// If lastEntry is nil, the index is empty.
-	if lastEntry != nil {
-		s.lastOffset = lastEntry.Offset
-		s.lastWriteTime = lastEntry.Timestamp
-		// Read the first entry to get firstOffset and firstWriteTime.
+	if lastEntry == nil {
+		return nil
+	}
+	if s.blockMode {
+		// The sparse index anchors each block at its first message, so the
+		// index's first/last entries are block anchors, not the segment's
+		// first/last messages. firstOffset/firstWriteTime come from the first
+		// block's anchor directly, but lastOffset/lastWriteTime require
+		// scanning the final block's frames to its last message. The log
+		// (blocks, rebuilt by scanBlocks) is the source of truth for the
+		// physical extent; the last anchor's position marks the final block's
+		// logical start.
 		var firstEntry entry
 		if err := s.Index.ReadEntryAtFileOffset(&firstEntry, 0); err != nil {
 			return err
 		}
 		s.firstOffset = firstEntry.Offset
 		s.firstWriteTime = firstEntry.Timestamp
+		last, err := s.lastFrameInBlock(lastEntry.Position)
+		if err != nil {
+			return errors.Wrap(err, "recover last offset failed")
+		}
+		s.lastOffset = last.Offset
+		s.lastWriteTime = last.Timestamp
+		return nil
 	}
+	s.lastOffset = lastEntry.Offset
+	s.lastWriteTime = lastEntry.Timestamp
+	// Read the first entry to get firstOffset and firstWriteTime.
+	var firstEntry entry
+	if err := s.Index.ReadEntryAtFileOffset(&firstEntry, 0); err != nil {
+		return err
+	}
+	s.firstOffset = firstEntry.Offset
+	s.firstWriteTime = firstEntry.Timestamp
 	return nil
+}
+
+// lastFrameInBlock scans message frames starting at logical position start
+// (a block's logical start) and returns the entry for the final frame within
+// that block. Used during recovery to find a block-compressed segment's true
+// last offset, since the sparse index only records each block's first message.
+func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
+	blk := s.findBlock(start)
+	if blk == nil {
+		return nil, errIndexCorrupt
+	}
+	blockEnd := blk.logicalStart + blk.logicalLen
+	hdr := make([]byte, msgSetHeaderLen)
+	pos := start
+	var last *entry
+	for pos < blockEnd {
+		if _, err := s.readAtLocked(hdr, pos); err != nil {
+			return nil, err
+		}
+		m := messageSet(hdr)
+		size := m.Size()
+		last = &entry{
+			Offset:      m.Offset(),
+			Timestamp:   m.Timestamp(),
+			LeaderEpoch: m.LeaderEpoch(),
+			Position:    pos,
+			Size:        size + msgSetHeaderLen,
+		}
+		pos += int64(msgSetHeaderLen) + int64(size)
+	}
+	if last == nil {
+		return nil, errIndexCorrupt
+	}
+	return last, nil
 }
 
 // CheckSplit determines if a new log segment should be rolled out either
@@ -298,7 +356,22 @@ func (s *segment) IsEmpty() bool {
 func (s *segment) MessageCount() int64 {
 	s.RLock()
 	defer s.RUnlock()
-	return s.Index.CountEntries()
+	// For a raw segment the dense index has one entry per message, so the
+	// entry count is the message count. For a block-compressed segment the
+	// index is sparse (one entry per block), so derive the message count from
+	// the offset span instead. Offsets are contiguous within every block (a
+	// message set is assigned baseOffset+i), and appended segments are
+	// contiguous across blocks, so this is exact for normally-written logs.
+	// After compaction a compressed segment stores one message per block and
+	// may have offset gaps, in which case this is an upper bound — acceptable
+	// for the retention heuristic that consumes it.
+	if !s.blockMode {
+		return s.Index.CountEntries()
+	}
+	if s.lastOffset < 0 {
+		return 0
+	}
+	return s.lastOffset - s.firstOffset + 1
 }
 
 func (s *segment) WriteMessageSet(ms []byte, entries []*entry) error {
@@ -306,6 +379,14 @@ func (s *segment) WriteMessageSet(ms []byte, entries []*entry) error {
 	defer s.Unlock()
 	if _, err := s.write(ms, entries); err != nil {
 		return err
+	}
+	// A block-compressed segment uses a sparse index: one entry per block,
+	// anchored at the block's first message (its base offset, logical start
+	// position, and first timestamp). Seeks binary-search these anchors and
+	// then scan forward within the block to the exact target offset. Raw
+	// (legacy) segments keep the dense one-entry-per-message index.
+	if s.blockMode {
+		return s.Index.writeEntries(entries[:1])
 	}
 	return s.Index.writeEntries(entries)
 }
@@ -377,6 +458,14 @@ func (s *segment) appendBlock(p []byte) error {
 func (s *segment) ReadAt(p []byte, off int64) (n int, err error) {
 	s.RLock()
 	defer s.RUnlock()
+	return s.readAtLocked(p, off)
+}
+
+// readAtLocked is the body of ReadAt without acquiring the segment lock. It is
+// used both by ReadAt and by index seeks (findEntry/findEntryByTimestamp) which
+// already hold the read lock and must not re-acquire it (sync.RWMutex read locks
+// are not reentrant in the presence of a waiting writer).
+func (s *segment) readAtLocked(p []byte, off int64) (n int, err error) {
 	if s.closed {
 		if s.replaced {
 			return 0, ErrSegmentReplaced
@@ -611,10 +700,20 @@ func (s *segment) Replace(old *segment) error {
 }
 
 // findEntry returns the first entry whose offset is greater than or equal to
-// the given offset.
+// the given offset. For a raw segment this binary-searches the dense index and
+// returns the exact per-message entry. For a block-compressed segment it
+// binary-searches the sparse (per-block) index for the block that may contain
+// the offset, then scans that block's frames forward to the first message with
+// offset >= the target, yielding an exact per-message entry (position, size,
+// timestamp) just as the dense path does.
 func (s *segment) findEntry(offset int64) (*entry, error) {
 	s.RLock()
 	defer s.RUnlock()
+	if s.blockMode {
+		return s.scanForward(s.anchorPositionForOffset(offset), func(m messageSet) bool {
+			return m.Offset() >= offset
+		})
+	}
 	var (
 		entry = &entry{}
 		n     = int(s.Index.Position() / entryWidth)
@@ -638,10 +737,18 @@ func (s *segment) findEntry(offset int64) (*entry, error) {
 }
 
 // findEntryByTimestamp returns the first entry whose timestamp is greater than
-// or equal to the given timestamp.
+// or equal to the given timestamp. For a block-compressed segment the sparse
+// index gives per-block granularity; findEntryByTimestamp locates the block
+// that may contain the first qualifying message and scans forward to it,
+// returning an exact per-message entry.
 func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
 	s.RLock()
 	defer s.RUnlock()
+	if s.blockMode {
+		return s.scanForward(s.anchorPositionForTimestamp(timestamp), func(m messageSet) bool {
+			return m.Timestamp() >= timestamp
+		})
+	}
 	var (
 		entry = &entry{}
 		n     = int(s.Index.CountEntries())
@@ -662,6 +769,86 @@ func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
 	}
 	err = s.Index.ReadEntryAtLogOffset(entry, int64(idx))
 	return entry, err
+}
+
+// anchorPositionForOffset binary-searches the sparse index for the block that
+// may contain the given offset (the greatest block base offset <= offset) and
+// returns that block's logical start position, the point from which to scan
+// frames forward. Callers hold the segment read lock.
+func (s *segment) anchorPositionForOffset(offset int64) int64 {
+	n := int(s.Index.Position() / entryWidth)
+	if n == 0 {
+		return 0
+	}
+	e := &entry{}
+	// First anchor whose base offset is strictly greater than the target; the
+	// containing block is the one before it.
+	idx := sort.Search(n, func(i int) bool {
+		if err := s.Index.ReadEntryAtFileOffset(e, int64(i*entryWidth)); err != nil {
+			return true
+		}
+		return e.Offset > offset
+	})
+	if idx > 0 {
+		idx--
+	}
+	if err := s.Index.ReadEntryAtFileOffset(e, int64(idx*entryWidth)); err != nil {
+		return 0
+	}
+	return e.Position
+}
+
+// anchorPositionForTimestamp binary-searches the sparse index for the block
+// from which to begin scanning for the first message with timestamp >= the
+// target. It starts one block before the first anchor whose timestamp is >=
+// the target, since the qualifying message may be an interior message of the
+// preceding block. Callers hold the segment read lock.
+func (s *segment) anchorPositionForTimestamp(timestamp int64) int64 {
+	n := int(s.Index.Position() / entryWidth)
+	if n == 0 {
+		return 0
+	}
+	e := &entry{}
+	idx := sort.Search(n, func(i int) bool {
+		if err := s.Index.ReadEntryAtFileOffset(e, int64(i*entryWidth)); err != nil {
+			return true
+		}
+		return e.Timestamp >= timestamp
+	})
+	if idx > 0 {
+		idx--
+	}
+	if err := s.Index.ReadEntryAtFileOffset(e, int64(idx*entryWidth)); err != nil {
+		return 0
+	}
+	return e.Position
+}
+
+// scanForward walks message frames from the given logical start position and
+// returns the entry for the first frame satisfying match, or ErrEntryNotFound
+// at end of segment. It reads only frame headers via the segment's logical byte
+// space (transparently spanning blocks), so it naturally continues past a block
+// boundary when the target lies in a later block. Callers hold the read lock.
+func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entry, error) {
+	hdr := make([]byte, msgSetHeaderLen)
+	pos := start
+	for {
+		if _, err := s.readAtLocked(hdr, pos); err != nil {
+			return nil, ErrEntryNotFound
+		}
+		m := messageSet(hdr)
+		size := m.Size()
+		if match(m) {
+			return &entry{
+				Offset:      m.Offset(),
+				Timestamp:   m.Timestamp(),
+				LeaderEpoch: m.LeaderEpoch(),
+				Position:    pos,
+				Size:        size + msgSetHeaderLen,
+			}, nil
+		}
+		pos += int64(msgSetHeaderLen) + int64(size)
+	}
 }
 
 // Delete closes the segment and then deletes its log and index files.
@@ -685,33 +872,42 @@ func (s *segment) Delete() error {
 }
 
 type segmentScanner struct {
-	s  *segment
-	is *indexScanner
+	s   *segment
+	pos int64
 }
 
 func newSegmentScanner(segment *segment) *segmentScanner {
-	return &segmentScanner{s: segment, is: newIndexScanner(segment.Index)}
+	return &segmentScanner{s: segment}
 }
 
 // Scan should be called repeatedly to iterate over the messages in the
 // segment, it will return io.EOF when there are no more messages.
+//
+// The scanner walks the segment's logical byte space directly (one message
+// frame at a time) rather than the index, so it iterates every message
+// regardless of index density. This is required for block-compressed segments,
+// whose sparse index has only one entry per block, and is equivalent to the
+// old index-driven scan for raw segments (positions and sizes match).
 func (s *segmentScanner) Scan() (messageSet, *entry, error) {
-	entry, err := s.is.Scan()
-	if err != nil {
-		return nil, nil, err
-	}
 	header := make(messageSet, msgSetHeaderLen)
-	_, err = s.s.ReadAt(header, entry.Position)
-	if err != nil {
+	if _, err := s.s.ReadAt(header, s.pos); err != nil {
 		return nil, nil, err
 	}
-	payload := make([]byte, header.Size())
-	_, err = s.s.ReadAt(payload, entry.Position+msgSetHeaderLen)
-	if err != nil {
+	size := header.Size()
+	payload := make([]byte, size)
+	if _, err := s.s.ReadAt(payload, s.pos+msgSetHeaderLen); err != nil {
 		return nil, nil, err
 	}
 	msgSet := append(header, payload...)
-	return msgSet, entry, nil
+	e := &entry{
+		Offset:      header.Offset(),
+		Timestamp:   header.Timestamp(),
+		LeaderEpoch: header.LeaderEpoch(),
+		Position:    s.pos,
+		Size:        size + msgSetHeaderLen,
+	}
+	s.pos += int64(msgSetHeaderLen) + int64(size)
+	return msgSet, e, nil
 }
 
 func (s *segment) logPath() string {
