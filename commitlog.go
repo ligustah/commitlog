@@ -954,6 +954,25 @@ func (l *commitLog) checkpointHWLoop() {
 	}
 }
 
+// SyncAll makes everything appended so far durable against power loss: it
+// fsyncs EVERY segment's log and index (the periodic HW checkpoint only syncs
+// the active segment, so sealed segments written since the last checkpoint may
+// still be in OS buffers), then checkpoints the high watermark. After SyncAll
+// returns, a reopened log recovers every record appended before the call.
+// Used before externally-visible filesystem operations on the log's directory
+// (e.g. an atomic stream promote via rename) whose observers must never see
+// the log roll back past this point.
+func (l *commitLog) SyncAll() error {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, seg := range l.segments {
+		if err := seg.Sync(); err != nil {
+			return errors.Wrap(err, "failed to sync segment")
+		}
+	}
+	return l.checkpointHW()
+}
+
 func (l *commitLog) checkpointHW() error {
 	var (
 		hw   = l.hw

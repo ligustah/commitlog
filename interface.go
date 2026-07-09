@@ -14,6 +14,10 @@ type CommitLog interface {
 	// Truncate removes all messages from the log starting at the given offset.
 	Truncate(offset int64) error
 
+	// SyncAll fsyncs every segment (log + index) and checkpoints the high
+	// watermark, making everything appended so far durable against power loss.
+	SyncAll() error
+
 	// TruncateBefore removes all messages from the log with offset strictly less
 	// than minOffset, freeing the disk space they occupied. After this call,
 	// OldestOffset() >= minOffset. Sealed segments entirely before minOffset are

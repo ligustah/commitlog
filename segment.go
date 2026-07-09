@@ -599,6 +599,20 @@ func (s *segment) removeWaiter(waiter interface{}) {
 	s.Unlock()
 }
 
+// Sync flushes the segment's log file and index to stable storage. A no-op on
+// a closed segment.
+func (s *segment) Sync() error {
+	s.Lock()
+	defer s.Unlock()
+	if s.closed {
+		return nil
+	}
+	if err := s.log.Sync(); err != nil {
+		return err
+	}
+	return s.Index.Sync()
+}
+
 // Close a segment such that it can no longer be read from or written to. This
 // operation is idempotent.
 func (s *segment) Close() error {
