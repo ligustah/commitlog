@@ -876,9 +876,9 @@ func (l *commitLog) Clean() error {
 	l.mu.RLock()
 	oldSegments := l.segments
 	l.mu.RUnlock()
-	cleaned, epochCache, err := l.clean(oldSegments)
-	if err != nil {
-		return err
+	cleaned, epochCache, cleanErr := l.clean(oldSegments)
+	if cleaned == nil {
+		return cleanErr
 	}
 	l.mu.Lock()
 	newSegments := l.segments
@@ -892,12 +892,18 @@ func (l *commitLog) Clean() error {
 	// Update the leader epoch offset cache to account for deleted segments. If
 	// compaction ran, we need to regenerate the cache using the one returned
 	// from compaction.
+	var err error
 	if epochCache != nil {
 		err = l.leaderEpochCache.Replace(epochCache)
 	} else {
 		err = l.leaderEpochCache.ClearEarliest(l.segments[0].BaseOffset)
 	}
 	l.mu.Unlock()
+	// A partial retention failure (cleanErr) still swapped in the surviving
+	// segments above; report it once the read path is consistent.
+	if cleanErr != nil {
+		return cleanErr
+	}
 	return err
 }
 
@@ -921,14 +927,20 @@ func (l *commitLog) rebaseSegments(from, to []*segment, epochCache *leaderEpochC
 func (l *commitLog) clean(segments []*segment) ([]*segment, *leaderEpochCache, error) {
 	cleaned, err := l.deleteCleaner.Clean(segments)
 	if err != nil {
-		return nil, nil, err
+		// A partial retention failure still hands back the surviving
+		// segments; propagate them so the caller swaps them in — the deleted
+		// prefix must leave the read path even when the clean errs.
+		return cleaned, nil, err
 	}
 	var epochCache *leaderEpochCache
 	if l.Compact {
-		cleaned, epochCache, err = l.compactCleaner.Compact(l.HighWatermark(), cleaned)
+		compacted, cache, err := l.compactCleaner.Compact(l.HighWatermark(), cleaned)
 		if err != nil {
-			return nil, nil, err
+			// Keep the delete stage's result: its removals are already on
+			// disk regardless of the compaction failure.
+			return cleaned, nil, err
 		}
+		cleaned, epochCache = compacted, cache
 	}
 	return cleaned, epochCache, nil
 }

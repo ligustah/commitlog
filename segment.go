@@ -415,7 +415,12 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 		}
 		s.position += int64(n)
 	}
-	if s.firstWriteTime == 0 {
+	// Guard on firstOffset, not firstWriteTime: messages appended without
+	// timestamps leave firstWriteTime 0 forever, so every batch would
+	// overwrite firstOffset with its own first offset — a live handle then
+	// reports the LAST batch's offset as the segment's first (correct again
+	// only after a reopen recovers it from the index).
+	if s.firstOffset == -1 {
 		first := entries[0]
 		s.firstOffset = first.Offset
 		s.firstWriteTime = first.Timestamp

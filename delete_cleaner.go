@@ -14,6 +14,25 @@ var computeTTL = func(age time.Duration) int64 {
 	return time.Now().Add(-age).UnixNano()
 }
 
+// deleteSegment removes a segment's backing files. This function exists for
+// mocking purposes (fault injection in partial-failure tests).
+var deleteSegment = func(s *segment) error { return s.Delete() }
+
+// dropOldestPrefix deletes the drop segments OLDEST FIRST and returns the
+// surviving log: keep on full success, or — if a deletion fails — the failed
+// segment plus everything newer, alongside the error. Deleting in ascending
+// order means a partial failure removes a pure prefix of the log: the
+// surviving slice is always contiguous (no holes for readers to fall into),
+// and every deleted segment is gone from the returned read path.
+func dropOldestPrefix(drop, keep []*segment) ([]*segment, error) {
+	for j, s := range drop {
+		if err := deleteSegment(s); err != nil {
+			return append(drop[j:], keep...), err
+		}
+	}
+	return keep, nil
+}
+
 // deleteCleanerOptions contains configuration settings for the DeleteCleaner.
 type deleteCleanerOptions struct {
 	Retention struct {
@@ -51,11 +70,16 @@ func (c *deleteCleaner) Clean(segments []*segment) ([]*segment, error) {
 	)
 	defer slog.Debug("Finished cleaning log", slog.String("name", c.Name))
 
+	// A partial deletion failure still returns the surviving segments (the
+	// apply functions delete oldest-first, so the survivors are a contiguous
+	// suffix): the caller MUST swap them in even on error, or its read path
+	// keeps referencing deleted files.
+
 	// Limit by age first.
 	if c.Retention.Age > 0 {
 		segments, err = c.applyAgeLimit(segments)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to apply age retention limit")
+			return segments, errors.Wrap(err, "failed to apply age retention limit")
 		}
 	}
 
@@ -63,7 +87,7 @@ func (c *deleteCleaner) Clean(segments []*segment) ([]*segment, error) {
 	if c.Retention.Messages > 0 {
 		segments, err = c.applyMessagesLimit(segments)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to apply message retention limit")
+			return segments, errors.Wrap(err, "failed to apply message retention limit")
 		}
 	}
 
@@ -71,7 +95,7 @@ func (c *deleteCleaner) Clean(segments []*segment) ([]*segment, error) {
 	if c.Retention.Bytes > 0 {
 		segments, err = c.applyBytesLimit(segments)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to apply bytes retention limit")
+			return segments, errors.Wrap(err, "failed to apply bytes retention limit")
 		}
 	}
 
@@ -105,19 +129,7 @@ func (c *deleteCleaner) applyMessagesLimit(segments []*segment) ([]*segment, err
 		}
 		cleanedSegments = append([]*segment{s}, cleanedSegments...)
 	}
-	if i > -1 {
-		for ; i > -1; i-- {
-			// TODO: There is an edge case here where we fail partway through
-			// deletion. We will delete some segments but return an error. This
-			// should probably mark segments for deletion, remove them from the
-			// read path, and then delete them asynchronously.
-			if err := segments[i].Delete(); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	return cleanedSegments, nil
+	return dropOldestPrefix(segments[:i+1], cleanedSegments)
 }
 
 func (c *deleteCleaner) applyBytesLimit(segments []*segment) ([]*segment, error) {
@@ -143,19 +155,7 @@ func (c *deleteCleaner) applyBytesLimit(segments []*segment) ([]*segment, error)
 		}
 		cleanedSegments = append([]*segment{s}, cleanedSegments...)
 	}
-	if i > -1 {
-		for ; i > -1; i-- {
-			// TODO: There is an edge case here where we fail partway through
-			// deletion. We will delete some segments but return an error. This
-			// should probably mark segments for deletion, remove them from the
-			// read path, and then delete them asynchronously.
-			if err := segments[i].Delete(); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	return cleanedSegments, nil
+	return dropOldestPrefix(segments[:i+1], cleanedSegments)
 }
 
 func (c *deleteCleaner) applyAgeLimit(segments []*segment) ([]*segment, error) {
@@ -169,22 +169,13 @@ func (c *deleteCleaner) applyAgeLimit(segments []*segment) ([]*segment, error) {
 		idx int
 	)
 
-	// Delete all segments whose last-written timestamp is less than the TTL
-	// with the exception of the active (last) segment.
+	// Drop the prefix of segments whose last-written timestamp is less than
+	// the TTL, always retaining the active (last) segment.
 	for i, seg := range segments {
-		if i != len(segments)-1 && seg.lastWriteTime < ttl {
-			// TODO: There is an edge case here where we fail partway through
-			// deletion. We will delete some segments but return an error. This
-			// should probably mark segments for deletion, remove them from the
-			// read path, and then delete them asynchronously.
-			if err := seg.Delete(); err != nil {
-				return nil, err
-			}
-		} else {
+		if i == len(segments)-1 || seg.lastWriteTime >= ttl {
 			idx = i
 			break
 		}
 	}
-
-	return segments[idx:], nil
+	return dropOldestPrefix(segments[:idx], segments[idx:])
 }
