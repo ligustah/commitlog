@@ -340,6 +340,10 @@ LOOP:
 			readSize, err = r.seg.ReadAt(p[n:int(int64(n)+lim)], r.pos)
 			n += readSize
 			r.pos += int64(readSize)
+			// Keep the buffered reader in sync: the next small read must
+			// continue after the bytes consumed here, not from the buffer's
+			// stale pre-ReadAt position.
+			r.br.pos = r.pos
 		}
 		if err != nil && err != io.EOF {
 			break
