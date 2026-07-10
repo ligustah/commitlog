@@ -234,6 +234,21 @@ func (l *commitLog) Append(msgs []*Message) ([]int64, error) {
 	if l.IsReadonly() {
 		return nil, ErrCommitLogReadonly
 	}
+	// Stamp append time on messages that carry no timestamp (Kafka's
+	// LogAppendTime as the fallback for an unset CreateTime). Every
+	// time-based feature — age retention, MaxSegmentAge rolling, the
+	// CompactMinAge horizon, the timestamp-search APIs — reads segment
+	// write times derived from these; producers that never stamp
+	// timestamps would otherwise leave segments looking infinitely old
+	// (age retention deletes everything, the compaction horizon protects
+	// nothing). AppendMessageSet takes pre-encoded bytes and cannot be
+	// stamped; replicating callers are expected to carry source timestamps.
+	now := timestamp()
+	for _, m := range msgs {
+		if m.Timestamp == 0 {
+			m.Timestamp = now
+		}
+	}
 	if _, err := l.checkAndPerformSplit(); err != nil {
 		return nil, err
 	}

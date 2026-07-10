@@ -37,7 +37,7 @@ func TestReaderUncommittedStartOffset(t *testing.T) {
 			for i := 0; i < numMsgs; i++ {
 				msgs[i] = &Message{
 					Value:       []byte(strconv.Itoa(i)),
-					Timestamp:   int64(i),
+					Timestamp:   int64(i) + 1,
 					LeaderEpoch: 42,
 				}
 			}
@@ -53,7 +53,7 @@ func TestReaderUncommittedStartOffset(t *testing.T) {
 			msg, offset, timestamp, leaderEpoch, err := r.ReadMessage(ctx, headers)
 			require.NoError(t, err)
 			require.Equal(t, int64(idx), offset)
-			require.Equal(t, int64(idx), timestamp)
+			require.Equal(t, int64(idx)+1, timestamp)
 			require.Equal(t, uint64(42), leaderEpoch)
 			compareMessages(t, msgs[idx], msg)
 		})
@@ -175,7 +175,7 @@ func TestReaderCommittedStartOffset(t *testing.T) {
 			for i := 0; i < numMsgs; i++ {
 				msgs[i] = &Message{
 					Value:       []byte(strconv.Itoa(i)),
-					Timestamp:   int64(i),
+					Timestamp:   int64(i) + 1,
 					LeaderEpoch: 42,
 				}
 			}
@@ -190,7 +190,7 @@ func TestReaderCommittedStartOffset(t *testing.T) {
 			msg, offset, timestamp, leaderEpoch, err := r.ReadMessage(context.Background(), headers)
 			require.NoError(t, err)
 			require.Equal(t, int64(idx), offset)
-			require.Equal(t, int64(idx), timestamp)
+			require.Equal(t, int64(idx)+1, timestamp)
 			require.Equal(t, uint64(42), leaderEpoch)
 			compareMessages(t, msgs[idx], msg)
 		})
@@ -321,7 +321,7 @@ func TestReaderCommittedRead(t *testing.T) {
 			for i := 0; i < numMsgs; i++ {
 				msgs[i] = &Message{
 					Value:       []byte(strconv.Itoa(i)),
-					Timestamp:   int64(i),
+					Timestamp:   int64(i) + 1,
 					LeaderEpoch: 42,
 				}
 			}
@@ -336,7 +336,7 @@ func TestReaderCommittedRead(t *testing.T) {
 				m, offset, timestamp, leaderEpoch, err := r.ReadMessage(context.Background(), headers)
 				require.NoError(t, err)
 				require.Equal(t, int64(i), offset)
-				require.Equal(t, int64(i), timestamp)
+				require.Equal(t, int64(i)+1, timestamp)
 				require.Equal(t, uint64(42), leaderEpoch)
 				compareMessages(t, msg, m)
 			}
@@ -360,7 +360,7 @@ func TestReaderCommittedReadToHW(t *testing.T) {
 			for i := 0; i < numMsgs; i++ {
 				msgs[i] = &Message{
 					Value:       []byte(strconv.Itoa(i)),
-					Timestamp:   int64(i),
+					Timestamp:   int64(i) + 1,
 					LeaderEpoch: 42,
 				}
 			}
@@ -375,7 +375,7 @@ func TestReaderCommittedReadToHW(t *testing.T) {
 				m, offset, timestamp, leaderEpoch, err := r.ReadMessage(context.Background(), headers)
 				require.NoError(t, err)
 				require.Equal(t, int64(i), offset)
-				require.Equal(t, int64(i), timestamp)
+				require.Equal(t, int64(i)+1, timestamp)
 				require.Equal(t, uint64(42), leaderEpoch)
 				compareMessages(t, msg, m)
 			}
@@ -397,7 +397,7 @@ func TestReaderCommittedWaitForHW(t *testing.T) {
 	for i := 0; i < numMsgs; i++ {
 		msgs[i] = &Message{
 			Value:       []byte(strconv.Itoa(i)),
-			Timestamp:   int64(i),
+			Timestamp:   int64(i) + 1,
 			LeaderEpoch: 42,
 		}
 	}
@@ -417,7 +417,7 @@ func TestReaderCommittedWaitForHW(t *testing.T) {
 		m, offset, timestamp, leaderEpoch, err := r.ReadMessage(context.Background(), headers)
 		require.NoError(t, err)
 		require.Equal(t, int64(i), offset)
-		require.Equal(t, int64(i), timestamp)
+		require.Equal(t, int64(i)+1, timestamp)
 		require.Equal(t, uint64(42), leaderEpoch)
 		compareMessages(t, msg, m)
 	}
@@ -437,7 +437,7 @@ func TestReaderCommittedCancel(t *testing.T) {
 	for i := 0; i < numMsgs; i++ {
 		msgs[i] = &Message{
 			Value:       []byte(strconv.Itoa(i)),
-			Timestamp:   int64(i),
+			Timestamp:   int64(i) + 1,
 			LeaderEpoch: 42,
 		}
 	}
@@ -460,7 +460,7 @@ func TestReaderCommittedCancel(t *testing.T) {
 		if count < 5 {
 			require.NoError(t, err)
 			require.Equal(t, int64(i), offset)
-			require.Equal(t, int64(i), timestamp)
+			require.Equal(t, int64(i)+1, timestamp)
 			require.Equal(t, uint64(42), leaderEpoch)
 			compareMessages(t, msg, m)
 			count++

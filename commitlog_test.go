@@ -386,7 +386,7 @@ func TestEarliestOffsetAfterTimestamp(t *testing.T) {
 	numMsgs := 10
 	msgs := make([]*Message, numMsgs)
 	for i := 0; i < numMsgs; i++ {
-		msgs[i] = &Message{Value: []byte(strconv.Itoa(i)), Timestamp: int64(i * 10)}
+		msgs[i] = &Message{Value: []byte(strconv.Itoa(i)), Timestamp: int64(max(i*10, 1))}
 	}
 	for _, msg := range msgs {
 		_, err := l.Append([]*Message{msg})
@@ -454,7 +454,7 @@ func TestLatestOffsetBeforeTimestamp(t *testing.T) {
 	numMsgs := 10
 	msgs := make([]*Message, numMsgs)
 	for i := 0; i < numMsgs; i++ {
-		msgs[i] = &Message{Value: []byte(strconv.Itoa(i)), Timestamp: int64(i * 10)}
+		msgs[i] = &Message{Value: []byte(strconv.Itoa(i)), Timestamp: int64(max(i*10, 1))}
 	}
 	for _, msg := range msgs {
 		_, err := l.Append([]*Message{msg})
