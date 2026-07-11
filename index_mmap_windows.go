@@ -44,7 +44,7 @@ func syncMmap(mmap gommap.MMap, f *os.File) error {
 func (idx *index) shrink() error {
 	remap := idx.mmap != nil
 	if remap {
-		if err := idx.mmap.UnsafeUnmap(); err != nil {
+		if err := unmapFile(idx.mmap); err != nil {
 			return errors.Wrap(err, "unmap failed during shrink")
 		}
 		idx.mmap = nil
@@ -54,7 +54,7 @@ func (idx *index) shrink() error {
 	}
 	if remap && idx.position > 0 {
 		var err error
-		idx.mmap, err = gommap.Map(idx.file.Fd(), gommap.PROT_READ|gommap.PROT_WRITE, gommap.MAP_SHARED)
+		idx.mmap, err = mmapFile(idx.file)
 		if err != nil {
 			return errors.Wrap(err, "remap failed after shrink")
 		}

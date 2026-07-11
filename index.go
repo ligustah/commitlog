@@ -14,6 +14,26 @@ import (
 
 var errIndexCorrupt = errors.New("corrupt index file")
 
+// gommapMu serializes every gommap.Map / UnsafeUnmap call in this package.
+// gommap keeps a package-level handle registry keyed by mapping address with
+// no internal locking, so concurrent map/unmap calls from different goroutines
+// — an append rolling a segment while the cleaner mmaps a rewrite target —
+// race on that registry. Mapping operations are rare (segment create, seal,
+// expand, close), so one mutex costs nothing.
+var gommapMu sync.Mutex
+
+func mmapFile(f *os.File) (gommap.MMap, error) {
+	gommapMu.Lock()
+	defer gommapMu.Unlock()
+	return gommap.Map(f.Fd(), gommap.PROT_READ|gommap.PROT_WRITE, gommap.MAP_SHARED)
+}
+
+func unmapFile(m gommap.MMap) error {
+	gommapMu.Lock()
+	defer gommapMu.Unlock()
+	return m.UnsafeUnmap()
+}
+
 const (
 	offsetWidth    = 4
 	timestampWidth = 8
@@ -102,7 +122,7 @@ func newIndex(opts options) (idx *index, err error) {
 	idx.position = fi.Size()
 	idx.size = fi.Size()
 
-	idx.mmap, err = gommap.Map(idx.file.Fd(), gommap.PROT_READ|gommap.PROT_WRITE, gommap.MAP_SHARED)
+	idx.mmap, err = mmapFile(idx.file)
 	if err != nil {
 		return nil, errors.Wrap(err, "mmap file failed")
 	}
@@ -203,10 +223,10 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 		// the old slice then closes the new handle, leaving idx.mmap with an
 		// invalid entry and causing ERROR_INVALID_HANDLE on the next Sync.
 		oldMmap := idx.mmap
-		if err := oldMmap.UnsafeUnmap(); err != nil {
+		if err := unmapFile(oldMmap); err != nil {
 			return errors.Wrap(err, "failed to unmap memory mapped index file")
 		}
-		idx.mmap, err = gommap.Map(idx.file.Fd(), gommap.PROT_READ|gommap.PROT_WRITE, gommap.MAP_SHARED)
+		idx.mmap, err = mmapFile(idx.file)
 		if err != nil {
 			panic(errors.Wrap(err, "failed to mmap expanded index file"))
 		}
@@ -242,7 +262,7 @@ func (idx *index) Close() error {
 	// ERROR_USER_MAPPED_FILE if any view of the file mapping is still open.
 	// idx.mmap may already be nil if Shrink() was called on an empty index.
 	if idx.mmap != nil {
-		if err := idx.mmap.UnsafeUnmap(); err != nil {
+		if err := unmapFile(idx.mmap); err != nil {
 			return err
 		}
 		idx.mmap = nil

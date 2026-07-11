@@ -43,6 +43,12 @@ type commitLog struct {
 	compactCleaner   *compactCleaner
 	name             string
 	mu               sync.RWMutex
+	// cleanMu serializes segment-list maintenance (Clean, Truncate,
+	// TruncateBefore). Clean scans and rewrites segments outside mu so reads
+	// and appends stay concurrent; without cleanMu a concurrent truncation (or
+	// second Clean) can delete segment files mid-rewrite and the final swap
+	// resurrects them. Lock order: cleanMu before mu, never the reverse.
+	cleanMu          sync.Mutex
 	hw               int64
 	closed           chan struct{}
 	closeOnce        sync.Once      // guards close(l.closed)
@@ -596,6 +602,8 @@ func (l *commitLog) IsClosed() bool {
 
 // Truncate removes all messages from the log starting at the given offset.
 func (l *commitLog) Truncate(offset int64) error {
+	l.cleanMu.Lock()
+	defer l.cleanMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	seg, idx := findSegment(l.segments, offset)
@@ -671,6 +679,8 @@ func (l *commitLog) Truncate(offset int64) error {
 // segment (one that straddles minOffset) is rewritten keeping only records at
 // or after minOffset. The active segment is never rewritten.
 func (l *commitLog) TruncateBefore(minOffset int64) error {
+	l.cleanMu.Lock()
+	defer l.cleanMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -888,6 +898,8 @@ func (l *commitLog) cleanerLoop() {
 
 // Clean applies retention and compaction rules against the log, if applicable.
 func (l *commitLog) Clean() error {
+	l.cleanMu.Lock()
+	defer l.cleanMu.Unlock()
 	l.mu.RLock()
 	oldSegments := l.segments
 	l.mu.RUnlock()
