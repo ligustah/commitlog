@@ -7,6 +7,19 @@ import (
 
 var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
 
+// Attribute bits for Message.Attributes.
+const (
+	// AttrControl marks a transactional control record (a commit/abort
+	// marker written by a transactional layer such as durable_streams).
+	AttrControl int8 = 0x01
+	// AttrTombstone marks a key's terminal record. Compaction may remove a
+	// latest-per-key tombstone entirely — the key vanishes from the log —
+	// once it is older than the tombstone retention (CleanSpec or
+	// Options.CompactTombstoneRetention). The payload is otherwise a normal
+	// record; readers are unaffected by the bit.
+	AttrTombstone int8 = 0x02
+)
+
 // Message is the object that gets serialized and written to the log.
 type Message struct {
 	Crc        int32

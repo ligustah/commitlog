@@ -38,11 +38,11 @@ const (
 // commitLog implements the CommitLog interface, which is a durable write-ahead
 // log.
 type commitLog struct {
-	readonly         int32 // Atomic flag
-	deleteCleaner    *deleteCleaner
-	compactCleaner   *compactCleaner
-	name             string
-	mu               sync.RWMutex
+	readonly       int32 // Atomic flag
+	deleteCleaner  *deleteCleaner
+	compactCleaner *compactCleaner
+	name           string
+	mu             sync.RWMutex
 	// cleanMu serializes segment-list maintenance (Clean, Truncate,
 	// TruncateBefore). Clean scans and rewrites segments outside mu so reads
 	// and appends stay concurrent; without cleanMu a concurrent truncation (or
@@ -77,7 +77,18 @@ type Options struct {
 	// for compaction until its most recent write is at least this old, so recent
 	// segments are kept intact (preserving their full per-record history). Zero
 	// disables the lag (any sealed segment may be compacted).
-	CompactMinAge        time.Duration
+	CompactMinAge time.Duration
+	// CompactTombstoneRetention enables tombstone GC on plain (spec-less)
+	// Clean calls: a latest-per-key record carrying AttrTombstone older than
+	// this is removed entirely, so the key vanishes. Intended for
+	// NON-transactional compacted logs (transactional layers pass their own
+	// CleanSpec instead, with transaction-aware bounds). Zero disables.
+	CompactTombstoneRetention time.Duration
+	// DisableAutoClean stops the internal cleaner loop from running Clean.
+	// Segment splitting (MaxSegmentAge rolls) keeps running. For logs whose
+	// owner drives cleaning explicitly (CleanWithSpec) — an automatic clean
+	// has no transaction awareness and must not race the owner's policy.
+	DisableAutoClean     bool
 	CleanerInterval      time.Duration // Frequency to enforce retention policy
 	HWCheckpointInterval time.Duration // Frequency to checkpoint HW to disk
 	ConcurrencyControl   bool          // Optimistic Concurrency Control
@@ -114,9 +125,10 @@ func New(opts Options) (CommitLog, error) {
 	cleaner := newDeleteCleaner(cleanerOpts)
 
 	compactCleanerOpts := compactCleanerOptions{
-		Name:          opts.Name,
-		MaxGoroutines: opts.CompactMaxGoroutines,
-		MinAge:        opts.CompactMinAge,
+		Name:               opts.Name,
+		MaxGoroutines:      opts.CompactMaxGoroutines,
+		MinAge:             opts.CompactMinAge,
+		TombstoneRetention: opts.CompactTombstoneRetention,
 	}
 	compactCleaner := newCompactCleaner(compactCleanerOpts)
 
@@ -885,6 +897,9 @@ func (l *commitLog) cleanerLoop() {
 		if split {
 			continue
 		}
+		if l.DisableAutoClean {
+			continue
+		}
 
 		if err := l.Clean(); err != nil {
 			slog.Error(
@@ -896,14 +911,62 @@ func (l *commitLog) cleanerLoop() {
 	}
 }
 
+// CleanSpec parameterizes a transaction-aware clean. The commitlog provides
+// the mechanism; a transactional layer (e.g. durable_streams) supplies the
+// policy: which records' transactions aborted, where the decided prefix
+// ends, and which per-message headers make a record transactional.
+type CleanSpec struct {
+	// Ceiling is the compaction bound: records at or above it are always
+	// retained verbatim and never counted latest-per-key (they may be
+	// undecided). <=0 falls back to the high watermark. Transactional
+	// callers pass their LSO so open transactions can never shadow or be
+	// compacted.
+	Ceiling int64
+	// StripBelow: records strictly below are DECIDED. Compaction removes
+	// control records (AttrControl) below it, removes aborted data records,
+	// and rewrites surviving records with StripHeaders removed — turning
+	// them into plain records that transactional readers pass through
+	// without buffering. Offsets, timestamps, leader epochs, keys, values,
+	// and attribute bits survive the rewrite.
+	StripBelow int64
+	// StripHeaders are the per-message header keys removed below StripBelow
+	// (the transactional layer's pid/epoch/seq). Empty disables stripping
+	// (and marker removal — the two are only safe together).
+	StripHeaders []string
+	// Aborted reports whether the data record at offset belongs to an
+	// aborted transaction. Consulted only below Ceiling; must be safe for
+	// concurrent use. Aborted records are removed and never counted
+	// latest-per-key (an aborted record must not shadow a committed value).
+	Aborted func(offset int64) bool
+	// TombstoneGCBelow: a latest-per-key record carrying AttrTombstone at an
+	// offset strictly below this, whose timestamp is older than
+	// TombstoneRetention, is removed entirely — the key vanishes.
+	TombstoneGCBelow int64
+	// TombstoneRetention guards tombstone GC; zero disables it. Records with
+	// timestamp 0 (pre-stamping logs) are never considered old enough.
+	TombstoneRetention time.Duration
+}
+
 // Clean applies retention and compaction rules against the log, if applicable.
 func (l *commitLog) Clean() error {
+	spec := CleanSpec{}
+	if l.Options.CompactTombstoneRetention > 0 {
+		// Spec-less tombstone GC for non-transactional compacted logs,
+		// bounded like the rest of the spec-less compaction.
+		spec.TombstoneGCBelow = l.HighWatermark()
+		spec.TombstoneRetention = l.Options.CompactTombstoneRetention
+	}
+	return l.CleanWithSpec(spec)
+}
+
+// CleanWithSpec applies retention and a transaction-aware compaction pass.
+func (l *commitLog) CleanWithSpec(spec CleanSpec) error {
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.mu.RLock()
 	oldSegments := l.segments
 	l.mu.RUnlock()
-	cleaned, epochCache, cleanErr := l.clean(oldSegments)
+	cleaned, epochCache, cleanErr := l.clean(spec, oldSegments)
 	if cleaned == nil {
 		return cleanErr
 	}
@@ -951,7 +1014,7 @@ func (l *commitLog) rebaseSegments(from, to []*segment, epochCache *leaderEpochC
 // clean returns the cleaned segments and, if compaction ran, a
 // *leaderEpochCache maintaining the start offset for each new leader epoch. If
 // compaction did not run, the leaderEpochCache will be nil.
-func (l *commitLog) clean(segments []*segment) ([]*segment, *leaderEpochCache, error) {
+func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *leaderEpochCache, error) {
 	cleaned, err := l.deleteCleaner.Clean(segments)
 	if err != nil {
 		// A partial retention failure still hands back the surviving
@@ -961,7 +1024,10 @@ func (l *commitLog) clean(segments []*segment) ([]*segment, *leaderEpochCache, e
 	}
 	var epochCache *leaderEpochCache
 	if l.Compact {
-		compacted, cache, err := l.compactCleaner.Compact(l.HighWatermark(), cleaned)
+		if spec.Ceiling <= 0 {
+			spec.Ceiling = l.HighWatermark()
+		}
+		compacted, cache, err := l.compactCleaner.CompactSpec(spec, cleaned)
 		if err != nil {
 			// Keep the delete stage's result: its removals are already on
 			// disk regardless of the compaction failure.
