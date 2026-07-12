@@ -237,9 +237,10 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *
 		return nil, 0, err
 	}
 	var (
-		ss      = newSegmentScanner(seg)
-		removed = 0
-		now     = timestamp()
+		ss       = newSegmentScanner(seg)
+		removed  = 0
+		stripped = 0
+		now      = timestamp()
 	)
 	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 		var (
@@ -254,12 +255,13 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *
 		}
 		out := []byte(ms)
 		if disp == dispStrip {
-			stripped, changed, err := stripFrame(ms, spec.StripHeaders)
+			sf, changed, err := stripFrame(ms, spec.StripHeaders)
 			if err != nil {
 				return nil, removed, err
 			}
 			if changed {
-				out = stripped
+				out = sf
+				stripped++
 			}
 		}
 		entries := entriesForMessageSet(cleaned.Position(), out)
@@ -277,6 +279,19 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *
 	if cleaned.IsEmpty() {
 		// If the new segment is empty, remove it along with the old one.
 		return nil, removed, cleanupEmptySegment(cleaned, seg)
+	}
+	// CONVERGENCE: a pass that changed nothing keeps the ORIGINAL segment —
+	// no rewrite install, no fsync. Without this every clean rewrote and
+	// fsynced the ENTIRE decided prefix every cadence tick; on a large
+	// steady-state log that is gigabytes of writes every few minutes, and
+	// the commit path's own fsyncs queue behind the storm (measured as
+	// multi-second commit stalls). Compacted+stripped segments reach this
+	// fixed point after one pass.
+	if removed == 0 && stripped == 0 {
+		if err := cleaned.Delete(); err != nil {
+			return nil, 0, err
+		}
+		return seg, 0, nil
 	}
 	// The rewrite may hold the ONLY remaining copy of latest-per-key data;
 	// make it durable before it replaces the source segment.
