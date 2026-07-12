@@ -326,6 +326,13 @@ func (l *commitLog) NewestOffset() int64 {
 	return l.activeSegment().NextOffset() - 1
 }
 
+// ActiveSegmentBase returns the base offset of the active (unsealed) segment.
+// Cleaning passes only rewrite segments sealed before they start, so offsets
+// at or above this value are untouched by any concurrently running clean.
+func (l *commitLog) ActiveSegmentBase() int64 {
+	return l.activeSegment().BaseOffset
+}
+
 // OldestOffset returns the offset of the first message in the log or -1 if
 // empty.
 func (l *commitLog) OldestOffset() int64 {
