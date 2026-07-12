@@ -79,6 +79,10 @@ type CommitLog interface {
 	// applicable.
 	Clean() error
 
+	// CleanWithSpec applies retention and a transaction-aware compaction
+	// pass parameterized by the caller (see CleanSpec).
+	CleanWithSpec(spec CleanSpec) error
+
 	// NotifyLEO registers and returns a channel which is closed when messages
 	// past the given log end offset are added to the log. If the given offset
 	// is no longer the log end offset, the channel is closed immediately.
