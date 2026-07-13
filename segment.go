@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ligustah/commitlog/compress"
@@ -893,6 +894,12 @@ func (s *segment) Delete() error {
 			return err
 		}
 	}
+	// A final segment (no working suffix) also owns a key-digest sidecar;
+	// suffixed working copies (.cleaned/.truncated/.trimmed) share the base
+	// offset with the real segment and must not remove its digest.
+	if s.suffix == "" {
+		removeKeyDigest(s)
+	}
 	return nil
 }
 
@@ -901,7 +908,12 @@ type segmentScanner struct {
 	pos int64
 }
 
+// segmentScans counts scanner constructions; tests assert on it to prove a
+// converged clean touches no sealed segment's records.
+var segmentScans atomic.Int64
+
 func newSegmentScanner(segment *segment) *segmentScanner {
+	segmentScans.Add(1)
 	return &segmentScanner{s: segment}
 }
 

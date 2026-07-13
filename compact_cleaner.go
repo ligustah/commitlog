@@ -1,7 +1,9 @@
 package commitlog
 
 import (
+	"bytes"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -86,39 +88,72 @@ func (c *compactCleaner) CompactSpec(spec CleanSpec, segments []*segment) ([]*se
 
 }
 
-type keyOffset struct {
-	sync.RWMutex
-	offset int64
+// dropSet is a per-segment bitmap of record offsets the merge decided to
+// remove (superseded copies and expired tombstones). One bit per offset in
+// [base, next) — the whole log's drop state costs bits-per-record instead of
+// the map-of-every-key the pre-digest cleaner materialized (which transiently
+// allocated >1GB on large logs).
+type dropSet struct {
+	base  int64
+	bits  []uint64
+	count int
 }
 
-func (k *keyOffset) set(offset int64) {
-	k.Lock()
-	if offset > k.offset {
-		k.offset = offset
+func newDropSet(base, next int64) *dropSet {
+	n := next - base
+	if n < 0 {
+		n = 0
 	}
-	k.Unlock()
+	return &dropSet{base: base, bits: make([]uint64, (n+63)/64)}
 }
 
-func (k *keyOffset) get() int64 {
-	k.RLock()
-	defer k.RUnlock()
-	return k.offset
+func (d *dropSet) set(off int64) {
+	i := off - d.base
+	if i < 0 || i >= int64(len(d.bits))*64 {
+		return
+	}
+	w, b := i/64, uint(i%64)
+	if d.bits[w]&(1<<b) == 0 {
+		d.bits[w] |= 1 << b
+		d.count++
+	}
+}
+
+func (d *dropSet) get(off int64) bool {
+	if d == nil {
+		return false
+	}
+	i := off - d.base
+	if i < 0 || i >= int64(len(d.bits))*64 {
+		return false
+	}
+	return d.bits[i/64]&(1<<uint(i%64)) != 0
 }
 
 func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segment,
 	*leaderEpochCache, int, error) {
 
-	// Compact messages up to the last segment or the spec ceiling, whichever
-	// is first, by scanning keys and retaining only the latest.
+	// Latest-per-key is computed by a streaming merge over per-segment sorted
+	// key digests (persistent sidecars for sealed segments, in-memory for the
+	// active one) into per-segment drop bitsets. Segments whose digest proves
+	// the pass would change nothing are kept without reading a single record.
+	digests, err := c.loadOrBuildDigests(segments)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	merged, err := c.mergeDigests(spec, segments, digests)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
 	var (
 		compacted  = make([]*segment, 0, len(segments))
 		epochCache = newLeaderEpochCacheNoFile(c.Name)
 		removed    = 0
-		keyOffsets = c.scanKeys(spec, segments)
 	)
 
 	// A protected compaction horizon: a segment whose newest write is within
-	// MinAge is kept intact. keyOffsets still records the latest offset per key
+	// MinAge is kept intact. The merge still records the latest offset per key
 	// across all segments (including protected ones), so compacting an older
 	// segment correctly drops a key whose latest copy lives in a protected recent
 	// segment. Segments are ordered oldest→newest, so protection naturally covers
@@ -128,15 +163,35 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		horizon = timestamp() - int64(c.MinAge)
 	}
 
+	feedEpochs := func(d *keyDigest) error {
+		for _, e := range d.epochs {
+			if e.epoch > epochCache.LastLeaderEpoch() {
+				if err := epochCache.Assign(e.epoch, e.firstOffset); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
 	// Write new segments. Skip the last segment since we will not compact it.
 	// TODO: Join segments that are below the bytes limit.
-	for _, seg := range segments[:len(segments)-1] {
+	for i, seg := range segments[:len(segments)-1] {
 		if horizon > 0 && seg.LastWriteTime() > horizon {
 			// Within the protected horizon — keep whole.
 			compacted = append(compacted, seg)
 			continue
 		}
-		cleaned, msgsRemoved, err := c.cleanSegment(spec, seg, keyOffsets, epochCache)
+		if c.canSkip(spec, digests[i], merged, i) {
+			// Digest proves a rewrite would keep every record byte-for-byte:
+			// converged without reading the segment.
+			compacted = append(compacted, seg)
+			if err := feedEpochs(digests[i]); err != nil {
+				return nil, nil, 0, err
+			}
+			continue
+		}
+		cleaned, msgsRemoved, err := c.cleanSegment(spec, seg, merged.drops[i], epochCache)
 		if err != nil {
 			return nil, nil, 0, err
 		}
@@ -146,22 +201,227 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		removed += msgsRemoved
 	}
 
-	// Add the last segment back in to the compacted list.
+	// Add the last segment back in to the compacted list and feed its epoch
+	// assignments (its digest covers every record).
 	last := segments[len(segments)-1]
 	compacted = append(compacted, last)
-
-	// Maintain start offset for each new leader epoch for the last segment.
-	ss := newSegmentScanner(last)
-	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
-		leaderEpoch := ms.LeaderEpoch()
-		if leaderEpoch > epochCache.LastLeaderEpoch() {
-			if err := epochCache.Assign(leaderEpoch, ms.Offset()); err != nil {
-				return nil, nil, 0, err
-			}
-		}
+	if err := feedEpochs(digests[len(segments)-1]); err != nil {
+		return nil, nil, 0, err
 	}
 
 	return compacted, epochCache, removed, nil
+}
+
+// mergeResult carries the merge's per-segment decisions.
+type mergeResult struct {
+	// drops[i]: offsets in segment i removed as superseded or as expired
+	// tombstones. nil when nothing in the segment is dropped.
+	drops []*dropSet
+	// abortedKeyed[i]: segment i holds a keyed data record below the ceiling
+	// that spec.Aborted marks — removal work exists even without drops.
+	abortedKeyed []bool
+	// stripKeyed[i]: segment i holds a keyed data record below StripBelow
+	// that still carries headers — strip work MAY exist (see stamp).
+	stripKeyed []bool
+}
+
+// mergeDigests streams all digests' keyed sections in key order and marks
+// superseded copies (and expired tombstones) in per-segment drop bitsets.
+// Only records at or below the ceiling participate — an undecided record
+// above it can neither shadow a committed value nor be dropped.
+func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
+	digests []*keyDigest) (*mergeResult, error) {
+
+	res := &mergeResult{
+		drops:        make([]*dropSet, len(segments)),
+		abortedKeyed: make([]bool, len(segments)),
+		stripKeyed:   make([]bool, len(segments)),
+	}
+	drop := func(i int, off int64) {
+		if res.drops[i] == nil {
+			res.drops[i] = newDropSet(segments[i].BaseOffset, segments[i].NextOffset())
+		}
+		res.drops[i].set(off)
+	}
+
+	its := make([]*digestIter, len(digests))
+	for i, d := range digests {
+		its[i] = newDigestIter(d)
+		if !its[i].next() {
+			its[i] = nil // empty keyed section
+		}
+	}
+
+	var (
+		now         = timestamp()
+		stripActive = spec.StripBelow > 0 && len(spec.StripHeaders) > 0
+		gcActive    = spec.TombstoneRetention > 0
+		// scratch: participants of the current key across segments
+		partSeg []int
+		partRec []digestRec
+	)
+	for {
+		// Find the smallest current key across iterators.
+		minIdx := -1
+		for i, it := range its {
+			if it == nil {
+				continue
+			}
+			if minIdx == -1 || bytes.Compare(it.key, its[minIdx].key) < 0 {
+				minIdx = i
+			}
+		}
+		if minIdx == -1 {
+			break
+		}
+		minKey := its[minIdx].key
+
+		// Gather every segment's records for this key; compute the latest
+		// decided, non-aborted copy while noting per-segment work signals.
+		partSeg = partSeg[:0]
+		partRec = partRec[:0]
+		var (
+			latestOff int64 = -1
+			latestIdx int
+			latestRec digestRec
+		)
+		for i, it := range its {
+			if it == nil || !bytes.Equal(it.key, minKey) {
+				continue
+			}
+			for _, r := range it.recs {
+				if stripActive && r.offset < spec.StripBelow && r.flags&digestFlagHasHeaders != 0 {
+					res.stripKeyed[i] = true
+				}
+				if r.offset > spec.Ceiling {
+					continue
+				}
+				if spec.Aborted != nil && spec.Aborted(r.offset) {
+					// Aborted copies never shadow a committed value at any
+					// decided offset; the pass removes them only below the
+					// ceiling (the record AT the ceiling is always retained).
+					if r.offset < spec.Ceiling {
+						res.abortedKeyed[i] = true
+					}
+					continue
+				}
+				partSeg = append(partSeg, i)
+				partRec = append(partRec, r)
+				if r.offset > latestOff {
+					latestOff, latestIdx, latestRec = r.offset, i, r
+				}
+			}
+			if !it.next() {
+				its[i] = nil
+			}
+		}
+		if latestOff < 0 {
+			continue
+		}
+		// Superseded copies strictly below the ceiling are dropped (the
+		// record AT the ceiling is always the latest for its key).
+		for j, segIdx := range partSeg {
+			if off := partRec[j].offset; off != latestOff && off < spec.Ceiling {
+				drop(segIdx, off)
+			}
+		}
+		// The surviving copy itself: an expired tombstone vanishes.
+		if gcActive && latestRec.flags&digestFlagTombstone != 0 &&
+			latestOff < spec.TombstoneGCBelow && latestRec.ts > 0 &&
+			latestRec.ts < now-int64(spec.TombstoneRetention) {
+			drop(latestIdx, latestOff)
+		}
+	}
+	return res, nil
+}
+
+// canSkip reports whether a rewrite of segment i would provably keep every
+// record unchanged, letting the pass keep the original file without reading
+// it. Any doubt returns false — the segment then goes through cleanSegment,
+// whose scan refreshes the digest (and its strip stamp) so the doubt is
+// resolved for future passes.
+func (c *compactCleaner) canSkip(spec CleanSpec, d *keyDigest, m *mergeResult, i int) bool {
+	if m.drops[i] != nil && m.drops[i].count > 0 {
+		return false
+	}
+	if m.abortedKeyed[i] {
+		return false
+	}
+	stripActive := spec.StripBelow > 0 && len(spec.StripHeaders) > 0
+	if stripActive {
+		// Markers below the strip boundary are removed by the pass.
+		for _, off := range d.control {
+			if off < spec.StripBelow {
+				return false
+			}
+		}
+		// Data records below the boundary that still carry headers might
+		// carry the strip targets — only a scan (recorded in the stamp) can
+		// prove otherwise.
+		if m.stripKeyed[i] && !d.stripStampCovers(spec.StripBelow, spec.StripHeaders) {
+			return false
+		}
+		for _, r := range d.unkeyed {
+			if r.offset < spec.StripBelow && r.flags&digestFlagHasHeaders != 0 &&
+				!d.stripStampCovers(spec.StripBelow, spec.StripHeaders) {
+				return false
+			}
+		}
+	}
+	if spec.Aborted != nil {
+		for _, r := range d.unkeyed {
+			if r.offset < spec.Ceiling && spec.Aborted(r.offset) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// loadOrBuildDigests returns a digest per segment: persisted sidecars for
+// sealed segments (built and installed when missing or stale), an in-memory
+// one for the active tail. Builds run on the cleaner's worker pool.
+func (c *compactCleaner) loadOrBuildDigests(segments []*segment) ([]*keyDigest, error) {
+	var (
+		digests = make([]*keyDigest, len(segments))
+		errs    = make([]error, len(segments))
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, c.MaxGoroutines)
+	)
+	for i, seg := range segments {
+		sealed := i < len(segments)-1
+		if sealed {
+			if d := loadKeyDigest(seg); d != nil {
+				digests[i] = d
+				continue
+			}
+		}
+		wg.Add(1)
+		go func(i int, seg *segment, persist bool) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			d, err := buildKeyDigest(seg)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			digests[i] = d
+			if persist {
+				if werr := writeKeyDigest(seg, d); werr != nil {
+					slog.Warn("key digest write failed; will rebuild next clean",
+						slog.String("name", c.Name), slog.String("err", werr.Error()))
+				}
+			}
+		}(i, seg, sealed)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return digests, nil
 }
 
 // disposition classifies one message under a CleanSpec.
@@ -173,11 +433,12 @@ const (
 	dispStrip                     // retain, rewritten without StripHeaders
 )
 
-// classify decides a message's fate. keyOffsets must have been built by
-// scanKeys under the SAME spec (aborted/control/nil-key/above-ceiling records
-// are absent from it, so they can never shadow a committed value).
+// classify decides a message's fate. drops must have been produced by
+// mergeDigests under the SAME spec: it holds superseded copies and expired
+// tombstones (aborted/control/nil-key/above-ceiling records never enter it,
+// so they can never shadow a committed value).
 func (c *compactCleaner) classify(spec CleanSpec, offset int64, msg SerializedMessage,
-	ts int64, keyOffsets *sync.Map, now int64) disposition {
+	drops *dropSet) disposition {
 
 	// At or above the ceiling: possibly undecided — always retained.
 	if offset >= spec.Ceiling {
@@ -207,20 +468,8 @@ func (c *compactCleaner) classify(spec CleanSpec, offset int64, msg SerializedMe
 		}
 		return dispRetain
 	}
-	latest, ok := keyOffsets.Load(string(key))
-	if !ok || offset != latest.(*keyOffset).get() {
-		// Superseded by a newer copy of the key (or, !ok, unreachable for a
-		// scanned record — treat conservatively as superseded only when a
-		// newer copy is known).
-		if ok {
-			return dispRemove
-		}
-		return dispRetain
-	}
-	// Latest copy of its key. Expired tombstone → the key vanishes.
-	if attrs&AttrTombstone != 0 && spec.TombstoneRetention > 0 &&
-		offset < spec.TombstoneGCBelow && ts > 0 &&
-		ts < now-int64(spec.TombstoneRetention) {
+	if drops.get(offset) {
+		// Superseded by a newer copy of the key, or an expired tombstone.
 		return dispRemove
 	}
 	if offset < spec.StripBelow && len(spec.StripHeaders) > 0 {
@@ -229,7 +478,7 @@ func (c *compactCleaner) classify(spec CleanSpec, offset int64, msg SerializedMe
 	return dispRetain
 }
 
-func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *sync.Map,
+func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropSet,
 	epochCache *leaderEpochCache) (*segment, int, error) {
 
 	cleaned, err := seg.Cleaned()
@@ -237,10 +486,14 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *
 		return nil, 0, err
 	}
 	var (
-		ss       = newSegmentScanner(seg)
-		removed  = 0
-		stripped = 0
-		now      = timestamp()
+		ss          = newSegmentScanner(seg)
+		removed     = 0
+		stripped    = 0
+		stripActive = spec.StripBelow > 0 && len(spec.StripHeaders) > 0
+		// Does any surviving record still carry a strip-target header (i.e.
+		// sits at/above StripBelow with one present)? Decides how far the
+		// refreshed digest's strip stamp may reach.
+		residualStrippable = false
 	)
 	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 		var (
@@ -248,7 +501,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *
 			leaderEpoch = ms.LeaderEpoch()
 			msg         = ms.Message()
 		)
-		disp := c.classify(spec, offset, msg, ms.Timestamp(), keyOffsets, now)
+		disp := c.classify(spec, offset, msg, drops)
 		if disp == dispRemove {
 			removed++
 			continue
@@ -263,6 +516,9 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *
 				out = sf
 				stripped++
 			}
+		} else if stripActive && msg.Attributes()&AttrControl == 0 &&
+			offset >= spec.StripBelow && hasAnyHeader(msg, spec.StripHeaders) {
+			residualStrippable = true
 		}
 		entries := entriesForMessageSet(cleaned.Position(), out)
 		if err := cleaned.WriteMessageSet(out, entries); err != nil {
@@ -280,17 +536,33 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *
 		// If the new segment is empty, remove it along with the old one.
 		return nil, removed, cleanupEmptySegment(cleaned, seg)
 	}
+	// After either outcome the segment's digest is refreshed with a strip
+	// stamp recording what this scan proved, so the NEXT pass can skip the
+	// segment without reading it. MaxInt64 = no surviving record anywhere
+	// carries a strip target; else verified only below this pass's boundary.
+	stamp := int64(-1)
+	var stampHdrs []string
+	if stripActive {
+		stampHdrs = spec.StripHeaders
+		if residualStrippable {
+			stamp = spec.StripBelow
+		} else {
+			stamp = int64(math.MaxInt64)
+		}
+	}
 	// CONVERGENCE: a pass that changed nothing keeps the ORIGINAL segment —
 	// no rewrite install, no fsync. Without this every clean rewrote and
 	// fsynced the ENTIRE decided prefix every cadence tick; on a large
 	// steady-state log that is gigabytes of writes every few minutes, and
 	// the commit path's own fsyncs queue behind the storm (measured as
 	// multi-second commit stalls). Compacted+stripped segments reach this
-	// fixed point after one pass.
+	// fixed point after one pass — and the refreshed digest lets later
+	// passes prove it without the scan this pass just paid.
 	if removed == 0 && stripped == 0 {
 		if err := cleaned.Delete(); err != nil {
 			return nil, 0, err
 		}
+		c.refreshDigest(seg, stamp, stampHdrs)
 		return seg, 0, nil
 	}
 	// The rewrite may hold the ONLY remaining copy of latest-per-key data;
@@ -302,7 +574,38 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, keyOffsets *
 	if err = cleaned.Replace(seg); err != nil {
 		return nil, removed, err
 	}
+	c.refreshDigest(cleaned, stamp, stampHdrs)
 	return cleaned, removed, nil
+}
+
+// refreshDigest rebuilds and persists a segment's key digest after a clean
+// pass scanned it, carrying the strip stamp the scan established. Best-effort:
+// a failure only costs the next clean a scan.
+func (c *compactCleaner) refreshDigest(seg *segment, stamp int64, stampHdrs []string) {
+	d, err := buildKeyDigest(seg)
+	if err == nil {
+		d.stripVerifiedBelow = stamp
+		d.stripHdrs = stampHdrs
+		err = writeKeyDigest(seg, d)
+	}
+	if err != nil {
+		slog.Warn("key digest refresh failed; will rebuild next clean",
+			slog.String("name", c.Name), slog.String("err", err.Error()))
+	}
+}
+
+// hasAnyHeader reports whether the message carries any of the given headers.
+func hasAnyHeader(msg SerializedMessage, hdrs []string) bool {
+	have := msg.Headers()
+	if len(have) == 0 {
+		return false
+	}
+	for _, h := range hdrs {
+		if _, ok := have[h]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // stripFrame re-encodes the message inside a frame without the given header
@@ -348,77 +651,16 @@ func stripFrame(ms messageSet, headers []string) ([]byte, bool, error) {
 	return frame, true, nil
 }
 
-// scanKeys builds the latest-offset-per-key map under the spec: control
-// records, nil-key records, aborted records, and records at or above the
-// ceiling never enter the map — so none of them can shadow (and thereby
-// delete) a committed value.
-func (c *compactCleaner) scanKeys(spec CleanSpec, segments []*segment) *sync.Map {
-	var (
-		wg            sync.WaitGroup
-		keyOffsets    = new(sync.Map)
-		numGoroutines = c.MaxGoroutines
-		segmentC      = make(chan *segment, len(segments))
-	)
-	if numGoroutines > len(segments) {
-		numGoroutines = len(segments)
-	}
-
-	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
-		go c.scanSegments(spec, segmentC, &wg, keyOffsets)
-	}
-
-	for _, seg := range segments {
-		segmentC <- seg
-	}
-	close(segmentC)
-
-	wg.Wait()
-	return keyOffsets
-}
-
-func (c *compactCleaner) scanSegments(spec CleanSpec, ch <-chan *segment, wg *sync.WaitGroup, keyOffsets *sync.Map) {
-	for seg := range ch {
-		ss := newSegmentScanner(seg)
-		for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
-			offset := ms.Offset()
-			if offset > spec.Ceiling {
-				// Offsets within a segment are ordered; the rest of this
-				// segment is above the ceiling too. The record AT the
-				// ceiling is decided (ceiling = LSO / HW) and participates,
-				// matching the pre-spec scan boundary exactly.
-				break
-			}
-			msg := ms.Message()
-			if msg.Attributes()&AttrControl != 0 {
-				continue
-			}
-			if spec.Aborted != nil && spec.Aborted(offset) {
-				continue
-			}
-			key := msg.Key()
-			if key == nil {
-				continue
-			}
-			curr, loaded := keyOffsets.LoadOrStore(
-				string(key), &keyOffset{offset: offset})
-			if loaded {
-				curr.(*keyOffset).set(offset)
-			}
-		}
-	}
-	wg.Done()
-}
-
 func cleanupEmptySegment(new, old *segment) error {
 	// Delete the new segment if it's empty.
 	if err := new.Delete(); err != nil {
 		return err
 	}
 	// Also delete the old segment since it's been compacted. Set the replaced
-	// flag since this is in the read path.
+	// flag since this is in the read path. Its digest goes with it.
 	old.Lock()
 	old.replaced = true
 	old.Unlock()
+	removeKeyDigest(old)
 	return old.Delete()
 }
