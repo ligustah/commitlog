@@ -2,6 +2,7 @@
 package commitlog
 
 import (
+	"context"
 	"io"
 	"io/ioutil"
 	"log/slog"
@@ -324,6 +325,58 @@ func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int
 // empty.
 func (l *commitLog) NewestOffset() int64 {
 	return l.activeSegment().NextOffset() - 1
+}
+
+// RecoverTail reconciles the high watermark with the log's REAL tail after a
+// crash. The HW checkpoint is periodic (≤ HWCheckpointInterval stale), so a
+// reopened log can hold committed, previously-SERVED records above it;
+// truncating to the checkpoint (the old recovery) retroactively unwrote them
+// — re-emission after replay consolidates batches differently, so tailing
+// consumers were left holding rows the new history never retracts, and
+// offset markers persisted elsewhere (state WALs) overstated the truncated
+// tail. Instead, walk the suffix above the checkpoint: every structurally
+// valid record is recovered (visibility above the HW stays gated by
+// transaction markers — a dangling open tx is aborted by recovery exactly as
+// before); only a torn suffix (power loss mid-write) is truncated.
+func (l *commitLog) RecoverTail() error {
+	hw := l.HighWatermark()
+	newest := l.NewestOffset()
+	if newest <= hw {
+		return nil
+	}
+	start := hw + 1
+	if oldest := l.OldestOffset(); oldest >= 0 && start < oldest {
+		start = oldest
+	}
+	r, err := l.NewReader(start, true)
+	if err != nil {
+		// Nothing readable above the checkpoint: keep the old amputation.
+		return l.Truncate(hw + 1)
+	}
+	lastGood := hw
+	headers := make([]byte, 28)
+	ctx := context.Background()
+	for {
+		_, off, _, _, rerr := r.ReadMessage(ctx, headers)
+		if rerr != nil {
+			if errors.Is(rerr, ErrCommitLogReadonly) {
+				break
+			}
+			// Torn suffix: keep everything before it, drop the rest.
+			if terr := l.Truncate(lastGood + 1); terr != nil {
+				return terr
+			}
+			break
+		}
+		lastGood = off
+		if off >= newest {
+			break
+		}
+	}
+	if lastGood > hw {
+		l.SetHighWatermark(lastGood)
+	}
+	return nil
 }
 
 // ActiveSegmentBase returns the base offset of the active (unsealed) segment.
