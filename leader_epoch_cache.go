@@ -56,6 +56,9 @@ func newLeaderEpochCache(name, path string) (*leaderEpochCache, error) {
 			return nil, pkgErrors.Wrap(err, "failed to open leader epoch offsets file")
 		}
 		epochs, err = readLeaderEpochOffsets(f)
+		// Close BEFORE the error check: a leaked handle blocks the atomic
+		// checkpoint replace on Windows for the rest of the process.
+		f.Close()
 		if err != nil {
 			return nil, pkgErrors.Wrap(err, "failed to read leader epoch offsets file")
 		}
