@@ -382,11 +382,21 @@ func (c *compactCleaner) canSkip(spec CleanSpec, d *keyDigest, m *mergeResult, i
 // sealed segments (built and installed when missing or stale), an in-memory
 // one for the active tail. Builds run on the cleaner's worker pool.
 func (c *compactCleaner) loadOrBuildDigests(segments []*segment) ([]*keyDigest, error) {
+	// Build concurrency is capped at 2, NOT MaxGoroutines: each build holds a
+	// transient per-segment key map, and the post-restart first clean can owe
+	// digests for every segment the catch-up burst sealed — 10 concurrent
+	// ~40MB maps measured >1GB on a 12h soak. Cleans no longer block appends
+	// (Stream.cleanMu split), so slower builds cost nothing on the commit
+	// path; peak memory is what matters.
+	buildConc := 2
+	if c.MaxGoroutines < buildConc {
+		buildConc = c.MaxGoroutines
+	}
 	var (
 		digests = make([]*keyDigest, len(segments))
 		errs    = make([]error, len(segments))
 		wg      sync.WaitGroup
-		sem     = make(chan struct{}, c.MaxGoroutines)
+		sem     = make(chan struct{}, buildConc)
 	)
 	for i, seg := range segments {
 		sealed := i < len(segments)-1
