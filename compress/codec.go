@@ -34,8 +34,18 @@ const (
 )
 
 var (
-	zstdEnc, _ = zstd.NewWriter(nil)
-	zstdDec, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0))
+	// Bounded encoder/decoder state: the library defaults size their lane
+	// pools by GOMAXPROCS with multi-MB windows — hundreds of MB of standing
+	// memory on a many-core box (measured as a ~750MB daemon baseline in the
+	// sqlcdc soak the day zstd was enabled). Commitlog blocks are small; a
+	// 1MB window loses nothing, and 2/4 lanes keep encode/decode concurrent
+	// enough for an IO-bound log.
+	zstdEnc, _ = zstd.NewWriter(nil,
+		zstd.WithEncoderConcurrency(2),
+		zstd.WithWindowSize(1<<20))
+	zstdDec, _ = zstd.NewReader(nil,
+		zstd.WithDecoderConcurrency(4),
+		zstd.WithDecoderLowmem(true))
 )
 
 // Compress returns the compressed form of src. It never mutates src.
