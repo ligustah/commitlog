@@ -41,16 +41,33 @@ func TestKeyDigestRoundtrip(t *testing.T) {
 	require.Equal(t, d.control, got.control)
 	require.Equal(t, d.epochs, got.epochs)
 
-	// Iteration streams sorted keys with intact recs.
-	it := newDigestIter(got)
+	// A loaded digest streams its keyed section from disk.
+	require.Nil(t, got.keyed, "loaded digest must not retain keyed bytes")
+	require.NotEmpty(t, got.path)
+
+	// Iteration streams sorted keys with intact recs — and must agree
+	// entry-for-entry between the in-memory build and the disk stream.
+	it, err := newDigestIter(got)
+	require.NoError(t, err)
+	defer it.close()
+	mem, err := newDigestIter(d)
+	require.NoError(t, err)
 	var prev []byte
+	n := 0
 	for it.next() {
+		require.True(t, mem.next())
+		require.Equal(t, mem.key, it.key)
+		require.Equal(t, mem.recs, it.recs)
 		if prev != nil {
 			require.Negative(t, bytes.Compare(prev, it.key), "keys must be sorted")
 		}
 		prev = append(prev[:0], it.key...)
 		require.NotEmpty(t, it.recs)
+		n++
 	}
+	require.NoError(t, it.err())
+	require.False(t, mem.next())
+	require.Equal(t, d.nKeys, n)
 }
 
 // A digest that does not bind to the segment's current content (wrong base,

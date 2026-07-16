@@ -245,9 +245,27 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 	}
 
 	its := make([]*digestIter, len(digests))
+	all := make([]*digestIter, len(digests))
+	defer func() {
+		// Release sidecar handles before any segment rewrite: refreshDigest
+		// renames over .keys files and Windows refuses that while open.
+		for _, it := range all {
+			if it != nil {
+				it.close()
+			}
+		}
+	}()
 	for i, d := range digests {
-		its[i] = newDigestIter(d)
-		if !its[i].next() {
+		it, err := newDigestIter(d)
+		if err != nil {
+			return nil, err
+		}
+		all[i] = it
+		its[i] = it
+		if !it.next() {
+			if err := it.err(); err != nil {
+				return nil, err
+			}
 			its[i] = nil // empty keyed section
 		}
 	}
@@ -259,6 +277,7 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 		// scratch: participants of the current key across segments
 		partSeg []int
 		partRec []digestRec
+		minKey  []byte
 	)
 	for {
 		// Find the smallest current key across iterators.
@@ -274,7 +293,9 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 		if minIdx == -1 {
 			break
 		}
-		minKey := its[minIdx].key
+		// Copy: an iterator's key is only valid until its next(), and the
+		// gather loop below advances the very iterator minKey came from.
+		minKey = append(minKey[:0], its[minIdx].key...)
 
 		// Gather every segment's records for this key; compute the latest
 		// decided, non-aborted copy while noting per-segment work signals.
@@ -312,6 +333,9 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 				}
 			}
 			if !it.next() {
+				if err := it.err(); err != nil {
+					return nil, err
+				}
 				its[i] = nil
 			}
 		}
@@ -421,6 +445,11 @@ func (c *compactCleaner) loadOrBuildDigests(segments []*segment) ([]*keyDigest, 
 				if werr := writeKeyDigest(seg, d); werr != nil {
 					slog.Warn("key digest write failed; will rebuild next clean",
 						slog.String("name", c.Name), slog.String("err", werr.Error()))
+				} else if ld := loadKeyDigest(seg); ld != nil {
+					// Swap to the streaming form so the merge doesn't retain
+					// this build's keyed bytes (post-restart first cleans can
+					// owe a digest for every catch-up segment at once).
+					digests[i] = ld
 				}
 			}
 		}(i, seg, sealed)

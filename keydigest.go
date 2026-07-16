@@ -1,10 +1,12 @@
 package commitlog
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,11 +61,19 @@ type keyDigest struct {
 	stripVerifiedBelow int64
 	stripHdrs          []string
 
-	epochs  []digestEpoch
-	keyed   []byte // encoded keyed section, entries sorted by key
-	nKeys   int
-	unkeyed []digestRec // offsets ascending
-	control []int64     // offsets ascending
+	epochs []digestEpoch
+	// The keyed section (entries sorted by key) lives in exactly one of two
+	// places: freshly built digests hold the encoded bytes in `keyed`; loaded
+	// sidecars record only the section's file position (path/keyedOff/
+	// keyedLen) and iteration streams it from disk, so a clean never holds
+	// every segment's keys in memory at once.
+	keyed    []byte
+	path     string
+	keyedOff int64
+	keyedLen int
+	nKeys    int
+	unkeyed  []digestRec // offsets ascending
+	control  []int64     // offsets ascending
 }
 
 func digestPath(seg *segment) string {
@@ -368,7 +378,17 @@ func loadKeyDigest(seg *segment) *keyDigest {
 	}
 	d.nKeys = int(r.uvarint())
 	keyedLen := r.uvarint()
-	d.keyed = r.bytes(int(keyedLen))
+	if r.err != nil || keyedLen > uint64(len(body)) {
+		return nil
+	}
+	// Don't retain the keyed bytes — remember where they live and stream
+	// them at merge time. CRC over the whole file was already verified, and
+	// the sidecar is immutable for the duration of a clean (single cleaner;
+	// rewrites replace the file only after the merge).
+	d.path = digestPath(seg)
+	d.keyedOff = int64(r.pos)
+	d.keyedLen = int(keyedLen)
+	r.bytes(int(keyedLen))
 	nUnkeyed := r.uvarint()
 	if r.err != nil || nUnkeyed > uint64(len(body)) {
 		return nil
@@ -401,40 +421,145 @@ func loadKeyDigest(seg *segment) *keyDigest {
 // ---- iteration (keyed section) ----
 
 // digestIter streams a digest's keyed entries in key order. key and recs are
-// valid until the next call to next().
+// valid until the next call to next(). Freshly built digests iterate their
+// in-memory bytes; loaded sidecars stream the keyed section from disk, so a
+// merge across N segments holds N read buffers, not N keyed sections.
 type digestIter struct {
-	d    *digestDecoder
+	d    *digestDecoder // in-memory mode
+	br   *bufio.Reader  // stream mode
+	f    *os.File
+	rerr error
 	base int64
 	bTs  int64
 	rem  int
 
-	key  []byte
-	recs []digestRec
+	key    []byte
+	keyBuf []byte
+	recs   []digestRec
 }
 
-func newDigestIter(d *keyDigest) *digestIter {
-	return &digestIter{
-		d:    &digestDecoder{data: d.keyed},
-		base: d.base,
-		bTs:  d.baseTs,
-		rem:  d.nKeys,
+func newDigestIter(d *keyDigest) (*digestIter, error) {
+	it := &digestIter{base: d.base, bTs: d.baseTs, rem: d.nKeys}
+	if d.keyed != nil || d.path == "" || d.nKeys == 0 {
+		it.d = &digestDecoder{data: d.keyed}
+		return it, nil
 	}
+	f, err := os.Open(d.path)
+	if err != nil {
+		return nil, errors.Wrap(err, "open key digest for merge")
+	}
+	if _, err := f.Seek(d.keyedOff, io.SeekStart); err != nil {
+		f.Close() // nolint: errcheck
+		return nil, errors.Wrap(err, "seek key digest keyed section")
+	}
+	it.f = f
+	it.br = bufio.NewReaderSize(f, 64<<10)
+	return it, nil
+}
+
+// close releases the sidecar file handle. Must run before the clean rewrites
+// any digest: Windows won't rename over a file that is still open.
+func (it *digestIter) close() {
+	if it.f != nil {
+		it.f.Close() // nolint: errcheck — read-only handle
+		it.f = nil
+	}
+}
+
+// err reports a read/decode failure. Exhaustion-by-error is safe for the
+// merge (unseen copies are merely not dropped) but callers surface it so a
+// clean never silently under-compacts.
+func (it *digestIter) err() error {
+	if it.rerr != nil {
+		return it.rerr
+	}
+	if it.d != nil {
+		return it.d.err
+	}
+	return nil
+}
+
+func (it *digestIter) uvarint() uint64 {
+	if it.d != nil {
+		return it.d.uvarint()
+	}
+	if it.rerr != nil {
+		return 0
+	}
+	v, err := binary.ReadUvarint(it.br)
+	if err != nil {
+		it.rerr = err
+		return 0
+	}
+	return v
+}
+
+func (it *digestIter) varint() int64 {
+	if it.d != nil {
+		return it.d.varint()
+	}
+	if it.rerr != nil {
+		return 0
+	}
+	v, err := binary.ReadVarint(it.br)
+	if err != nil {
+		it.rerr = err
+		return 0
+	}
+	return v
+}
+
+func (it *digestIter) readByte() byte {
+	if it.d != nil {
+		return it.d.byte()
+	}
+	if it.rerr != nil {
+		return 0
+	}
+	b, err := it.br.ReadByte()
+	if err != nil {
+		it.rerr = err
+		return 0
+	}
+	return b
+}
+
+func (it *digestIter) readKey(n int) []byte {
+	if it.d != nil {
+		return it.d.bytes(n)
+	}
+	if it.rerr != nil {
+		return nil
+	}
+	if cap(it.keyBuf) < n {
+		it.keyBuf = make([]byte, n)
+	}
+	it.keyBuf = it.keyBuf[:n]
+	if _, err := io.ReadFull(it.br, it.keyBuf); err != nil {
+		it.rerr = err
+		return nil
+	}
+	return it.keyBuf
 }
 
 func (it *digestIter) next() bool {
-	if it.rem == 0 || it.d.err != nil {
+	if it.rem == 0 || it.err() != nil {
 		return false
 	}
 	it.rem--
-	klen := it.d.uvarint()
-	it.key = it.d.bytes(int(klen))
-	n := it.d.uvarint()
+	klen := it.uvarint()
+	if klen > 1<<24 { // CRC-verified data can't sanely reach this; guard the alloc
+		it.rerr = errIndexCorrupt
+		return false
+	}
+	it.key = it.readKey(int(klen))
+	n := it.uvarint()
 	it.recs = it.recs[:0]
 	for i := uint64(0); i < n; i++ {
-		off := int64(it.d.uvarint()) + it.base
-		flags := it.d.byte()
-		ts := it.d.varint() + it.bTs
+		off := int64(it.uvarint()) + it.base
+		flags := it.readByte()
+		ts := it.varint() + it.bTs
 		it.recs = append(it.recs, digestRec{offset: off, flags: flags, ts: ts})
 	}
-	return it.d.err == nil
+	return it.err() == nil
 }

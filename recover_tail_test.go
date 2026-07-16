@@ -1,6 +1,7 @@
 package commitlog
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,7 +72,7 @@ func TestRecoverTailTruncatesTornSuffix(t *testing.T) {
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	for i := 0; i <= 5; i++ {
-		_, off, _, _, err := r.ReadMessage(t.Context(), headers)
+		_, off, _, _, err := r.ReadMessage(context.Background(), headers)
 		require.NoError(t, err)
 		require.EqualValues(t, i, off)
 	}
