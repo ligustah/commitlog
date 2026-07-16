@@ -464,6 +464,22 @@ func (s *segment) appendBlock(p []byte) error {
 	return nil
 }
 
+// needsBlockConsolidation reports whether the segment's block index is
+// pathologically fine-grained: enough blocks to matter and an average
+// logical block far below the rewrite target. The append path writes one
+// block per message set, so small-commit workloads produce sub-KB blocks;
+// blockRef memory, the sparse index, the open-time header walk and zstd's
+// ratio all scale with block count. Cleans force one consolidation rewrite
+// on such segments (see cleanBlockTarget).
+func (s *segment) needsBlockConsolidation() bool {
+	s.RLock()
+	defer s.RUnlock()
+	if !s.blockMode || len(s.blocks) < 1024 {
+		return false
+	}
+	return s.position/int64(len(s.blocks)) < cleanBlockTarget/8
+}
+
 // ReadAt reads len(p) bytes from the segment's logical byte space starting at
 // off. For a raw segment this is a direct file read; for a block-compressed
 // segment it maps the logical range onto the decompressed block(s).

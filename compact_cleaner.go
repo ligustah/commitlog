@@ -182,9 +182,11 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 			compacted = append(compacted, seg)
 			continue
 		}
-		if c.canSkip(spec, digests[i], merged, i) {
+		if c.canSkip(spec, digests[i], merged, i) && !seg.needsBlockConsolidation() {
 			// Digest proves a rewrite would keep every record byte-for-byte:
-			// converged without reading the segment.
+			// converged without reading the segment. A pathologically
+			// fine-grained block index still forces one consolidation
+			// rewrite — identical records, ~1000x fewer blocks.
 			compacted = append(compacted, seg)
 			if err := feedEpochs(digests[i]); err != nil {
 				return nil, nil, 0, err
@@ -517,6 +519,14 @@ func (c *compactCleaner) classify(spec CleanSpec, offset int64, msg SerializedMe
 	return dispRetain
 }
 
+// cleanBlockTarget is the uncompressed size a rewrite accumulates before
+// flushing one block. The append path writes a block per message set — small
+// commits make sub-KB blocks, and a segment's blockRef index (and its sparse
+// index, and zstd's ratio, and the open-time header walk) all scale with the
+// block COUNT. Run 22 measured 18.6M ~140-byte blocks holding ~900MB of
+// blockRefs; rewrites consolidate them ~1000x.
+const cleanBlockTarget = 256 << 10
+
 func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropSet,
 	epochCache *leaderEpochCache) (*segment, int, error) {
 
@@ -525,15 +535,35 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		return nil, 0, err
 	}
 	var (
-		ss          = newSegmentScanner(seg)
-		removed     = 0
-		stripped    = 0
-		stripActive = spec.StripBelow > 0 && len(spec.StripHeaders) > 0
+		ss = newSegmentScanner(seg)
+		// A consolidation pass rewrites even byte-identical content: the
+		// rewrite's value is the block layout itself, so convergence must not
+		// discard it (it would re-rewrite and re-discard every tick).
+		consolidating = seg.needsBlockConsolidation()
+		removed       = 0
+		stripped      = 0
+		stripActive   = spec.StripBelow > 0 && len(spec.StripHeaders) > 0
 		// Does any surviving record still carry a strip-target header (i.e.
 		// sits at/above StripBelow with one present)? Decides how far the
 		// refreshed digest's strip stamp may reach.
 		residualStrippable = false
+		// Retained message sets accumulate here and flush as one consolidated
+		// block (one WriteMessageSet call): concatenated message sets are a
+		// valid message-set sequence, and entriesForMessageSet computes every
+		// logical position from the flush-time segment position.
+		blockBuf []byte
 	)
+	flush := func() error {
+		if len(blockBuf) == 0 {
+			return nil
+		}
+		entries := entriesForMessageSet(cleaned.Position(), blockBuf)
+		if err := cleaned.WriteMessageSet(blockBuf, entries); err != nil {
+			return err
+		}
+		blockBuf = blockBuf[:0]
+		return nil
+	}
 	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 		var (
 			offset      = ms.Offset()
@@ -559,9 +589,11 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 			offset >= spec.StripBelow && hasAnyHeader(msg, spec.StripHeaders) {
 			residualStrippable = true
 		}
-		entries := entriesForMessageSet(cleaned.Position(), out)
-		if err := cleaned.WriteMessageSet(out, entries); err != nil {
-			return nil, removed, err
+		blockBuf = append(blockBuf, out...)
+		if len(blockBuf) >= cleanBlockTarget {
+			if err := flush(); err != nil {
+				return nil, removed, err
+			}
 		}
 		// Maintain start offset for each new leader epoch.
 		if leaderEpoch > epochCache.LastLeaderEpoch() {
@@ -569,6 +601,9 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 				return nil, removed, err
 			}
 		}
+	}
+	if err := flush(); err != nil {
+		return nil, removed, err
 	}
 
 	if cleaned.IsEmpty() {
@@ -597,7 +632,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	// multi-second commit stalls). Compacted+stripped segments reach this
 	// fixed point after one pass — and the refreshed digest lets later
 	// passes prove it without the scan this pass just paid.
-	if removed == 0 && stripped == 0 {
+	if removed == 0 && stripped == 0 && !consolidating {
 		if err := cleaned.Delete(); err != nil {
 			return nil, 0, err
 		}
