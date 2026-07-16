@@ -122,7 +122,7 @@ func runTortureOpts(t *testing.T, seed int64, codec compress.Codec, maxSegBytes 
 		case 6: // compaction under the daemon's spec shape: strip + tombstone GC
 			tripped += countConsolidationTrips(l)
 			hw := l.HighWatermark()
-			require.NoError(t, l.CleanWithSpec(CleanSpec{
+			requireCleanOK(t, l, (CleanSpec{
 				Ceiling: hw, StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
 				TombstoneGCBelow: hw, TombstoneRetention: time.Nanosecond,
 			}))
@@ -156,7 +156,7 @@ func runTortureOpts(t *testing.T, seed int64, codec compress.Codec, maxSegBytes 
 	if codec != compress.None && maxSegBytes > 4096 {
 		require.Greater(t, tripped, 0, "no sealed segment ever tripped needsBlockConsolidation — retune the torture")
 	}
-	require.NoError(t, l.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, l, (CleanSpec{
 		Ceiling: fhw, StripBelow: fhw, StripHeaders: []string{"pid", "epoch", "seq"},
 		TombstoneGCBelow: fhw, TombstoneRetention: time.Nanosecond,
 	}))
@@ -214,4 +214,11 @@ func readAllVisible(t *testing.T, l CommitLog) map[int64]string {
 		}
 	}
 	return out
+}
+
+// requireCleanOK runs CleanWithSpec discarding the verified floor.
+func requireCleanOK(t *testing.T, l CommitLog, spec CleanSpec) {
+	t.Helper()
+	_, err := l.CleanWithSpec(spec)
+	require.NoError(t, err)
 }

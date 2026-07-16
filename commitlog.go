@@ -1016,19 +1016,21 @@ func (l *commitLog) Clean() error {
 		spec.TombstoneGCBelow = l.HighWatermark()
 		spec.TombstoneRetention = l.Options.CompactTombstoneRetention
 	}
-	return l.CleanWithSpec(spec)
+	_, err := l.CleanWithSpec(spec)
+	return err
 }
 
 // CleanWithSpec applies retention and a transaction-aware compaction pass.
-func (l *commitLog) CleanWithSpec(spec CleanSpec) error {
+// See the interface doc for the returned verified floor.
+func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.mu.RLock()
 	oldSegments := l.segments
 	l.mu.RUnlock()
-	cleaned, epochCache, cleanErr := l.clean(spec, oldSegments)
+	cleaned, epochCache, verified, cleanErr := l.clean(spec, oldSegments)
 	if cleaned == nil {
-		return cleanErr
+		return -1, cleanErr
 	}
 	l.mu.Lock()
 	newSegments := l.segments
@@ -1052,9 +1054,9 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) error {
 	// A partial retention failure (cleanErr) still swapped in the surviving
 	// segments above; report it once the read path is consistent.
 	if cleanErr != nil {
-		return cleanErr
+		return -1, cleanErr
 	}
-	return err
+	return verified, err
 }
 
 // rebaseSegments adds the segments in from to the end of the slice of segments
@@ -1071,31 +1073,32 @@ func (l *commitLog) rebaseSegments(from, to []*segment, epochCache *leaderEpochC
 	return to
 }
 
-// clean returns the cleaned segments and, if compaction ran, a
-// *leaderEpochCache maintaining the start offset for each new leader epoch. If
-// compaction did not run, the leaderEpochCache will be nil.
-func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *leaderEpochCache, error) {
+// clean returns the cleaned segments, the pass's verified floor (see
+// CleanWithSpec; -1 when compaction did not run) and, if compaction ran, a
+// *leaderEpochCache maintaining the start offset for each new leader epoch.
+func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *leaderEpochCache, int64, error) {
 	cleaned, err := l.deleteCleaner.Clean(segments)
 	if err != nil {
 		// A partial retention failure still hands back the surviving
 		// segments; propagate them so the caller swaps them in — the deleted
 		// prefix must leave the read path even when the clean errs.
-		return cleaned, nil, err
+		return cleaned, nil, -1, err
 	}
+	verified := int64(-1)
 	var epochCache *leaderEpochCache
 	if l.Compact {
 		if spec.Ceiling <= 0 {
 			spec.Ceiling = l.HighWatermark()
 		}
-		compacted, cache, err := l.compactCleaner.CompactSpec(spec, cleaned)
+		compacted, cache, v, err := l.compactCleaner.CompactSpec(spec, cleaned)
 		if err != nil {
 			// Keep the delete stage's result: its removals are already on
 			// disk regardless of the compaction failure.
-			return cleaned, nil, err
+			return cleaned, nil, -1, err
 		}
-		cleaned, epochCache = compacted, cache
+		cleaned, epochCache, verified = compacted, cache, v
 	}
-	return cleaned, epochCache, nil
+	return cleaned, epochCache, verified, nil
 }
 
 func (l *commitLog) checkpointHWLoop() {
@@ -1113,7 +1116,12 @@ func (l *commitLog) checkpointHWLoop() {
 			return
 		}
 		if err := l.checkpointHW(); err != nil {
-			panic(errors.Wrap(err, "failed to checkpoint high watermark"))
+			// Transient on Windows: the atomic rename can hit a sharing
+			// violation while a scanner holds the file. The checkpoint is
+			// only an optimization (RecoverTail rides out staleness), so a
+			// failed tick is retried on the next one — never fatal.
+			slog.Warn("high-watermark checkpoint failed; retrying next tick",
+				slog.String("path", l.Path), slog.String("err", err.Error()))
 		}
 		l.mu.RUnlock()
 	}

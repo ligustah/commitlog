@@ -80,8 +80,17 @@ type CommitLog interface {
 	Clean() error
 
 	// CleanWithSpec applies retention and a transaction-aware compaction
-	// pass parameterized by the caller (see CleanSpec).
-	CleanWithSpec(spec CleanSpec) error
+	// pass parameterized by the caller (see CleanSpec). It returns the
+	// pass's VERIFIED FLOOR: the highest offset at or below which the log
+	// now provably holds no transactional headers, no control markers and
+	// no aborted records — the prefix an open-time LSO/seq/abort rebuild
+	// may skip entirely. -1 = no such prefix (nothing verified, or the spec
+	// carried no strip semantics). The floor covers only the consecutive
+	// run of sealed segments this pass rewrote or digest-proved converged,
+	// capped at StripBelow-1 — never the active segment or an age-protected
+	// one, whose records keep their headers and abort markers even below
+	// the LSO.
+	CleanWithSpec(spec CleanSpec) (int64, error)
 
 	// NotifyLEO registers and returns a channel which is closed when messages
 	// past the given log end offset are added to the log. If the given offset

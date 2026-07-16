@@ -67,7 +67,7 @@ func TestCleanSpecTombstoneGC(t *testing.T) {
 	offLive := app(&Message{Key: []byte("live"), Value: []byte("v2")})
 	app(&Message{Key: []byte("pad"), Value: []byte("pad")}) // active segment padding
 
-	require.NoError(t, l.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, l, (CleanSpec{
 		Ceiling:            l.HighWatermark(),
 		TombstoneGCBelow:   l.HighWatermark(),
 		TombstoneRetention: time.Hour,
@@ -92,7 +92,7 @@ func TestCleanSpecAbortedShadowing(t *testing.T) {
 	offAborted := app(&Message{Key: []byte("k"), Value: []byte("aborted"), Headers: map[string][]byte{"pid": {0, 0, 0, 0, 0, 0, 0, 1}}})
 	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
 
-	require.NoError(t, l.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, l, (CleanSpec{
 		Ceiling:      l.HighWatermark(),
 		StripBelow:   l.HighWatermark(),
 		StripHeaders: []string{"pid", "epoch", "seq"},
@@ -128,7 +128,7 @@ func TestCleanSpecDecideAndStrip(t *testing.T) {
 	before := readAllMsgs(t, l)
 	wantTs := before[offData] // sanity capture; timestamp checked via reader below
 
-	require.NoError(t, l.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, l, (CleanSpec{
 		Ceiling:      l.HighWatermark(),
 		StripBelow:   stripBelow,
 		StripHeaders: []string{"pid", "epoch", "seq"},
@@ -171,7 +171,7 @@ func TestCleanSpecStripSurvivesReopen(t *testing.T) {
 		cl.SetHighWatermark(o[0])
 		offs = append(offs, o[0])
 	}
-	require.NoError(t, cl.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, cl, (CleanSpec{
 		Ceiling:      cl.HighWatermark(),
 		StripBelow:   cl.HighWatermark(),
 		StripHeaders: []string{"pid", "epoch", "seq"},

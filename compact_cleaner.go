@@ -52,7 +52,8 @@ func (c *compactCleaner) Compact(hw int64, segments []*segment) ([]*segment,
 		spec.TombstoneGCBelow = hw
 		spec.TombstoneRetention = c.TombstoneRetention
 	}
-	return c.CompactSpec(spec, segments)
+	compacted, cache, _, err := c.CompactSpec(spec, segments)
+	return compacted, cache, err
 }
 
 // CompactSpec performs log compaction under a CleanSpec: segments up to but
@@ -64,15 +65,15 @@ func (c *compactCleaner) Compact(hw int64, segments []*segment) ([]*segment,
 // segments and a leaderEpochCache containing the earliest offsets for each
 // leader epoch, or nil if nothing was compacted.
 func (c *compactCleaner) CompactSpec(spec CleanSpec, segments []*segment) ([]*segment,
-	*leaderEpochCache, error) {
+	*leaderEpochCache, int64, error) {
 
 	if len(segments) <= 1 {
-		return segments, nil, nil
+		return segments, nil, -1, nil
 	}
 
 	slog.Debug("Compacting log", slog.String("name", c.Name))
 	before := time.Now()
-	compacted, epochCache, removed, err := c.compact(spec, segments)
+	compacted, epochCache, removed, verified, err := c.compact(spec, segments)
 	if err == nil {
 		slog.Debug("Finished compacting log %s",
 			slog.String("name", c.Name),
@@ -84,7 +85,7 @@ func (c *compactCleaner) CompactSpec(spec CleanSpec, segments []*segment) ([]*se
 
 	}
 
-	return compacted, epochCache, errors.Wrap(err, "failed to compact log")
+	return compacted, epochCache, verified, errors.Wrap(err, "failed to compact log")
 
 }
 
@@ -131,7 +132,7 @@ func (d *dropSet) get(off int64) bool {
 }
 
 func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segment,
-	*leaderEpochCache, int, error) {
+	*leaderEpochCache, int, int64, error) {
 
 	// Latest-per-key is computed by a streaming merge over per-segment sorted
 	// key digests (persistent sidecars for sealed segments, in-memory for the
@@ -139,17 +140,25 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// the pass would change nothing are kept without reading a single record.
 	digests, err := c.loadOrBuildDigests(segments)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, -1, err
 	}
 	merged, err := c.mergeDigests(spec, segments, digests)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, -1, err
 	}
 
 	var (
 		compacted  = make([]*segment, 0, len(segments))
 		epochCache = newLeaderEpochCacheNoFile(c.Name)
 		removed    = 0
+		// The verified floor: highest offset of the CONSECUTIVE oldest run
+		// of sealed segments this pass rewrote or digest-proved converged.
+		// An age-protected segment (kept unread, headers and abort markers
+		// intact) breaks the chain — everything above it stays unverified
+		// regardless of its own disposition, because a floor must cover a
+		// gap-free prefix.
+		verified      = int64(-1)
+		verifiedChain = true
 	)
 
 	// A protected compaction horizon: a segment whose newest write is within
@@ -177,8 +186,10 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// Write new segments. Skip the last segment since we will not compact it.
 	// TODO: Join segments that are below the bytes limit.
 	for i, seg := range segments[:len(segments)-1] {
+		segEnd := seg.NextOffset() - 1
 		if horizon > 0 && seg.LastWriteTime() > horizon {
 			// Within the protected horizon — keep whole.
+			verifiedChain = false
 			compacted = append(compacted, seg)
 			continue
 		}
@@ -189,18 +200,24 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 			// rewrite — identical records, ~1000x fewer blocks.
 			compacted = append(compacted, seg)
 			if err := feedEpochs(digests[i]); err != nil {
-				return nil, nil, 0, err
+				return nil, nil, 0, -1, err
+			}
+			if verifiedChain {
+				verified = segEnd
 			}
 			continue
 		}
 		cleaned, msgsRemoved, err := c.cleanSegment(spec, seg, merged.drops[i], epochCache)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, nil, 0, -1, err
 		}
 		if cleaned != nil {
 			compacted = append(compacted, cleaned)
 		}
 		removed += msgsRemoved
+		if verifiedChain {
+			verified = segEnd
+		}
 	}
 
 	// Add the last segment back in to the compacted list and feed its epoch
@@ -208,10 +225,16 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	last := segments[len(segments)-1]
 	compacted = append(compacted, last)
 	if err := feedEpochs(digests[len(segments)-1]); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, -1, err
 	}
 
-	return compacted, epochCache, removed, nil
+	// Stripping applies to offsets strictly below StripBelow, so the record
+	// AT StripBelow keeps its headers; a spec without strip semantics
+	// verifies nothing.
+	if verified > spec.StripBelow-1 {
+		verified = spec.StripBelow - 1
+	}
+	return compacted, epochCache, removed, verified, nil
 }
 
 // mergeResult carries the merge's per-segment decisions.

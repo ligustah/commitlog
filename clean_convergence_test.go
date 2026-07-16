@@ -24,7 +24,7 @@ func TestCleanConvergesToNoRewrites(t *testing.T) {
 		StripBelow:   l.HighWatermark(),
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	}
-	if err := l.CleanWithSpec(spec); err != nil {
+	if _, err := l.CleanWithSpec(spec); err != nil {
 		t.Fatal(err)
 	}
 
@@ -53,7 +53,7 @@ func TestCleanConvergesToNoRewrites(t *testing.T) {
 	}
 
 	// Second clean: converged — same files, untouched.
-	if err := l.CleanWithSpec(spec); err != nil {
+	if _, err := l.CleanWithSpec(spec); err != nil {
 		t.Fatal(err)
 	}
 	after := sealedIdents()

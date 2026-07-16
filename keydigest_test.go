@@ -118,19 +118,19 @@ func TestConvergedCleanReadsNoSealedRecords(t *testing.T) {
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	}
 	// First clean strips headers (rewrites) and installs stamped digests.
-	require.NoError(t, l.CleanWithSpec(spec))
+	requireCleanOK(t, l, (spec))
 	// Second clean converges via scans (stamps now cover) and refreshes
 	// nothing; from here on the digests prove the fixed point.
-	require.NoError(t, l.CleanWithSpec(spec))
+	requireCleanOK(t, l, (spec))
 
 	before := segmentScans.Load()
-	require.NoError(t, l.CleanWithSpec(spec))
+	requireCleanOK(t, l, (spec))
 	scans := segmentScans.Load() - before
 	require.LessOrEqual(t, scans, int64(1),
 		"converged clean must scan at most the active segment, got %d scans", scans)
 
 	// And the files are untouched (existing convergence guarantee).
-	require.NoError(t, l.CleanWithSpec(spec))
+	requireCleanOK(t, l, (spec))
 }
 
 // Randomized equivalence: the digest-merge clean must implement EXACTLY the
@@ -229,7 +229,7 @@ func TestCleanDigestMergeEquivalence(t *testing.T) {
 				}
 			}
 
-			require.NoError(t, l.CleanWithSpec(spec))
+			requireCleanOK(t, l, (spec))
 			got := readAllMsgs(t, l)
 			for off, want := range expect {
 				_, present := got[off]
@@ -243,7 +243,7 @@ func TestCleanDigestMergeEquivalence(t *testing.T) {
 			}
 
 			// A second pass must converge to the identical visible set.
-			require.NoError(t, l.CleanWithSpec(spec))
+			requireCleanOK(t, l, (spec))
 			got2 := readAllMsgs(t, l)
 			require.Equal(t, len(got), len(got2), "second clean changed the log")
 			for off := range got {
@@ -264,7 +264,7 @@ func TestKeyDigestLifecycle(t *testing.T) {
 	}
 	app(&Message{Key: []byte("live"), Value: []byte("x")})
 	spec := CleanSpec{Ceiling: l.HighWatermark()}
-	require.NoError(t, l.CleanWithSpec(spec))
+	requireCleanOK(t, l, (spec))
 
 	// Digests exist for current sealed segments and bind (load non-nil).
 	l.mu.RLock()
@@ -308,7 +308,7 @@ func TestStripStampDoesNotOverClaim(t *testing.T) {
 	}
 	hdrs := []string{"pid", "epoch", "seq"}
 	// First clean strips only below offs[3].
-	require.NoError(t, l.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, l, (CleanSpec{
 		Ceiling: l.HighWatermark(), StripBelow: offs[3], StripHeaders: hdrs}))
 	// Second clean advances the boundary to the HW: every SEALED record
 	// below it must lose its pid header now, stamp notwithstanding (the
@@ -317,7 +317,7 @@ func TestStripStampDoesNotOverClaim(t *testing.T) {
 	l.mu.RLock()
 	activeBase := l.segments[len(l.segments)-1].BaseOffset
 	l.mu.RUnlock()
-	require.NoError(t, l.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, l, (CleanSpec{
 		Ceiling: hw, StripBelow: hw, StripHeaders: hdrs}))
 	got := readAllMsgs(t, l)
 	for _, off := range offs {
@@ -330,10 +330,10 @@ func TestStripStampDoesNotOverClaim(t *testing.T) {
 		require.False(t, hasPid, "offset %d must be stripped after boundary advanced", off)
 	}
 	// And the stamp now covers everything: the next clean is a no-scan skip.
-	require.NoError(t, l.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, l, (CleanSpec{
 		Ceiling: hw, StripBelow: hw, StripHeaders: hdrs}))
 	before := segmentScans.Load()
-	require.NoError(t, l.CleanWithSpec(CleanSpec{
+	requireCleanOK(t, l, (CleanSpec{
 		Ceiling: hw, StripBelow: hw, StripHeaders: hdrs}))
 	require.LessOrEqual(t, segmentScans.Load()-before, int64(1))
 }

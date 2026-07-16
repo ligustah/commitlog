@@ -93,3 +93,55 @@ func TestCleanConsolidatesTinyBlocks(t *testing.T) {
 	_, blocksFinal := blockStats()
 	require.Equal(t, blocksAgain, blocksFinal, "second clean must be a no-op")
 }
+
+// The verified floor returned by CleanWithSpec must cover exactly the sealed,
+// rewritten/converged prefix — never the active segment (whose records keep
+// headers and abort markers below the LSO; trusting an LSO floor there is how
+// soak runs 23/24 lost their abort watermark and diverged).
+func TestCleanVerifiedFloor(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 4 << 10,
+		Compact:         true,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	for i := 0; i < 400; i++ {
+		_, err := l.Append([]*Message{{
+			Key:     []byte(fmt.Sprintf("key-%06d", i)),
+			Value:   []byte(fmt.Sprintf("value-%06d", i)),
+			Headers: map[string][]byte{"pid": {1}, "seq": {byte(i)}},
+		}})
+		require.NoError(t, err)
+	}
+	hw := l.NewestOffset()
+	l.SetHighWatermark(hw)
+
+	l.mu.RLock()
+	activeBase := l.segments[len(l.segments)-1].BaseOffset
+	l.mu.RUnlock()
+	require.Greater(t, activeBase, int64(0), "need sealed segments")
+
+	// Strip everything decided: the floor must reach the end of the sealed
+	// prefix and STOP there, even though StripBelow (≈ an LSO at the tip)
+	// reaches into the active segment.
+	floor, err := l.CleanWithSpec(CleanSpec{
+		Ceiling: hw, StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, activeBase-1, floor,
+		"floor must cover exactly the sealed prefix (activeBase %d)", activeBase)
+
+	// A converged second pass proves the same floor via digest skips.
+	floor2, err := l.CleanWithSpec(CleanSpec{
+		Ceiling: hw, StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, floor, floor2)
+
+	// No strip semantics ⇒ nothing verified.
+	floor3, err := l.CleanWithSpec(CleanSpec{Ceiling: hw})
+	require.NoError(t, err)
+	require.Equal(t, int64(-1), floor3)
+}
