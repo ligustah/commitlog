@@ -433,14 +433,27 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 	return n, nil
 }
 
-// appendBlock compresses p into a self-describing block and appends it. If the
-// compressed form isn't smaller than the input the block is stored raw (codec
-// None) so we never inflate incompressible data. position advances by the
-// logical (uncompressed) length; physPosition advances by the physical length.
+// compressMinBlock is the smallest payload worth running the codec on.
+// Sub-4KB blocks compress marginally at best (run 22's per-append blocks
+// averaged 140 bytes), and the block count — not the byte count — is what
+// costs memory and boot time; storing small appends raw skips the encoder
+// on the hot commit path, and the clean's ~256KB consolidation rewrite
+// (cleanBlockTarget) compresses the same bytes properly later.
+const compressMinBlock = 4 << 10
+
+// appendBlock compresses p into a self-describing block and appends it.
+// Small payloads (below compressMinBlock) and payloads the codec cannot
+// shrink are stored raw (codec None) so we never inflate incompressible
+// data nor burn encoder CPU where the ratio cannot matter. position
+// advances by the logical (uncompressed) length; physPosition by the
+// physical length.
 func (s *segment) appendBlock(p []byte) error {
 	codec := s.codec
-	payload := codec.Compress(p)
-	if len(payload) >= len(p) {
+	var payload []byte
+	if len(p) < compressMinBlock {
+		codec = compress.None
+		payload = p
+	} else if payload = codec.Compress(p); len(payload) >= len(p) {
 		codec = compress.None
 		payload = p
 	}
