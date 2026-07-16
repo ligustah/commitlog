@@ -45,15 +45,45 @@ func codecName(c compress.Codec) string {
 	return "none"
 }
 
+// The same equivalence must hold when segments are large enough that cleans
+// CONSOLIDATE their tiny per-append blocks (needsBlockConsolidation): the
+// consolidation rewrite changes only the physical block layout, never the
+// visible records. Run 23 died on state divergence right after the first
+// consolidating cleans; this is the layer that can indict them.
+func TestConsolidationOperationalEquivalence(t *testing.T) {
+	for seed := int64(1); seed <= 3; seed++ {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			results := map[string]map[int64]string{}
+			for _, codec := range []compress.Codec{compress.None, compress.Zstd} {
+				// 512KB segments hold ~1900 tiny appended blocks — well over
+				// the consolidation threshold — and 9000 steps seal several.
+				results[codecName(codec)] = runTortureOpts(t, seed, codec, 512<<10, 9000)
+			}
+			raw, zstd := results["none"], results["zstd"]
+			require.Equal(t, len(raw), len(zstd),
+				"visible record count diverged: raw %d vs zstd %d", len(raw), len(zstd))
+			for off, v := range raw {
+				zv, ok := zstd[off]
+				require.True(t, ok, "offset %d visible raw-only", off)
+				require.Equal(t, v, zv, "offset %d content diverged", off)
+			}
+		})
+	}
+}
+
 // runTorture drives one deterministic operation sequence and returns the
 // final visible records (offset → key|value).
 func runTorture(t *testing.T, seed int64, codec compress.Codec) map[int64]string {
+	return runTortureOpts(t, seed, codec, 512, 120)
+}
+
+func runTortureOpts(t *testing.T, seed int64, codec compress.Codec, maxSegBytes int64, steps int) map[int64]string {
 	t.Helper()
 	dir := t.TempDir()
 	rng := rand.New(rand.NewSource(seed))
 	opts := Options{
 		Path:             dir,
-		MaxSegmentBytes:  512, // roll constantly: many sealed segments
+		MaxSegmentBytes:  maxSegBytes,
 		Compact:          true,
 		Compression:      codec,
 		DisableAutoClean: true,
@@ -63,6 +93,7 @@ func runTorture(t *testing.T, seed int64, codec compress.Codec) map[int64]string
 	defer func() { l.Close() }()
 
 	nextVal := 0
+	tripped := 0
 	appendBatch := func(n int) {
 		msgs := make([]*Message, n)
 		for i := range msgs {
@@ -84,11 +115,12 @@ func runTorture(t *testing.T, seed int64, codec compress.Codec) map[int64]string
 		l.SetHighWatermark(offs[len(offs)-1])
 	}
 
-	for step := 0; step < 120; step++ {
+	for step := 0; step < steps; step++ {
 		switch rng.Intn(10) {
 		case 0, 1, 2, 3, 4, 5: // mostly appends
 			appendBatch(1 + rng.Intn(8))
 		case 6: // compaction under the daemon's spec shape: strip + tombstone GC
+			tripped += countConsolidationTrips(l)
 			hw := l.HighWatermark()
 			require.NoError(t, l.CleanWithSpec(CleanSpec{
 				Ceiling: hw, StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
@@ -117,11 +149,36 @@ func runTorture(t *testing.T, seed int64, codec compress.Codec) map[int64]string
 		}
 	}
 	fhw := l.HighWatermark()
+	tripped += countConsolidationTrips(l)
+	// The consolidation variant must actually exercise consolidation: at
+	// least one clean during the run has to have seen a segment trip the
+	// veto, or the equivalence pass proves nothing about it.
+	if codec != compress.None && maxSegBytes > 4096 {
+		require.Greater(t, tripped, 0, "no sealed segment ever tripped needsBlockConsolidation — retune the torture")
+	}
 	require.NoError(t, l.CleanWithSpec(CleanSpec{
 		Ceiling: fhw, StripBelow: fhw, StripHeaders: []string{"pid", "epoch", "seq"},
 		TombstoneGCBelow: fhw, TombstoneRetention: time.Nanosecond,
 	}))
 	return readAllVisible(t, l)
+}
+
+// countConsolidationTrips reports how many sealed segments would trip the
+// consolidation veto right now.
+func countConsolidationTrips(l CommitLog) int {
+	cl := l.(*commitLog)
+	cl.mu.RLock()
+	defer cl.mu.RUnlock()
+	n := 0
+	if len(cl.segments) < 2 {
+		return 0
+	}
+	for _, s := range cl.segments[:len(cl.segments)-1] {
+		if s.needsBlockConsolidation() {
+			n++
+		}
+	}
+	return n
 }
 
 func writeCheckpoint(t *testing.T, dir string, hw int64) {
