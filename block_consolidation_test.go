@@ -145,3 +145,31 @@ func TestCleanVerifiedFloor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(-1), floor3)
 }
+
+// A block-mode segment must roll at maxSegmentBlocks even when far below its
+// byte cap: per-append tiny blocks otherwise accumulate millions of live
+// blockRefs in the ACTIVE segment (which no clean ever rewrites).
+func TestSegmentRollsAtBlockCap(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 1 << 30, // byte cap far out of reach
+		Compact:         true,
+		Compression:     compress.Zstd,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	for i := 0; i < maxSegmentBlocks+64; i++ {
+		_, err := l.Append([]*Message{{
+			Key:   []byte(fmt.Sprintf("k%06d", i)),
+			Value: []byte("v"),
+		}})
+		require.NoError(t, err)
+	}
+	l.mu.RLock()
+	nSegs := len(l.segments)
+	activeBlocks := len(l.segments[len(l.segments)-1].blocks)
+	l.mu.RUnlock()
+	require.GreaterOrEqual(t, nSegs, 2, "block cap must have rolled the segment")
+	require.Less(t, activeBlocks, maxSegmentBlocks, "active segment must be under the cap")
+}

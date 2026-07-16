@@ -279,10 +279,24 @@ func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
 // CheckSplit determines if a new log segment should be rolled out either
 // because this segment is full or LogRollTime has passed since the first
 // message was written to the segment.
+// maxSegmentBlocks bounds a block-mode segment's block COUNT before it rolls,
+// independent of its byte size. Each live block costs a blockRef (~40B) and a
+// sparse-index anchor for as long as the segment exists, so a small-append
+// workload filling a byte-sized segment (default 1GB) accumulates millions of
+// tiny blocks — run 25 measured ~316MB of blockRefs across the ACTIVE
+// segments alone. Rolling at 16k blocks caps that at ~650KB per active
+// segment and hands the tiny blocks to the next clean's consolidation
+// rewrite within a tick. Large-batch workloads never get near it (16k blocks
+// of 256KB is 4GB — the byte cap rolls first).
+const maxSegmentBlocks = 16 << 10
+
 func (s *segment) CheckSplit(logRollTime time.Duration) bool {
 	s.RLock()
 	defer s.RUnlock()
 	if s.position >= s.maxBytes {
+		return true
+	}
+	if s.blockMode && len(s.blocks) >= maxSegmentBlocks {
 		return true
 	}
 	if logRollTime == 0 || s.firstWriteTime == 0 {
