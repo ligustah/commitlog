@@ -1153,3 +1153,7 @@ func (l *commitLog) checkpointHW() error {
 
 	return atomic_file.WriteFile(file, r)
 }
+
+// Dir returns the log's directory path — the home for stream-level sidecar
+// checkpoints (e.g. durable_streams' recovery floor).
+func (l *commitLog) Dir() string { return l.Path }
