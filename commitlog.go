@@ -1012,6 +1012,15 @@ type CleanSpec struct {
 	// unbounded pass. Deferred segments keep their content this pass and
 	// the verified floor stops before them. 0 = unlimited.
 	MaxRewrites int
+	// RewriteBudget bounds the same thing by TIME: once a pass has spent
+	// this long rewriting, remaining debt segments defer to the next pass.
+	// Time is the semantically right knob — it encodes "finish before the
+	// process's next kill window" directly, and unlike a segment count it
+	// self-adjusts to segment size and disk speed. A fixed count lost a
+	// reclamation race on a fire-hose stream: 8 rewrites reclaimed ~100MB
+	// per tick against ~120MB of inflow, so an 88%-superseded state WAL
+	// grew forever. 0 = no time bound. Both bounds apply when both are set.
+	RewriteBudget time.Duration
 }
 
 // Clean applies retention and compaction rules against the log, if applicable.
@@ -1104,7 +1113,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 			return cleaned, nil, -1, err
 		}
 		cleaned, epochCache, verified = compacted, cache, v
-	} else if consolidated, err := consolidateSegments(cleaned, spec.MaxRewrites); err != nil {
+	} else if consolidated, err := consolidateSegments(cleaned, spec.MaxRewrites, spec.RewriteBudget); err != nil {
 		// Non-compacted logs still owe block-layout maintenance: their
 		// per-append tiny blocks otherwise accumulate blockRef memory and
 		// open-time header walks forever (the sqlcdc daemon's view output

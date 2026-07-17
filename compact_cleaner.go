@@ -186,6 +186,16 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// Write new segments. Skip the last segment since we will not compact it.
 	// TODO: Join segments that are below the bytes limit.
 	rewrites := 0
+	var rewriteDeadline time.Time
+	if spec.RewriteBudget > 0 {
+		rewriteDeadline = time.Now().Add(spec.RewriteBudget)
+	}
+	overBudget := func() bool {
+		if spec.MaxRewrites > 0 && rewrites >= spec.MaxRewrites {
+			return true
+		}
+		return !rewriteDeadline.IsZero() && rewrites > 0 && time.Now().After(rewriteDeadline)
+	}
 	for i, seg := range segments[:len(segments)-1] {
 		segEnd := seg.NextOffset() - 1
 		if horizon > 0 && seg.LastWriteTime() > horizon {
@@ -209,7 +219,7 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 			}
 			continue
 		}
-		if spec.MaxRewrites > 0 && rewrites >= spec.MaxRewrites {
+		if overBudget() {
 			// Rewrite budget exhausted: keep the segment untouched this pass
 			// (its drops/strips/consolidation wait for the next tick, which
 			// re-derives them from the digests). The budget is what lets a
@@ -700,14 +710,20 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 // offsets and leader epochs unchanged) with cleanBlockTarget-sized blocks.
 // maxRewrites bounds the pass exactly like CleanSpec.MaxRewrites (0 =
 // unlimited). The active (last) segment is never touched.
-func consolidateSegments(segments []*segment, maxRewrites int) ([]*segment, error) {
+func consolidateSegments(segments []*segment, maxRewrites int, budget time.Duration) ([]*segment, error) {
 	if len(segments) <= 1 {
 		return segments, nil
 	}
 	out := make([]*segment, 0, len(segments))
 	rewrites := 0
+	var deadline time.Time
+	if budget > 0 {
+		deadline = time.Now().Add(budget)
+	}
 	for _, seg := range segments[:len(segments)-1] {
-		if !seg.needsBlockConsolidation() || (maxRewrites > 0 && rewrites >= maxRewrites) {
+		over := (maxRewrites > 0 && rewrites >= maxRewrites) ||
+			(!deadline.IsZero() && rewrites > 0 && time.Now().After(deadline))
+		if !seg.needsBlockConsolidation() || over {
 			out = append(out, seg)
 			continue
 		}
