@@ -492,19 +492,26 @@ func (s *segment) appendBlock(p []byte) error {
 }
 
 // needsBlockConsolidation reports whether the segment's block index is
-// pathologically fine-grained: enough blocks to matter and an average
-// logical block far below the rewrite target. The append path writes one
-// block per message set, so small-commit workloads produce sub-KB blocks;
+// pathologically fine-grained: enough blocks to matter and MANY more of
+// them than the rewrite target layout would produce. The append path writes
+// one block per message set, so per-commit appends make one block each —
 // blockRef memory, the sparse index, the open-time header walk and zstd's
-// ratio all scale with block count. Cleans force one consolidation rewrite
+// ratio all scale with block COUNT. Cleans force one consolidation rewrite
 // on such segments (see cleanBlockTarget).
+//
+// The comparison is against the TARGET layout (position/cleanBlockTarget
+// blocks), not an average-block-size floor: view-output streams write
+// multi-KB logical batches whose per-block average cleared a size floor
+// while segments still carried 16k blocks each (run 26 measured 7.6M live
+// blockRefs ≈ 365MB across such segments — a size-floor veto never fired).
 func (s *segment) needsBlockConsolidation() bool {
 	s.RLock()
 	defer s.RUnlock()
 	if !s.blockMode || len(s.blocks) < 1024 {
 		return false
 	}
-	return s.position/int64(len(s.blocks)) < cleanBlockTarget/8
+	targetBlocks := s.position/cleanBlockTarget + 1
+	return int64(len(s.blocks)) > 4*targetBlocks
 }
 
 // ReadAt reads len(p) bytes from the segment's logical byte space starting at

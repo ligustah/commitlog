@@ -173,3 +173,47 @@ func TestSegmentRollsAtBlockCap(t *testing.T) {
 	require.GreaterOrEqual(t, nSegs, 2, "block cap must have rolled the segment")
 	require.Less(t, activeBlocks, maxSegmentBlocks, "active segment must be under the cap")
 }
+
+// The consolidation veto must key on block COUNT vs the target layout, not
+// an average-size floor: multi-KB logical batches (view-output shape) once
+// dodged a size-floor veto while segments carried 16k blocks each.
+func TestConsolidationVetoOnBatchShape(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 1 << 30,
+		Compact:         true,
+		Compression:     compress.Zstd,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	// ~4KB logical batches: one block each, avg block size well above any
+	// size floor, but 16k of them per segment (the block cap rolls it).
+	batch := make([]*Message, 8)
+	n := 0
+	for i := 0; i < maxSegmentBlocks+512; i++ {
+		for j := range batch {
+			n++
+			batch[j] = &Message{
+				Key:   []byte(fmt.Sprintf("k%07d", n)),
+				Value: []byte(fmt.Sprintf("v%0500d", n)),
+			}
+		}
+		_, err := l.Append(batch)
+		require.NoError(t, err)
+	}
+	l.SetHighWatermark(l.NewestOffset())
+
+	l.mu.RLock()
+	sealed := l.segments[0]
+	blocksBefore := len(sealed.blocks)
+	l.mu.RUnlock()
+	require.GreaterOrEqual(t, blocksBefore, maxSegmentBlocks, "need a full sealed segment")
+	require.True(t, sealed.needsBlockConsolidation(), "batch-shaped segment must trip the veto")
+
+	require.NoError(t, l.Clean())
+	l.mu.RLock()
+	blocksAfter := len(l.segments[0].blocks)
+	l.mu.RUnlock()
+	require.Less(t, blocksAfter, blocksBefore/10, "clean must consolidate batch-shaped blocks (before %d after %d)", blocksBefore, blocksAfter)
+}
