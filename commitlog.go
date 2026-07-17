@@ -1104,6 +1104,17 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 			return cleaned, nil, -1, err
 		}
 		cleaned, epochCache, verified = compacted, cache, v
+	} else if consolidated, err := consolidateSegments(cleaned, spec.MaxRewrites); err != nil {
+		// Non-compacted logs still owe block-layout maintenance: their
+		// per-append tiny blocks otherwise accumulate blockRef memory and
+		// open-time header walks forever (the sqlcdc daemon's view output
+		// streams ran uncompacted and gathered 16k-block segments across
+		// every soak). The consolidation-only pass rewrites records
+		// VERBATIM — content, offsets and epochs untouched — into
+		// cleanBlockTarget-sized blocks, budgeted like compaction rewrites.
+		return cleaned, nil, -1, err
+	} else {
+		cleaned = consolidated
 	}
 	return cleaned, epochCache, verified, nil
 }

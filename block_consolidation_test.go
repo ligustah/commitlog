@@ -273,3 +273,65 @@ func TestIncrementalCleanBudget(t *testing.T) {
 	require.Zero(t, debt(), "budgeted passes must converge to zero debt (after %d passes)", passes)
 	require.Greater(t, passes, 2, "convergence should have taken multiple passes")
 }
+
+// Non-compacted block-mode logs (the daemon's view output streams) must
+// still consolidate their tiny blocks on Clean: content, offsets and read
+// results identical, block count collapsed.
+func TestConsolidationOnlyPassForNonCompactedLog(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 256 << 10,
+		Compact:         false, // the daemon's uncompacted view-stream shape
+		Compression:     compress.Zstd,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	for i := 0; i < 12000; i++ {
+		_, err := l.Append([]*Message{{
+			Key:   []byte(fmt.Sprintf("key-%06d", i%64)),
+			Value: []byte(fmt.Sprintf("value-%06d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", i)),
+		}})
+		require.NoError(t, err)
+	}
+	hw := l.NewestOffset()
+	l.SetHighWatermark(hw)
+
+	counts := func() (int, int) {
+		cs := l.SegmentBlockCounts()
+		tot := 0
+		for _, n := range cs[:len(cs)-1] {
+			tot += n
+		}
+		return len(cs) - 1, tot
+	}
+	segs, before := counts()
+	require.Greater(t, segs, 1)
+	require.Greater(t, before, 8000, "need tiny-block debt")
+
+	readN := func() map[int64]string {
+		r, err := l.NewReader(0, true)
+		require.NoError(t, err)
+		out := map[int64]string{}
+		headers := make([]byte, 28)
+		for i := 0; i < 12000; i++ {
+			msg, off, _, _, err := r.ReadMessage(context.Background(), headers)
+			require.NoError(t, err)
+			out[off] = string(SerializedMessage(msg).Key()) + "|" + string(SerializedMessage(msg).Value())
+		}
+		return out
+	}
+	beforeRecs := readN()
+
+	// Budgeted passes drain the debt; every record survives verbatim.
+	for pass := 0; pass < 30; pass++ {
+		_, err := l.CleanWithSpec(CleanSpec{MaxRewrites: 2})
+		require.NoError(t, err)
+		if _, n := counts(); n < before/10 {
+			break
+		}
+	}
+	_, after := counts()
+	require.Less(t, after, before/10, "consolidation-only pass must fire on non-compacted logs (before %d after %d)", before, after)
+	require.Equal(t, beforeRecs, readN(), "records must be byte-identical after consolidation")
+}

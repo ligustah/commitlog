@@ -694,6 +694,63 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	return cleaned, removed, nil
 }
 
+// consolidateSegments is the consolidation-only maintenance pass for logs
+// WITHOUT compaction: sealed segments whose block index tripped
+// needsBlockConsolidation are rewritten verbatim (every record kept,
+// offsets and leader epochs unchanged) with cleanBlockTarget-sized blocks.
+// maxRewrites bounds the pass exactly like CleanSpec.MaxRewrites (0 =
+// unlimited). The active (last) segment is never touched.
+func consolidateSegments(segments []*segment, maxRewrites int) ([]*segment, error) {
+	if len(segments) <= 1 {
+		return segments, nil
+	}
+	out := make([]*segment, 0, len(segments))
+	rewrites := 0
+	for _, seg := range segments[:len(segments)-1] {
+		if !seg.needsBlockConsolidation() || (maxRewrites > 0 && rewrites >= maxRewrites) {
+			out = append(out, seg)
+			continue
+		}
+		cleaned, err := seg.Cleaned()
+		if err != nil {
+			return nil, err
+		}
+		ss := newSegmentScanner(seg)
+		var blockBuf []byte
+		flush := func() error {
+			if len(blockBuf) == 0 {
+				return nil
+			}
+			entries := entriesForMessageSet(cleaned.Position(), blockBuf)
+			if err := cleaned.WriteMessageSet(blockBuf, entries); err != nil {
+				return err
+			}
+			blockBuf = blockBuf[:0]
+			return nil
+		}
+		for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
+			blockBuf = append(blockBuf, ms...)
+			if len(blockBuf) >= cleanBlockTarget {
+				if err := flush(); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if err := flush(); err != nil {
+			return nil, err
+		}
+		if err := cleaned.Sync(); err != nil {
+			return nil, err
+		}
+		if err := cleaned.Replace(seg); err != nil {
+			return nil, err
+		}
+		out = append(out, cleaned)
+		rewrites++
+	}
+	return append(out, segments[len(segments)-1]), nil
+}
+
 // refreshDigest rebuilds and persists a segment's key digest after a clean
 // pass scanned it, carrying the strip stamp the scan established. Best-effort:
 // a failure only costs the next clean a scan.
