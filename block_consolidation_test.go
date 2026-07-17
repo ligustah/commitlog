@@ -217,3 +217,59 @@ func TestConsolidationVetoOnBatchShape(t *testing.T) {
 	l.mu.RUnlock()
 	require.Less(t, blocksAfter, blocksBefore/10, "clean must consolidate batch-shaped blocks (before %d after %d)", blocksBefore, blocksAfter)
 }
+
+// A budgeted clean must consolidate exactly its slice per pass and converge
+// over several passes — the incremental-clean contract that lets a
+// short-lived process pay down a large debt.
+func TestIncrementalCleanBudget(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 256 << 10,
+		Compact:         true,
+		Compression:     compress.Zstd,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	for i := 0; i < 20000; i++ {
+		_, err := l.Append([]*Message{{
+			Key:   []byte(fmt.Sprintf("key-%06d", i)),
+			Value: []byte(fmt.Sprintf("value-%06d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", i)),
+		}})
+		require.NoError(t, err)
+	}
+	hw := l.NewestOffset()
+	l.SetHighWatermark(hw)
+	spec := CleanSpec{
+		Ceiling: hw, StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
+		MaxRewrites: 2,
+	}
+
+	debt := func() int {
+		n := 0
+		l.mu.RLock()
+		for _, s := range l.segments[:len(l.segments)-1] {
+			if s.needsBlockConsolidation() {
+				n++
+			}
+		}
+		l.mu.RUnlock()
+		return n
+	}
+	require.Greater(t, debt(), 4, "need more debt segments than one budget")
+
+	prev := debt()
+	passes := 0
+	var lastFloor int64 = -2
+	for debt() > 0 && passes < 50 {
+		floor, err := l.CleanWithSpec(spec)
+		require.NoError(t, err)
+		passes++
+		d := debt()
+		require.LessOrEqual(t, prev-d, 2+1, "one pass must not consolidate more than its budget")
+		require.GreaterOrEqual(t, floor, lastFloor, "verified floor must never regress across budgeted passes")
+		prev, lastFloor = d, floor
+	}
+	require.Zero(t, debt(), "budgeted passes must converge to zero debt (after %d passes)", passes)
+	require.Greater(t, passes, 2, "convergence should have taken multiple passes")
+}

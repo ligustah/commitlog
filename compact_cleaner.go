@@ -185,6 +185,7 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 
 	// Write new segments. Skip the last segment since we will not compact it.
 	// TODO: Join segments that are below the bytes limit.
+	rewrites := 0
 	for i, seg := range segments[:len(segments)-1] {
 		segEnd := seg.NextOffset() - 1
 		if horizon > 0 && seg.LastWriteTime() > horizon {
@@ -193,7 +194,8 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 			compacted = append(compacted, seg)
 			continue
 		}
-		if c.canSkip(spec, digests[i], merged, i) && !seg.needsBlockConsolidation() {
+		skippable := c.canSkip(spec, digests[i], merged, i)
+		if skippable && !seg.needsBlockConsolidation() {
 			// Digest proves a rewrite would keep every record byte-for-byte:
 			// converged without reading the segment. A pathologically
 			// fine-grained block index still forces one consolidation
@@ -207,10 +209,27 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 			}
 			continue
 		}
+		if spec.MaxRewrites > 0 && rewrites >= spec.MaxRewrites {
+			// Rewrite budget exhausted: keep the segment untouched this pass
+			// (its drops/strips/consolidation wait for the next tick, which
+			// re-derives them from the digests). The budget is what lets a
+			// process with a short life expectancy — the soak's daemon lives
+			// ~10 minutes between kills — pay down an arbitrarily large
+			// consolidation debt a slice at a time instead of dying inside
+			// one giant pass over it (run 27: a single unbounded clean of a
+			// debt-laden view stream ran past the whole kill window).
+			verifiedChain = false
+			compacted = append(compacted, seg)
+			if err := feedEpochs(digests[i]); err != nil {
+				return nil, nil, 0, -1, err
+			}
+			continue
+		}
 		cleaned, msgsRemoved, err := c.cleanSegment(spec, seg, merged.drops[i], epochCache)
 		if err != nil {
 			return nil, nil, 0, -1, err
 		}
+		rewrites++
 		if cleaned != nil {
 			compacted = append(compacted, cleaned)
 		}

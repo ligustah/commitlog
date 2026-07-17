@@ -1005,6 +1005,13 @@ type CleanSpec struct {
 	// TombstoneRetention guards tombstone GC; zero disables it. Records with
 	// timestamp 0 (pre-stamping logs) are never considered old enough.
 	TombstoneRetention time.Duration
+	// MaxRewrites bounds how many segments one pass may REWRITE (digest
+	// skips stay free), making cleans incremental: a process with a short
+	// life expectancy pays down an arbitrarily large compaction/
+	// consolidation debt a slice per pass instead of dying inside one
+	// unbounded pass. Deferred segments keep their content this pass and
+	// the verified floor stops before them. 0 = unlimited.
+	MaxRewrites int
 }
 
 // Clean applies retention and compaction rules against the log, if applicable.
@@ -1165,3 +1172,18 @@ func (l *commitLog) checkpointHW() error {
 // Dir returns the log's directory path — the home for stream-level sidecar
 // checkpoints (e.g. durable_streams' recovery floor).
 func (l *commitLog) Dir() string { return l.Path }
+
+// SegmentBlockCounts reports each segment's in-memory block-index size
+// (oldest first; raw segments report 0). Observability/test hook for the
+// block-consolidation machinery.
+func (l *commitLog) SegmentBlockCounts() []int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]int, 0, len(l.segments))
+	for _, s := range l.segments {
+		s.RLock()
+		out = append(out, len(s.blocks))
+		s.RUnlock()
+	}
+	return out
+}
