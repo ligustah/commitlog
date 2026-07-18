@@ -23,7 +23,7 @@ type expectedMsg struct {
 func TestCompactCleanerNoSegments(t *testing.T) {
 	opts := compactCleanerOptions{Name: "foo"}
 	cleaner := newCompactCleaner(opts)
-	segments, epochCache, err := cleaner.Compact(0, nil)
+	segments, epochCache, _, err := cleaner.CompactSpec(CleanSpec{Ceiling: 0}, nil)
 	require.NoError(t, err)
 	require.Nil(t, segments)
 	require.Nil(t, epochCache)
@@ -36,7 +36,7 @@ func TestCompactCleanerOneSegment(t *testing.T) {
 	dir := tempDir(t)
 
 	expected := []*segment{createSegment(t, dir, 0, 100)}
-	actual, epochCache, err := cleaner.Compact(0, expected)
+	actual, epochCache, _, err := cleaner.CompactSpec(CleanSpec{Ceiling: 0}, expected)
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
 	require.Nil(t, epochCache)

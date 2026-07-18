@@ -116,6 +116,19 @@ type CommitLog interface {
 	// IsConcurrencyControlEnabled indicates if the log should check for concurrency before appending messages
 	IsConcurrencyControlEnabled() bool
 
+	// PutSidecar atomically writes a small named metadata file owned by the
+	// log's client into the log directory (e.g. a recovery checkpoint). The
+	// name must not collide with the log's own files.
+	PutSidecar(name string, data []byte) error
+
+	// GetSidecar reads a client sidecar file; the error satisfies
+	// os.IsNotExist when the sidecar is absent.
+	GetSidecar(name string) ([]byte, error)
+
+	// RemoveSidecar deletes a client sidecar file; removing an absent
+	// sidecar is a no-op.
+	RemoveSidecar(name string) error
+
 	// Close closes each log segment file and stops the background goroutine
 	// checkpointing the high watermark to disk.
 	Close() error

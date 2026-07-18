@@ -594,32 +594,14 @@ func (s *segment) blockCopyInto(dst []byte, b blockRef, srcOff int64) (int, erro
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.start != b.physStart {
-		need := int(b.payloadLen())
-		if cap(c.raw) < need {
-			c.raw = make([]byte, need)
-		}
-		raw := c.raw[:need]
-		if _, err := s.log.ReadAt(raw, b.payloadStart()); err != nil {
-			return 0, errors.Wrap(err, "read block payload failed")
-		}
-		data, err := b.codec.DecompressInto(c.data, raw)
+		raw, data, err := s.decodeBlock(b, c.raw, c.data)
+		c.raw = raw
 		if err != nil {
-			return 0, errors.Wrap(err, "decompress block failed")
+			// The decode may have scribbled over c.data; don't serve it.
+			c.start = -1
+			return 0, err
 		}
-		if int64(len(data)) != b.logicalLen {
-			return 0, fmt.Errorf("commitlog: block decompressed to %d bytes, want %d", len(data), b.logicalLen)
-		}
-		// Raw (codec None) blocks return the raw slice itself; keep the
-		// cache's decode buffer separate so recycling raw never corrupts it.
-		if &data[0] == &raw[0] {
-			if cap(c.data) < len(data) {
-				c.data = make([]byte, len(data))
-			}
-			c.data = c.data[:len(data)]
-			copy(c.data, data)
-		} else {
-			c.data = data
-		}
+		c.data = data
 		c.start = b.physStart
 	}
 	if srcOff >= int64(len(c.data)) {
@@ -628,22 +610,44 @@ func (s *segment) blockCopyInto(dst []byte, b blockRef, srcOff int64) (int, erro
 	return copy(dst, c.data[srcOff:]), nil
 }
 
+// decodeBlock reads the block's payload into rawBuf and decompresses it into
+// dataBuf, growing either as needed, and returns the (possibly regrown)
+// buffers. data holds exactly the block's logical bytes and never aliases
+// raw — raw (codec None) payloads are copied — so callers may recycle the two
+// buffers independently.
+func (s *segment) decodeBlock(b blockRef, rawBuf, dataBuf []byte) (raw, data []byte, err error) {
+	need := int(b.payloadLen())
+	if cap(rawBuf) < need {
+		rawBuf = make([]byte, need)
+	}
+	raw = rawBuf[:need]
+	if _, err := s.log.ReadAt(raw, b.payloadStart()); err != nil {
+		return raw, nil, errors.Wrap(err, "read block payload failed")
+	}
+	data, err = b.codec.DecompressInto(dataBuf, raw)
+	if err != nil {
+		return raw, nil, errors.Wrap(err, "decompress block failed")
+	}
+	if int64(len(data)) != b.logicalLen {
+		return raw, nil, fmt.Errorf("commitlog: block decompressed to %d bytes, want %d", len(data), b.logicalLen)
+	}
+	if len(data) > 0 && &data[0] == &raw[0] {
+		if cap(dataBuf) < len(data) {
+			dataBuf = make([]byte, len(data))
+		}
+		dataBuf = dataBuf[:len(data)]
+		copy(dataBuf, data)
+		data = dataBuf
+	}
+	return raw, data, nil
+}
+
 // blockData returns a freshly allocated copy of the block's decompressed
 // bytes, bypassing the cache. For rare non-hot paths (open-time last-frame
 // recovery) where holding a slice across other reads is convenient.
 func (s *segment) blockData(b blockRef) ([]byte, error) {
-	raw := make([]byte, b.payloadLen())
-	if _, err := s.log.ReadAt(raw, b.payloadStart()); err != nil {
-		return nil, errors.Wrap(err, "read block payload failed")
-	}
-	data, err := b.codec.Decompress(raw)
-	if err != nil {
-		return nil, errors.Wrap(err, "decompress block failed")
-	}
-	if int64(len(data)) != b.logicalLen {
-		return nil, fmt.Errorf("commitlog: block decompressed to %d bytes, want %d", len(data), b.logicalLen)
-	}
-	return data, nil
+	_, data, err := s.decodeBlock(b, nil, nil)
+	return data, err
 }
 
 func (s *segment) notifyWaiters() {

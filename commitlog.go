@@ -2,6 +2,7 @@
 package commitlog
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"io/ioutil"
@@ -354,7 +355,7 @@ func (l *commitLog) RecoverTail() error {
 		return l.Truncate(hw + 1)
 	}
 	lastGood := hw
-	headers := make([]byte, 28)
+	headers := make([]byte, msgSetHeaderLen)
 	ctx := context.Background()
 	for {
 		_, off, _, _, rerr := r.ReadMessage(ctx, headers)
@@ -1005,21 +1006,15 @@ type CleanSpec struct {
 	// TombstoneRetention guards tombstone GC; zero disables it. Records with
 	// timestamp 0 (pre-stamping logs) are never considered old enough.
 	TombstoneRetention time.Duration
-	// MaxRewrites bounds how many segments one pass may REWRITE (digest
-	// skips stay free), making cleans incremental: a process with a short
-	// life expectancy pays down an arbitrarily large compaction/
-	// consolidation debt a slice per pass instead of dying inside one
-	// unbounded pass. Deferred segments keep their content this pass and
-	// the verified floor stops before them. 0 = unlimited.
-	MaxRewrites int
-	// RewriteBudget bounds the same thing by TIME: once a pass has spent
-	// this long rewriting, remaining debt segments defer to the next pass.
-	// Time is the semantically right knob — it encodes "finish before the
-	// process's next kill window" directly, and unlike a segment count it
-	// self-adjusts to segment size and disk speed. A fixed count lost a
-	// reclamation race on a fire-hose stream: 8 rewrites reclaimed ~100MB
-	// per tick against ~120MB of inflow, so an 88%-superseded state WAL
-	// grew forever. 0 = no time bound. Both bounds apply when both are set.
+	// maxRewrites is an unexported deterministic rewrite cap for tests;
+	// production callers bound passes by RewriteBudget.
+	maxRewrites int
+	// RewriteBudget bounds how long one pass may spend REWRITING segments
+	// (digest skips stay free): once exceeded, remaining debt defers to the
+	// next pass, so a pass always finishes inside a short-lived process's
+	// kill window while reclamation scales to any inflow. The budget is
+	// spent in drop-density order. 0 = unbounded. At least one rewrite
+	// always proceeds.
 	RewriteBudget time.Duration
 }
 
@@ -1113,7 +1108,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 			return cleaned, nil, -1, err
 		}
 		cleaned, epochCache, verified = compacted, cache, v
-	} else if consolidated, err := consolidateSegments(cleaned, spec.MaxRewrites, spec.RewriteBudget); err != nil {
+	} else if consolidated, err := consolidateSegments(cleaned, spec.maxRewrites, spec.RewriteBudget); err != nil {
 		// Non-compacted logs still owe block-layout maintenance: their
 		// per-append tiny blocks otherwise accumulate blockRef memory and
 		// open-time header walks forever (the sqlcdc daemon's view output
@@ -1189,9 +1184,27 @@ func (l *commitLog) checkpointHW() error {
 	return atomic_file.WriteFile(file, r)
 }
 
-// Dir returns the log's directory path — the home for stream-level sidecar
-// checkpoints (e.g. durable_streams' recovery floor).
-func (l *commitLog) Dir() string { return l.Path }
+// Sidecars are small named metadata files owned by the log's CLIENT, stored
+// in the log directory next to the segments (e.g. durable_streams' recovery
+// floor checkpoint). Put writes atomically (temp + rename), so a crash never
+// leaves a torn sidecar; Get returns os.ErrNotExist-satisfying errors when
+// absent; Remove of an absent sidecar is a no-op. Names must not collide
+// with the log's own files (segments, indexes, checkpoints).
+func (l *commitLog) PutSidecar(name string, data []byte) error {
+	return atomic_file.WriteFile(filepath.Join(l.Path, name), bytes.NewReader(data))
+}
+
+func (l *commitLog) GetSidecar(name string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(l.Path, name))
+}
+
+func (l *commitLog) RemoveSidecar(name string) error {
+	err := os.Remove(filepath.Join(l.Path, name))
+	if err != nil && os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
 
 // SegmentBlockCounts reports each segment's in-memory block-index size
 // (oldest first; raw segments report 0). Observability/test hook for the

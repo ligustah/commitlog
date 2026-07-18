@@ -242,7 +242,7 @@ func TestIncrementalCleanBudget(t *testing.T) {
 	l.SetHighWatermark(hw)
 	spec := CleanSpec{
 		Ceiling: hw, StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
-		MaxRewrites: 2,
+		maxRewrites: 2,
 	}
 
 	debt := func() int {
@@ -325,7 +325,7 @@ func TestConsolidationOnlyPassForNonCompactedLog(t *testing.T) {
 
 	// Budgeted passes drain the debt; every record survives verbatim.
 	for pass := 0; pass < 30; pass++ {
-		_, err := l.CleanWithSpec(CleanSpec{MaxRewrites: 2})
+		_, err := l.CleanWithSpec(CleanSpec{maxRewrites: 2})
 		require.NoError(t, err)
 		if _, n := counts(); n < before/10 {
 			break

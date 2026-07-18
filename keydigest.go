@@ -425,8 +425,7 @@ func loadKeyDigest(seg *segment) *keyDigest {
 // in-memory bytes; loaded sidecars stream the keyed section from disk, so a
 // merge across N segments holds N read buffers, not N keyed sections.
 type digestIter struct {
-	d    *digestDecoder // in-memory mode
-	br   *bufio.Reader  // stream mode
+	r    digestByteReader
 	f    *os.File
 	rerr error
 	base int64
@@ -438,10 +437,18 @@ type digestIter struct {
 	recs   []digestRec
 }
 
+// digestByteReader is what digestIter needs from either source: a
+// bytes.Reader over a freshly built digest's in-memory keyed section, or a
+// bufio.Reader streaming a loaded sidecar's from disk.
+type digestByteReader interface {
+	io.Reader
+	io.ByteReader
+}
+
 func newDigestIter(d *keyDigest) (*digestIter, error) {
 	it := &digestIter{base: d.base, bTs: d.baseTs, rem: d.nKeys}
 	if d.keyed != nil || d.path == "" || d.nKeys == 0 {
-		it.d = &digestDecoder{data: d.keyed}
+		it.r = bytes.NewReader(d.keyed)
 		return it, nil
 	}
 	f, err := os.Open(d.path)
@@ -458,7 +465,7 @@ func newDigestIter(d *keyDigest) (*digestIter, error) {
 	// run 31's anomaly capture measured 79MB of these across ~1200
 	// state-WAL segments at 64KB each. Digest entries are tens of bytes;
 	// 8KB still amortizes syscalls fine.
-	it.br = bufio.NewReaderSize(f, 8<<10)
+	it.r = bufio.NewReaderSize(f, 8<<10)
 	return it, nil
 }
 
@@ -474,24 +481,13 @@ func (it *digestIter) close() {
 // err reports a read/decode failure. Exhaustion-by-error is safe for the
 // merge (unseen copies are merely not dropped) but callers surface it so a
 // clean never silently under-compacts.
-func (it *digestIter) err() error {
-	if it.rerr != nil {
-		return it.rerr
-	}
-	if it.d != nil {
-		return it.d.err
-	}
-	return nil
-}
+func (it *digestIter) err() error { return it.rerr }
 
 func (it *digestIter) uvarint() uint64 {
-	if it.d != nil {
-		return it.d.uvarint()
-	}
 	if it.rerr != nil {
 		return 0
 	}
-	v, err := binary.ReadUvarint(it.br)
+	v, err := binary.ReadUvarint(it.r)
 	if err != nil {
 		it.rerr = err
 		return 0
@@ -500,13 +496,10 @@ func (it *digestIter) uvarint() uint64 {
 }
 
 func (it *digestIter) varint() int64 {
-	if it.d != nil {
-		return it.d.varint()
-	}
 	if it.rerr != nil {
 		return 0
 	}
-	v, err := binary.ReadVarint(it.br)
+	v, err := binary.ReadVarint(it.r)
 	if err != nil {
 		it.rerr = err
 		return 0
@@ -515,13 +508,10 @@ func (it *digestIter) varint() int64 {
 }
 
 func (it *digestIter) readByte() byte {
-	if it.d != nil {
-		return it.d.byte()
-	}
 	if it.rerr != nil {
 		return 0
 	}
-	b, err := it.br.ReadByte()
+	b, err := it.r.ReadByte()
 	if err != nil {
 		it.rerr = err
 		return 0
@@ -530,9 +520,6 @@ func (it *digestIter) readByte() byte {
 }
 
 func (it *digestIter) readKey(n int) []byte {
-	if it.d != nil {
-		return it.d.bytes(n)
-	}
 	if it.rerr != nil {
 		return nil
 	}
@@ -540,7 +527,7 @@ func (it *digestIter) readKey(n int) []byte {
 		it.keyBuf = make([]byte, n)
 	}
 	it.keyBuf = it.keyBuf[:n]
-	if _, err := io.ReadFull(it.br, it.keyBuf); err != nil {
+	if _, err := io.ReadFull(it.r, it.keyBuf); err != nil {
 		it.rerr = err
 		return nil
 	}
