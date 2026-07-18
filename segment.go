@@ -560,11 +560,11 @@ func (s *segment) readBlocks(p []byte, off int64) (int, error) {
 		if blk == nil {
 			return n, io.EOF
 		}
-		data, err := s.blockData(*blk)
+		m, err := s.blockCopyInto(p[n:], *blk, cur-blk.logicalStart)
 		if err != nil {
 			return n, err
 		}
-		n += copy(p[n:], data[cur-blk.logicalStart:])
+		n += m
 	}
 	return n, nil
 }
@@ -581,12 +581,57 @@ func (s *segment) findBlock(logical int64) *blockRef {
 	return &s.blocks[i]
 }
 
-// blockData returns the decompressed bytes of a block, serving the most-recently
-// decompressed block from the cache to avoid re-inflating on sequential reads.
-func (s *segment) blockData(b blockRef) ([]byte, error) {
-	if cached := s.cache.get(b.physStart); cached != nil {
-		return cached, nil
+// blockCopyInto copies the block's decompressed bytes from srcOff into dst,
+// decoding at most once per block visit via the segment's single-entry
+// cache. The cache OWNS its buffers and recycles them on displacement —
+// callers only ever receive copies, made under the cache lock, so a
+// displaced buffer is never observed mid-overwrite. Before recycling, every
+// displacement abandoned a fresh decode buffer to the GC; run 31's anomaly
+// heap capture showed ~276MB of those pending collection during one clean
+// pass over a ~1200-segment stream.
+func (s *segment) blockCopyInto(dst []byte, b blockRef, srcOff int64) (int, error) {
+	c := s.cache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.start != b.physStart {
+		need := int(b.payloadLen())
+		if cap(c.raw) < need {
+			c.raw = make([]byte, need)
+		}
+		raw := c.raw[:need]
+		if _, err := s.log.ReadAt(raw, b.payloadStart()); err != nil {
+			return 0, errors.Wrap(err, "read block payload failed")
+		}
+		data, err := b.codec.DecompressInto(c.data, raw)
+		if err != nil {
+			return 0, errors.Wrap(err, "decompress block failed")
+		}
+		if int64(len(data)) != b.logicalLen {
+			return 0, fmt.Errorf("commitlog: block decompressed to %d bytes, want %d", len(data), b.logicalLen)
+		}
+		// Raw (codec None) blocks return the raw slice itself; keep the
+		// cache's decode buffer separate so recycling raw never corrupts it.
+		if &data[0] == &raw[0] {
+			if cap(c.data) < len(data) {
+				c.data = make([]byte, len(data))
+			}
+			c.data = c.data[:len(data)]
+			copy(c.data, data)
+		} else {
+			c.data = data
+		}
+		c.start = b.physStart
 	}
+	if srcOff >= int64(len(c.data)) {
+		return 0, io.EOF
+	}
+	return copy(dst, c.data[srcOff:]), nil
+}
+
+// blockData returns a freshly allocated copy of the block's decompressed
+// bytes, bypassing the cache. For rare non-hot paths (open-time last-frame
+// recovery) where holding a slice across other reads is convenient.
+func (s *segment) blockData(b blockRef) ([]byte, error) {
 	raw := make([]byte, b.payloadLen())
 	if _, err := s.log.ReadAt(raw, b.payloadStart()); err != nil {
 		return nil, errors.Wrap(err, "read block payload failed")
@@ -598,7 +643,6 @@ func (s *segment) blockData(b blockRef) ([]byte, error) {
 	if int64(len(data)) != b.logicalLen {
 		return nil, fmt.Errorf("commitlog: block decompressed to %d bytes, want %d", len(data), b.logicalLen)
 	}
-	s.cache.put(b.physStart, data)
 	return data, nil
 }
 

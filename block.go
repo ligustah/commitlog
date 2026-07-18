@@ -68,25 +68,14 @@ type blockCache struct {
 	mu    sync.Mutex
 	start int64 // physStart of the cached block, -1 when empty
 	data  []byte
+	// raw is the recycled compressed-payload read buffer. Both raw and
+	// data are OWNED by the cache and overwritten on displacement; callers
+	// receive copies made under mu (segment.blockCopyInto), never these
+	// slices.
+	raw []byte
 }
 
 func newBlockCache() *blockCache { return &blockCache{start: -1} }
-
-func (c *blockCache) get(physStart int64) []byte {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.start == physStart {
-		return c.data
-	}
-	return nil
-}
-
-func (c *blockCache) put(physStart int64, data []byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.start = physStart
-	c.data = data
-}
 
 func (c *blockCache) reset() {
 	c.mu.Lock()

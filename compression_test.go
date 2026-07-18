@@ -436,14 +436,11 @@ func TestCompressionTruncateBefore(t *testing.T) {
 }
 
 func TestBlockCache(t *testing.T) {
+	// The cache's buffers are private (blockCopyInto hands out copies made
+	// under its lock); only the displacement/reset bookkeeping is visible.
 	c := newBlockCache()
-	require.Nil(t, c.get(0))
-	data := []byte("hello")
-	c.put(100, data)
-	require.Equal(t, data, c.get(100))
-	require.Nil(t, c.get(200), "different physStart misses")
-	c.put(200, []byte("world"))
-	require.Nil(t, c.get(100), "only most-recent block is cached")
+	require.EqualValues(t, -1, c.start)
+	c.start, c.data = 100, []byte("hello")
 	c.reset()
-	require.Nil(t, c.get(200))
+	require.EqualValues(t, -1, c.start)
 }

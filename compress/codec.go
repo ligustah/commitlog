@@ -64,13 +64,23 @@ func (c Codec) Compress(src []byte) []byte {
 
 // Decompress returns the decompressed form of src.
 func (c Codec) Decompress(src []byte) ([]byte, error) {
+	return c.DecompressInto(nil, src)
+}
+
+// DecompressInto decompresses src, appending to dst (which may be nil or a
+// recycled buffer with its length reset). Scan-heavy paths — compaction
+// rewrites read every block of every segment exactly once — reuse one
+// scratch buffer per scanner instead of allocating a fresh output per block:
+// a 12h soak's clean over a ~1200-segment stream showed ~276MB of dead
+// DecodeAll buffers awaiting GC in a single anomaly heap capture.
+func (c Codec) DecompressInto(dst, src []byte) ([]byte, error) {
 	switch c {
 	case Snappy:
-		return gsnappy.Decode(nil, src)
+		return gsnappy.Decode(dst, src)
 	case S2:
-		return s2.Decode(nil, src)
+		return s2.Decode(dst, src)
 	case Zstd:
-		return zstdDec.DecodeAll(src, nil)
+		return zstdDec.DecodeAll(src, dst[:0])
 	case None:
 		return src, nil
 	default:

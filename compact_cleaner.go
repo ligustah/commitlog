@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -185,31 +186,74 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 
 	// Write new segments. Skip the last segment since we will not compact it.
 	// TODO: Join segments that are below the bytes limit.
+	//
+	// Decision pass first: classify every sealed segment, then grant the
+	// rewrite budget in DROP-DENSITY order — most droppable records first —
+	// rather than oldest-first. The merge already knows each segment's drop
+	// count, and a budgeted pass that rewrites nearly-converged old
+	// segments while churn-heavy ones queue reclaims a fraction of what the
+	// same budget could: run 31's state WAL sat at 53% superseded (~500MB
+	// of pure lag) with the budget spending itself oldest-first.
+	type disposition2 int
+	const (
+		keepProtected disposition2 = iota
+		keepConverged
+		wantRewrite
+	)
+	n := len(segments) - 1
+	disp := make([]disposition2, n)
+	for i, seg := range segments[:n] {
+		switch {
+		case horizon > 0 && seg.LastWriteTime() > horizon:
+			disp[i] = keepProtected
+		case c.canSkip(spec, digests[i], merged, i) && !seg.needsBlockConsolidation():
+			disp[i] = keepConverged
+		default:
+			disp[i] = wantRewrite
+		}
+	}
+	order := make([]int, 0, n)
+	for i := range disp {
+		if disp[i] == wantRewrite {
+			order = append(order, i)
+		}
+	}
+	dropCount := func(i int) int {
+		if merged.drops[i] == nil {
+			return 0
+		}
+		return merged.drops[i].count
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return dropCount(order[a]) > dropCount(order[b])
+	})
+	granted := make([]bool, n)
 	rewrites := 0
 	var rewriteDeadline time.Time
 	if spec.RewriteBudget > 0 {
 		rewriteDeadline = time.Now().Add(spec.RewriteBudget)
 	}
-	overBudget := func() bool {
-		if spec.MaxRewrites > 0 && rewrites >= spec.MaxRewrites {
-			return true
-		}
+	grants := len(order)
+	if spec.MaxRewrites > 0 && spec.MaxRewrites < grants {
+		grants = spec.MaxRewrites
+	}
+	for _, i := range order[:grants] {
+		granted[i] = true
+	}
+	overTime := func() bool {
 		return !rewriteDeadline.IsZero() && rewrites > 0 && time.Now().After(rewriteDeadline)
 	}
-	for i, seg := range segments[:len(segments)-1] {
+	for i, seg := range segments[:n] {
 		segEnd := seg.NextOffset() - 1
-		if horizon > 0 && seg.LastWriteTime() > horizon {
+		switch {
+		case disp[i] == keepProtected:
 			// Within the protected horizon — keep whole.
 			verifiedChain = false
 			compacted = append(compacted, seg)
 			continue
-		}
-		skippable := c.canSkip(spec, digests[i], merged, i)
-		if skippable && !seg.needsBlockConsolidation() {
+		case disp[i] == keepConverged:
 			// Digest proves a rewrite would keep every record byte-for-byte:
-			// converged without reading the segment. A pathologically
-			// fine-grained block index still forces one consolidation
-			// rewrite — identical records, ~1000x fewer blocks.
+			// converged without reading the segment.
 			compacted = append(compacted, seg)
 			if err := feedEpochs(digests[i]); err != nil {
 				return nil, nil, 0, -1, err
@@ -218,16 +262,13 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 				verified = segEnd
 			}
 			continue
-		}
-		if overBudget() {
-			// Rewrite budget exhausted: keep the segment untouched this pass
-			// (its drops/strips/consolidation wait for the next tick, which
-			// re-derives them from the digests). The budget is what lets a
-			// process with a short life expectancy — the soak's daemon lives
-			// ~10 minutes between kills — pay down an arbitrarily large
-			// consolidation debt a slice at a time instead of dying inside
-			// one giant pass over it (run 27: a single unbounded clean of a
-			// debt-laden view stream ran past the whole kill window).
+		case !granted[i] || overTime():
+			// Rewrite budget exhausted or granted to denser segments: keep
+			// this one untouched — its drops/strips/consolidation wait for a
+			// later tick, which re-derives them from the digests. The budget
+			// is what lets a process with a short life expectancy pay down
+			// an arbitrarily large debt a slice at a time instead of dying
+			// inside one unbounded pass (run 27).
 			verifiedChain = false
 			compacted = append(compacted, seg)
 			if err := feedEpochs(digests[i]); err != nil {
