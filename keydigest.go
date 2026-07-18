@@ -453,7 +453,12 @@ func newDigestIter(d *keyDigest) (*digestIter, error) {
 		return nil, errors.Wrap(err, "seek key digest keyed section")
 	}
 	it.f = f
-	it.br = bufio.NewReaderSize(f, 64<<10)
+	// 8KB per reader: the k-way merge holds one iterator PER SEGMENT
+	// simultaneously, so this buffer multiplies by the segment count —
+	// run 31's anomaly capture measured 79MB of these across ~1200
+	// state-WAL segments at 64KB each. Digest entries are tens of bytes;
+	// 8KB still amortizes syscalls fine.
+	it.br = bufio.NewReaderSize(f, 8<<10)
 	return it, nil
 }
 
