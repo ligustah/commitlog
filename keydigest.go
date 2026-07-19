@@ -104,7 +104,7 @@ func (d *keyDigest) stripStampCovers(boundary int64, hdrs []string) bool {
 // buildKeyDigest scans a segment and produces its digest. The scan is the
 // same pass the pre-digest cleaner made; it runs once per sealed segment
 // (or after a rewrite) instead of on every clean.
-func buildKeyDigest(seg *segment) (*keyDigest, error) {
+func buildKeyDigest(seg *segment, sc *blockCache) (*keyDigest, error) {
 	d := &keyDigest{
 		base:               seg.BaseOffset,
 		logSize:            seg.Position(),
@@ -119,7 +119,7 @@ func buildKeyDigest(seg *segment) (*keyDigest, error) {
 		byKey     = make(map[string]*keyRecs)
 		lastEpoch = uint64(0)
 		haveEpoch = false
-		ss        = newSegmentScanner(seg)
+		ss        = newSegmentScannerCache(seg, sc)
 	)
 	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 		var (

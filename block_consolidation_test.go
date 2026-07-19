@@ -335,3 +335,43 @@ func TestConsolidationOnlyPassForNonCompactedLog(t *testing.T) {
 	require.Less(t, after, before/10, "consolidation-only pass must fire on non-compacted logs (before %d after %d)", before, after)
 	require.Equal(t, beforeRecs, readN(), "records must be byte-identical after consolidation")
 }
+
+// A clean pass's scans (digest builds, rewrites, consolidation) must not
+// populate the per-segment block caches: each populated cache retains a
+// decode-buffer pair for the segment's lifetime, so cache-routed scans cost
+// O(segments) heap per pass (run 32's ~500MB-1GB transients). Scans carry
+// their own cache; the segments' stay cold until a real reader arrives.
+func TestCleanScansLeaveSegmentCachesCold(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 64 << 10,
+		Compact:         true,
+		Compression:     compress.Zstd,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	for i := 0; i < 3000; i++ {
+		_, err := l.Append([]*Message{{
+			Key:   []byte(fmt.Sprintf("key-%06d", i%300)), // duplicates => real rewrites
+			Value: []byte(fmt.Sprintf("value-%06d-abcdefghijklmnopqrstuvwxyz", i)),
+		}})
+		require.NoError(t, err)
+	}
+	l.SetHighWatermark(l.NewestOffset())
+
+	_, err := l.CleanWithSpec(CleanSpec{Ceiling: l.NewestOffset()})
+	require.NoError(t, err)
+
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	require.Greater(t, len(l.segments), 1)
+	for _, s := range l.segments {
+		s.cache.mu.Lock()
+		start, dataLen, rawLen := s.cache.start, len(s.cache.data), len(s.cache.raw)
+		s.cache.mu.Unlock()
+		require.Equal(t, int64(-1), start, "segment %d cache populated by clean scan", s.BaseOffset)
+		require.Zero(t, dataLen, "segment %d cache holds decode buffer", s.BaseOffset)
+		require.Zero(t, rawLen, "segment %d cache holds raw buffer", s.BaseOffset)
+	}
+}

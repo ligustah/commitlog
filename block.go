@@ -64,8 +64,12 @@ func parseBlockHeader(hdr []byte) (codec compress.Codec, uncompressedLen, compre
 // blockCache memoizes the most recently decompressed block so sequential reads
 // (the buffered reader fills 64 KB at a time from a possibly larger block) don't
 // re-decompress it. Guarded by its own mutex since reads hold only a read lock.
+// A cache may be shared ACROSS segments (a scan's cache walks many), so the
+// entry is keyed by (seg, physStart), not physStart alone — two segments'
+// blocks can share a physical start.
 type blockCache struct {
 	mu    sync.Mutex
+	seg   *segment
 	start int64 // physStart of the cached block, -1 when empty
 	data  []byte
 	// raw is the recycled compressed-payload read buffer. Both raw and
@@ -80,6 +84,7 @@ func newBlockCache() *blockCache { return &blockCache{start: -1} }
 func (c *blockCache) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.seg = nil
 	c.start = -1
 	c.data = nil
 }

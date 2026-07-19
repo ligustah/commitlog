@@ -251,21 +251,25 @@ func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
 	if blk == nil {
 		return nil, errIndexCorrupt
 	}
-	blockEnd := blk.logicalStart + blk.logicalLen
-	hdr := make([]byte, msgSetHeaderLen)
-	pos := start
+	// One-shot transient decode, deliberately NOT via the segment's cache:
+	// this runs once per segment open/install, and cache-routed reads left
+	// every freshly installed rewrite retaining a decode buffer pair it
+	// might never serve a read from (part of run 32's per-segment heap
+	// ratchet).
+	_, data, err := s.decodeBlock(*blk, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	pos := start - blk.logicalStart
 	var last *entry
-	for pos < blockEnd {
-		if _, err := s.readAtLocked(hdr, pos); err != nil {
-			return nil, err
-		}
-		m := messageSet(hdr)
+	for pos+msgSetHeaderLen <= int64(len(data)) {
+		m := messageSet(data[pos:])
 		size := m.Size()
 		last = &entry{
 			Offset:      m.Offset(),
 			Timestamp:   m.Timestamp(),
 			LeaderEpoch: m.LeaderEpoch(),
-			Position:    pos,
+			Position:    blk.logicalStart + pos,
 			Size:        size + msgSetHeaderLen,
 		}
 		pos += int64(msgSetHeaderLen) + int64(size)
@@ -544,6 +548,10 @@ func (s *segment) readAtLocked(p []byte, off int64) (n int, err error) {
 // segment, decompressing and copying across as many blocks as the request
 // spans. It mirrors os.File.ReadAt semantics: a short read returns io.EOF.
 func (s *segment) readBlocks(p []byte, off int64) (int, error) {
+	return s.readBlocksCache(s.cache, p, off)
+}
+
+func (s *segment) readBlocksCache(c *blockCache, p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("commitlog: negative read offset %d", off)
 	}
@@ -560,13 +568,31 @@ func (s *segment) readBlocks(p []byte, off int64) (int, error) {
 		if blk == nil {
 			return n, io.EOF
 		}
-		m, err := s.blockCopyInto(p[n:], *blk, cur-blk.logicalStart)
+		m, err := s.blockCopyIntoCache(c, p[n:], *blk, cur-blk.logicalStart)
 		if err != nil {
 			return n, err
 		}
 		n += m
 	}
 	return n, nil
+}
+
+// scanReadAt is ReadAt for one-shot sequential scans: block decodes go
+// through the caller's cache instead of the segment's, so a pass over N
+// segments retains one decode buffer pair, not N (see blockCopyIntoCache).
+func (s *segment) scanReadAt(c *blockCache, p []byte, off int64) (n int, err error) {
+	s.RLock()
+	defer s.RUnlock()
+	if s.closed {
+		if s.replaced {
+			return 0, ErrSegmentReplaced
+		}
+		return 0, ErrSegmentClosed
+	}
+	if !s.blockMode {
+		return s.log.ReadAt(p, off)
+	}
+	return s.readBlocksCache(c, p, off)
 }
 
 // findBlock returns the block whose logical range contains the given logical
@@ -590,19 +616,28 @@ func (s *segment) findBlock(logical int64) *blockRef {
 // heap capture showed ~276MB of those pending collection during one clean
 // pass over a ~1200-segment stream.
 func (s *segment) blockCopyInto(dst []byte, b blockRef, srcOff int64) (int, error) {
-	c := s.cache
+	return s.blockCopyIntoCache(s.cache, dst, b, srcOff)
+}
+
+// blockCopyIntoCache is blockCopyInto against a caller-chosen cache: readers
+// use the segment's own (repeated reads of a hot segment), one-shot scans use
+// a per-PASS cache shared across every segment the scan visits — routing
+// scans through the segment cache left every scanned segment retaining a
+// decode buffer pair for its lifetime, O(segments) heap per clean pass
+// (run 32's ~500MB-1GB transients and creeping baseline).
+func (s *segment) blockCopyIntoCache(c *blockCache, dst []byte, b blockRef, srcOff int64) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.start != b.physStart {
+	if c.seg != s || c.start != b.physStart {
 		raw, data, err := s.decodeBlock(b, c.raw, c.data)
 		c.raw = raw
 		if err != nil {
 			// The decode may have scribbled over c.data; don't serve it.
-			c.start = -1
+			c.seg, c.start = nil, -1
 			return 0, err
 		}
 		c.data = data
-		c.start = b.physStart
+		c.seg, c.start = s, b.physStart
 	}
 	if srcOff >= int64(len(c.data)) {
 		return 0, io.EOF
@@ -1004,6 +1039,12 @@ func (s *segment) Delete() error {
 type segmentScanner struct {
 	s   *segment
 	pos int64
+	// cache holds the scan's block-decode buffers. Passing one cache to
+	// every scanner of a multi-segment pass (clean, digest build,
+	// consolidation) keeps the whole pass at one retained buffer pair;
+	// letting scans hit the segments' own caches instead left each scanned
+	// segment holding one for its lifetime (run 32: ~500MB-1GB transients).
+	cache *blockCache
 }
 
 // segmentScans counts scanner constructions; tests assert on it to prove a
@@ -1011,8 +1052,14 @@ type segmentScanner struct {
 var segmentScans atomic.Int64
 
 func newSegmentScanner(segment *segment) *segmentScanner {
+	return newSegmentScannerCache(segment, newBlockCache())
+}
+
+// newSegmentScannerCache scans with a caller-owned (typically pass-shared)
+// decode cache.
+func newSegmentScannerCache(segment *segment, c *blockCache) *segmentScanner {
 	segmentScans.Add(1)
-	return &segmentScanner{s: segment}
+	return &segmentScanner{s: segment, cache: c}
 }
 
 // Scan should be called repeatedly to iterate over the messages in the
@@ -1025,12 +1072,12 @@ func newSegmentScanner(segment *segment) *segmentScanner {
 // old index-driven scan for raw segments (positions and sizes match).
 func (s *segmentScanner) Scan() (messageSet, *entry, error) {
 	header := make(messageSet, msgSetHeaderLen)
-	if _, err := s.s.ReadAt(header, s.pos); err != nil {
+	if _, err := s.s.scanReadAt(s.cache, header, s.pos); err != nil {
 		return nil, nil, err
 	}
 	size := header.Size()
 	payload := make([]byte, size)
-	if _, err := s.s.ReadAt(payload, s.pos+msgSetHeaderLen); err != nil {
+	if _, err := s.s.scanReadAt(s.cache, payload, s.pos+msgSetHeaderLen); err != nil {
 		return nil, nil, err
 	}
 	msgSet := append(header, payload...)

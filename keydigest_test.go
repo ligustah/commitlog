@@ -29,7 +29,7 @@ func TestKeyDigestRoundtrip(t *testing.T) {
 	l.mu.RUnlock()
 	require.Greater(t, nSegs, 2)
 
-	d, err := buildKeyDigest(seg)
+	d, err := buildKeyDigest(seg, newBlockCache())
 	require.NoError(t, err)
 	require.NoError(t, writeKeyDigest(seg, d))
 	got := loadKeyDigest(seg)
@@ -81,7 +81,7 @@ func TestKeyDigestBindingAndCorruption(t *testing.T) {
 	segA, segB := l.segments[0], l.segments[1]
 	l.mu.RUnlock()
 
-	dA, err := buildKeyDigest(segA)
+	dA, err := buildKeyDigest(segA, newBlockCache())
 	require.NoError(t, err)
 
 	// Install A's digest at B's path: base/logSize mismatch → rejected.

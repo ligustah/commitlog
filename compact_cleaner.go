@@ -217,6 +217,7 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// ascending-offset feeding, which the offset-order assembly below does).
 	budget := newRewriteBudget(spec.maxRewrites, spec.RewriteBudget)
 	bw := &blockWriter{}
+	sc := newBlockCache() // one decode-buffer pair for the whole pass
 	rewritten := make([]*segment, n)
 	didRewrite := make([]bool, n)
 	assigns := make([][]epochAssign, n)
@@ -224,7 +225,7 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		if !budget.allow() {
 			break
 		}
-		cleaned, msgsRemoved, ea, err := c.cleanSegment(spec, segments[i], merged.drops[i], bw)
+		cleaned, msgsRemoved, ea, err := c.cleanSegment(spec, segments[i], merged.drops[i], bw, sc)
 		if err != nil {
 			return nil, nil, 0, -1, err
 		}
@@ -522,7 +523,7 @@ func (c *compactCleaner) loadOrBuildDigests(segments []*segment) ([]*keyDigest, 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			d, err := buildKeyDigest(seg)
+			d, err := buildKeyDigest(seg, newBlockCache())
 			if err != nil {
 				errs[i] = err
 				return
@@ -655,7 +656,7 @@ func (w *blockWriter) flush() error {
 }
 
 func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropSet,
-	bw *blockWriter) (*segment, int, []epochAssign, error) {
+	bw *blockWriter, sc *blockCache) (*segment, int, []epochAssign, error) {
 
 	cleaned, err := seg.Cleaned()
 	if err != nil {
@@ -663,7 +664,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	}
 	bw.reset(cleaned)
 	var (
-		ss = newSegmentScanner(seg)
+		ss = newSegmentScannerCache(seg, sc)
 		// A consolidation pass rewrites even byte-identical content: the
 		// rewrite's value is the block layout itself, so convergence must not
 		// discard it (it would re-rewrite and re-discard every tick).
@@ -744,7 +745,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		if err := cleaned.Delete(); err != nil {
 			return nil, 0, nil, err
 		}
-		c.refreshDigest(seg, stamp, stampHdrs)
+		c.refreshDigest(seg, stamp, stampHdrs, sc)
 		return seg, 0, assigns, nil
 	}
 	// The rewrite may hold the ONLY remaining copy of latest-per-key data;
@@ -756,7 +757,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	if err = cleaned.Replace(seg); err != nil {
 		return nil, removed, nil, err
 	}
-	c.refreshDigest(cleaned, stamp, stampHdrs)
+	c.refreshDigest(cleaned, stamp, stampHdrs, sc)
 	return cleaned, removed, assigns, nil
 }
 
@@ -802,6 +803,7 @@ func consolidateSegments(segments []*segment, maxRewrites int, budgetDur time.Du
 	out := make([]*segment, 0, len(segments))
 	budget := newRewriteBudget(maxRewrites, budgetDur)
 	bw := &blockWriter{}
+	sc := newBlockCache() // one decode-buffer pair for the whole pass
 	for _, seg := range segments[:len(segments)-1] {
 		if !seg.needsBlockConsolidation() || !budget.allow() {
 			out = append(out, seg)
@@ -812,7 +814,7 @@ func consolidateSegments(segments []*segment, maxRewrites int, budgetDur time.Du
 			return nil, err
 		}
 		bw.reset(cleaned)
-		ss := newSegmentScanner(seg)
+		ss := newSegmentScannerCache(seg, sc)
 		for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 			if err := bw.add(ms); err != nil {
 				return nil, err
@@ -836,8 +838,8 @@ func consolidateSegments(segments []*segment, maxRewrites int, budgetDur time.Du
 // refreshDigest rebuilds and persists a segment's key digest after a clean
 // pass scanned it, carrying the strip stamp the scan established. Best-effort:
 // a failure only costs the next clean a scan.
-func (c *compactCleaner) refreshDigest(seg *segment, stamp int64, stampHdrs []string) {
-	d, err := buildKeyDigest(seg)
+func (c *compactCleaner) refreshDigest(seg *segment, stamp int64, stampHdrs []string, sc *blockCache) {
+	d, err := buildKeyDigest(seg, sc)
 	if err == nil {
 		d.stripVerifiedBelow = stamp
 		d.stripHdrs = stampHdrs
