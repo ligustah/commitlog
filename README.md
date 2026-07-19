@@ -1,10 +1,57 @@
-# Commit log
+# commitlog
 
-This commit log implementation is forked from the [liftbridge-io/liftbridge](https://github.com/liftbridge-io/liftbridge)
-project created by [Tyler Treat](https://github.com/tylertreat). All other files from the original repository have been
-removed here.
+[![Go Reference](https://pkg.go.dev/badge/github.com/ligustah/commitlog.svg)](https://pkg.go.dev/github.com/ligustah/commitlog)
 
-## Changes
+A file-backed write-ahead log for Go: segmented, mmap-indexed, with
+transparent block compression and transaction-aware compaction. The
+storage engine under
+[`durable_streams`](https://github.com/ligustah/durable_streams) (typed
+exactly-once streams) and sqlcdc (incrementally maintained SQL views over
+CDC), hardened by their adversarial kill -9 soaks.
 
-* removed all code & dependencies unrelated to the commit log
-* removed all proto definitions unrelated to the commit log
+Forked from the internal commitlog of
+[liftbridge-io/liftbridge](https://github.com/liftbridge-io/liftbridge)
+by [Tyler Treat](https://github.com/tylertreat) (everything unrelated to
+the log removed); substantially extended since — see
+[CHANGELOG.md](CHANGELOG.md).
+
+## Features
+
+- **Segmented log** with sparse offset indexes, high-watermark
+  checkpointing, retention by bytes/messages/age, head truncation
+  (`TruncateBefore`), and crash recovery that recovers the REAL tail
+  (CRC forward-scan) instead of truncating to the last checkpoint.
+- **Block compression** (snappy, s2, zstd): segments store compressed
+  blocks while offsets, framing and indexes stay logical; raw and
+  compressed segments coexist byte-compatibly. Cleans consolidate tiny
+  blocks; sub-4KB appends skip the codec until then.
+- **Transaction-aware compaction** (`CleanWithSpec`): latest-per-key with
+  a caller-supplied decided ceiling, aborted-record removal, tombstone GC
+  with retention, control-marker dropping and header stripping — driven by
+  per-segment key-digest sidecars (streaming k-way merge, no global key
+  map) with time-budgeted, drop-density-ordered rewrites. Returns a
+  verified floor that callers persist to bound reopen scans.
+- **Client sidecars**: atomic named metadata files in the log directory
+  (`PutSidecar`/`GetSidecar`/`RemoveSidecar`) for checkpoints like
+  recovery floors.
+- Zero-allocation metadata scans, buffered sequential readers, on-demand
+  full-durability barrier (`SyncAll`), leader-epoch tracking.
+
+## Use
+
+```go
+log, err := commitlog.New(commitlog.Options{
+    Path:        "orders-log",
+    Compression: compress.Zstd,
+    Compact:     true,
+})
+offsets, err := log.Append([]*commitlog.Message{{Key: k, Value: v}})
+log.SetHighWatermark(offsets[len(offsets)-1])
+
+r, err := log.NewReader(0, false) // committed reader from the start
+msg, _, _, _, err := r.ReadMessage(ctx, hdrBuf)
+```
+
+The [package documentation](https://pkg.go.dev/github.com/ligustah/commitlog)
+covers the full surface; [CHANGELOG.md](CHANGELOG.md) records the format
+and API history.
