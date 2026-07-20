@@ -28,6 +28,13 @@ var ErrSegmentNotFound = errors.New("segment not found")
 // Concurrency Control is activated.
 var ErrIncorrectOffset = errors.New("incorrect offset")
 
+// ErrBlockFormat reports a segment written in a block format this build
+// does not understand. Callers probe for it at startup (before touching
+// anything) so an incompatible store is refused rather than half-read:
+// discovering the mismatch mid-replay means state has already been
+// mutated under a layout we were guessing at.
+var ErrBlockFormat = errors.New("unsupported block format version")
+
 const (
 	logFileSuffix               = ".log"
 	indexFileSuffix             = ".index"

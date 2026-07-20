@@ -5,6 +5,21 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.15.0 — 2026-07-20
+
+- **Changed (format break, clean cutover)**: block headers carry a
+  `BlockFormatVersion` byte, so a segment describes itself. A magic byte
+  alone answers "is this a block?" but not "is this a block I
+  understand?", which is what a reader must know before it applies data.
+  Readers refuse an unrecognised version with `ErrBlockFormat`.
+  Pre-version segments are NOT supported — there is deliberately no
+  compatibility path, so an existing store must be rebuilt.
+- Why: it lets a consumer PROBE each component's own bytes at startup
+  instead of consulting a side manifest. A manifest is a second source of
+  truth and can disagree with what it describes (restore a mixed backup
+  and it claims one version while the segments hold another); bytes
+  cannot lie that way.
+
 ## v0.14.1 — 2026-07-19
 
 - **Fixed**: clean-pass scans and rewrite installs retained a zstd decode

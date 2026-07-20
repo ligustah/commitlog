@@ -18,8 +18,20 @@ import (
 // of a big-endian offset (0x00 for any realistic offset), which can never be the
 // magic.
 const (
-	blockMagic     byte = 0xC1
-	blockHeaderLen      = 10 // magic(1) + codec(1) + uncompressedLen(4) + compressedLen(4)
+	blockMagic byte = 0xC1
+	// BlockFormatVersion is the block-segment layout version, carried in
+	// every block header so a segment DESCRIBES ITSELF. A magic byte alone
+	// only answers "is this a block?"; it cannot answer "is this a block I
+	// understand?", which is what a reader must know before it starts
+	// applying data.
+	//
+	// This exists so startup can PROBE each component's own bytes instead
+	// of consulting a side manifest. A manifest is a second source of
+	// truth and can disagree with what it describes — restore a mixed
+	// backup and it claims one version while the segments hold another.
+	// Bytes cannot lie that way.
+	BlockFormatVersion byte = 1
+	blockHeaderLen          = 11 // magic(1) + version(1) + codec(1) + uncompressedLen(4) + compressedLen(4)
 )
 
 // blockRef indexes one on-disk block: its position in the logical (uncompressed)
@@ -40,9 +52,10 @@ func (b blockRef) payloadLen() int64   { return b.physLen - blockHeaderLen }
 func encodeBlockHeader(codec compress.Codec, uncompressedLen, compressedLen uint32) []byte {
 	hdr := make([]byte, blockHeaderLen)
 	hdr[0] = blockMagic
-	hdr[1] = byte(codec)
-	encoding.PutUint32(hdr[2:], uncompressedLen)
-	encoding.PutUint32(hdr[6:], compressedLen)
+	hdr[1] = BlockFormatVersion
+	hdr[2] = byte(codec)
+	encoding.PutUint32(hdr[3:], uncompressedLen)
+	encoding.PutUint32(hdr[7:], compressedLen)
 	return hdr
 }
 
@@ -54,11 +67,18 @@ func parseBlockHeader(hdr []byte) (codec compress.Codec, uncompressedLen, compre
 	if hdr[0] != blockMagic {
 		return 0, 0, 0, fmt.Errorf("commitlog: bad block magic 0x%02x", hdr[0])
 	}
-	codec = compress.Codec(hdr[1])
-	if !codec.Valid() {
-		return 0, 0, 0, fmt.Errorf("commitlog: unknown block codec %d", hdr[1])
+	// Clean cutover: pre-version segments are not supported. Refusing here
+	// is the point — the alternative is reading a layout we do not
+	// understand and corrupting state before anyone notices.
+	if v := hdr[1]; v != BlockFormatVersion {
+		return 0, 0, 0, fmt.Errorf("%w: block format version %d, this build writes %d",
+			ErrBlockFormat, v, BlockFormatVersion)
 	}
-	return codec, encoding.Uint32(hdr[2:]), encoding.Uint32(hdr[6:]), nil
+	codec = compress.Codec(hdr[2])
+	if !codec.Valid() {
+		return 0, 0, 0, fmt.Errorf("commitlog: unknown block codec %d", hdr[2])
+	}
+	return codec, encoding.Uint32(hdr[3:]), encoding.Uint32(hdr[7:]), nil
 }
 
 // blockCache memoizes the most recently decompressed block so sequential reads
