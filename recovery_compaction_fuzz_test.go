@@ -183,7 +183,18 @@ func FuzzCompactionRecovery(f *testing.F) {
 			TombstoneRetention: fzTombRetention,
 		}
 
-		// First compaction pass.
+		// Budget-deferred passes: cap rewrites per pass (the deterministic
+		// maxRewrites cap) so dense segments defer to a later pass, exercising
+		// the partial-rewrite / debt-carry path. A superseded record dropped by
+		// a partial pass must stay dropped; a live one is never lost.
+		for p := s.intn(4); p > 0; p-- {
+			bs := spec
+			bs.maxRewrites = 1 + s.intn(2) // 1..2 segment rewrites this pass
+			_, berr := l.CleanWithSpec(bs)
+			require.NoError(t, berr)
+		}
+
+		// A final unbounded pass fully compacts, then the oracle must hold.
 		_, err := l.CleanWithSpec(spec)
 		require.NoError(t, err)
 		got := fzReadAll(t, l)
