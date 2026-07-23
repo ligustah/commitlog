@@ -106,6 +106,13 @@ type Options struct {
 	// byte-for-byte compatible with logs written before compression existed;
 	// existing segments keep whatever format they were written in.
 	Compression compress.Codec
+	// SegmentStore, when set, is the tier below local disk that OffloadBefore
+	// moves sealed segments' log bytes into. Reads of an offloaded segment go
+	// through the store transparently; the segment's index stays local. Nil
+	// disables tiering (the default). The caller scopes the store per-log (e.g.
+	// a directory or object-store prefix per stream) since segment keys are the
+	// bare base offset.
+	SegmentStore SegmentStore
 }
 
 // New creates a new CommitLog and starts a background goroutine which
@@ -206,17 +213,37 @@ func (l *commitLog) open() error {
 	}
 	for _, file := range files {
 		// If this file is an index file, make sure it has a corresponding .log
-		// file.
+		// file OR an .offloaded marker (an offloaded segment keeps its index
+		// local but has no local .log). Only a truly orphaned index is removed.
 		if strings.HasSuffix(file.Name(), indexFileSuffix) {
-			_, err := os.Stat(filepath.Join(
-				l.Path, strings.Replace(file.Name(), indexFileSuffix, logFileSuffix, 1)))
-			if os.IsNotExist(err) {
+			stem := strings.TrimSuffix(file.Name(), indexFileSuffix)
+			_, logErr := os.Stat(filepath.Join(l.Path, stem+logFileSuffix))
+			_, offErr := os.Stat(filepath.Join(l.Path, stem+offloadedSuffix))
+			if os.IsNotExist(logErr) && os.IsNotExist(offErr) {
 				if err := os.Remove(filepath.Join(l.Path, file.Name())); err != nil {
 					return err
 				}
-			} else if err != nil {
-				return errors.Wrap(err, "stat file failed")
+			} else if logErr != nil && !os.IsNotExist(logErr) {
+				return errors.Wrap(logErr, "stat file failed")
 			}
+		} else if strings.HasSuffix(file.Name(), offloadedSuffix) {
+			offsetStr := strings.TrimSuffix(file.Name(), offloadedSuffix)
+			baseOffset, err := strconv.Atoi(offsetStr)
+			if err != nil {
+				return err
+			}
+			if l.SegmentStore == nil {
+				return errors.Errorf("commitlog: segment %d is offloaded but no SegmentStore is configured", baseOffset)
+			}
+			key, err := os.ReadFile(filepath.Join(l.Path, file.Name()))
+			if err != nil {
+				return errors.Wrap(err, "read offload marker failed")
+			}
+			segment, err := openOffloadedSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, l.Compression, l.SegmentStore, string(key))
+			if err != nil {
+				return err
+			}
+			l.segments = append(l.segments, segment)
 		} else if strings.HasSuffix(file.Name(), logFileSuffix) {
 			offsetStr := strings.TrimSuffix(file.Name(), logFileSuffix)
 			baseOffset, err := strconv.Atoi(offsetStr)
@@ -771,6 +798,38 @@ func (l *commitLog) Truncate(offset int64) error {
 	return l.leaderEpochCache.ClearLatest(offset)
 }
 
+// OffloadBefore offloads the log bytes of every sealed segment entirely below
+// minOffset to the configured SegmentStore. See the interface doc.
+func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
+	if l.SegmentStore == nil || minOffset <= 0 {
+		return 0, nil
+	}
+	l.cleanMu.Lock()
+	defer l.cleanMu.Unlock()
+	// Snapshot the sealed segments (everything but the active one) under the
+	// read lock; offloadTo mutates a segment internally but does not touch the
+	// segment LIST, so it runs without the write lock and stays concurrent with
+	// reads/appends on other segments.
+	l.mu.RLock()
+	var targets []*segment
+	for i := 0; i < len(l.segments)-1; i++ {
+		s := l.segments[i]
+		if !s.isOffloaded() && s.LastOffset() >= 0 && s.LastOffset() < minOffset {
+			targets = append(targets, s)
+		}
+	}
+	l.mu.RUnlock()
+
+	n := 0
+	for _, s := range targets {
+		if err := s.offloadTo(l.SegmentStore, segmentStoreKey(s.BaseOffset)); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
 // TruncateBefore removes all messages from the log with offset < minOffset.
 // Sealed segments entirely before minOffset are deleted. A boundary sealed
 // segment (one that straddles minOffset) is rewritten keeping only records at
@@ -1112,6 +1171,32 @@ func (l *commitLog) rebaseSegments(from, to []*segment, epochCache *leaderEpochC
 // CleanWithSpec; -1 when compaction did not run) and, if compaction ran, a
 // *leaderEpochCache maintaining the start offset for each new leader epoch.
 func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *leaderEpochCache, int64, error) {
+	// Offloaded segments are cold, sealed, and immutable in place — their bytes
+	// live in the store and their local .log is gone, so the retention/compaction
+	// rewriters (which create local working segments and rewrite in place) must
+	// not touch them. They are always the oldest, contiguous prefix; hold them
+	// aside, clean the rest, and prepend them back. Their eventual removal is
+	// driven explicitly by the caller (TruncateBefore, whose Delete cleans the
+	// store), not by the internal cleaners. Guarded so a store-less log takes the
+	// exact original path.
+	var offloadedPrefix []*segment
+	if l.SegmentStore != nil {
+		i := 0
+		for i < len(segments) && segments[i].isOffloaded() {
+			i++
+		}
+		if i > 0 {
+			offloadedPrefix = segments[:i:i]
+			segments = segments[i:]
+		}
+	}
+	if len(offloadedPrefix) > 0 {
+		cleaned, epochCache, verified, err := l.clean(spec, segments)
+		if cleaned != nil {
+			cleaned = append(append([]*segment{}, offloadedPrefix...), cleaned...)
+		}
+		return cleaned, epochCache, verified, err
+	}
 	cleaned, err := l.deleteCleaner.Clean(segments)
 	if err != nil {
 		// A partial retention failure still hands back the surviving

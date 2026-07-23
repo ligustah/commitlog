@@ -21,6 +21,11 @@ const (
 	truncatedSuffix = ".truncated"
 	trimmedSuffix   = ".trimmed"
 	indexSuffix     = ".index"
+	// offloadedSuffix marks a sealed segment whose log bytes live in a
+	// SegmentStore rather than a local .log file. The marker file's content is
+	// the store key. Its presence (with the local .log absent) tells open() to
+	// reopen the segment through the store, keeping the local index.
+	offloadedSuffix = ".offloaded"
 )
 
 var (
@@ -83,7 +88,75 @@ type segment struct {
 	physPosition int64
 	cache        *blockCache
 
+	// Set when the segment's log bytes have been offloaded to a SegmentStore
+	// (backing is a *storeBacking). storeKey is the object key; store is the
+	// tier it lives in — retained so Delete can remove the object.
+	store    SegmentStore
+	storeKey string
+
 	sync.RWMutex
+}
+
+// isOffloaded reports whether the segment's log bytes live in a SegmentStore
+// rather than a local file. Caller holds at least the read lock.
+func (s *segment) isOffloaded() bool { return s.store != nil }
+
+func (s *segment) offloadMarkerPath() string {
+	return filepath.Join(s.path, fmt.Sprintf(fileFormat, s.BaseOffset, offloadedSuffix))
+}
+
+// segmentStoreKey is the store object key for a segment at baseOffset: the
+// zero-padded base offset, matching the local log filename stem so keys are
+// unique within a per-log store and stable across restarts.
+func segmentStoreKey(baseOffset int64) string {
+	return fmt.Sprintf("%020d%s", baseOffset, logSuffix)
+}
+
+// offloadTo uploads the segment's local log bytes to store under key, swaps the
+// backing to a read-only storeBacking, writes the .offloaded marker, and
+// deletes the local .log file. The index stays local. The segment must be
+// sealed and not already offloaded; the marker is written before the local log
+// is removed so a crash mid-offload leaves a recoverable state (marker present
+// + object uploaded, local log may or may not be gone — open() prefers the
+// store when the marker exists).
+func (s *segment) offloadTo(store SegmentStore, key string) error {
+	s.Lock()
+	defer s.Unlock()
+	if s.closed {
+		return ErrSegmentClosed
+	}
+	if s.store != nil {
+		return nil // already offloaded
+	}
+	if !s.sealed {
+		return errors.New("commitlog: cannot offload an unsealed segment")
+	}
+	size, err := s.backing.Size()
+	if err != nil {
+		return err
+	}
+	if err := store.Put(key, io.NewSectionReader(s.backing, 0, size), size); err != nil {
+		return errors.Wrap(err, "offload put")
+	}
+	sb, err := newStoreBacking(store, key)
+	if err != nil {
+		return err
+	}
+	localName := s.backing.Name()
+	if err := s.backing.Close(); err != nil {
+		return errors.Wrap(err, "close local backing")
+	}
+	// Marker first (the commit point for recovery), then drop the local log.
+	if err := os.WriteFile(s.offloadMarkerPath(), []byte(key), 0o644); err != nil {
+		return errors.Wrap(err, "write offload marker")
+	}
+	if err := os.Remove(localName); err != nil && !os.IsNotExist(err) {
+		return errors.Wrap(err, "remove local log")
+	}
+	s.backing = sb
+	s.store = store
+	s.storeKey = key
+	return nil
 }
 
 func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec) (*segment, error) {
@@ -111,6 +184,37 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 	}
 	err = s.setupIndex()
 	return s, err
+}
+
+// openOffloadedSegment opens a sealed segment whose log bytes live in store
+// under key (the local .log is gone; the index is still local). It reads block
+// metadata and positions through the store backing and loads the local index,
+// so it behaves like any other sealed segment for reads.
+func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compress.Codec, store SegmentStore, key string) (*segment, error) {
+	s := &segment{
+		maxBytes:    maxBytes,
+		BaseOffset:  baseOffset,
+		firstOffset: -1,
+		lastOffset:  -1,
+		path:        path,
+		codec:       codec,
+		waiters:     make(map[interface{}]chan struct{}),
+		sealed:      true,
+		store:       store,
+		storeKey:    key,
+	}
+	sb, err := newStoreBacking(store, key)
+	if err != nil {
+		return nil, errors.Wrap(err, "open store backing")
+	}
+	s.backing = sb
+	if err := s.initPositions(); err != nil {
+		return nil, err
+	}
+	if err := s.setupIndex(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // initPositions inspects the (already-open) log file, detects whether it uses
@@ -1001,14 +1105,24 @@ func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entr
 	}
 }
 
-// Delete closes the segment and then deletes its log and index files.
+// Delete closes the segment and then deletes its log and index files. For an
+// offloaded segment it removes the store object and the .offloaded marker
+// instead of a local .log (the log file is already gone); the local index is
+// still removed.
 func (s *segment) Delete() error {
 	if err := s.Close(); err != nil {
 		return err
 	}
 	s.Lock()
 	defer s.Unlock()
-	if exists(s.backing.Name()) {
+	if s.isOffloaded() {
+		if err := s.store.Delete(s.storeKey); err != nil {
+			return errors.Wrap(err, "delete offloaded object")
+		}
+		if err := os.Remove(s.offloadMarkerPath()); err != nil && !os.IsNotExist(err) {
+			return errors.Wrap(err, "remove offload marker")
+		}
+	} else if exists(s.backing.Name()) {
 		if err := os.Remove(s.backing.Name()); err != nil {
 			return err
 		}

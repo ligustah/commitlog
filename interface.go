@@ -25,6 +25,15 @@ type CommitLog interface {
 	// after minOffset. The active (most-recent) segment is never rewritten.
 	TruncateBefore(minOffset int64) error
 
+	// OffloadBefore moves the log bytes of every sealed segment entirely below
+	// minOffset (LastOffset < minOffset) into the configured SegmentStore,
+	// freeing local log-file space while the data stays readable through the
+	// store. The index stays local and the active segment is never offloaded.
+	// It is a no-op (returns 0) when no SegmentStore is configured. Returns the
+	// number of segments offloaded. Reads of an offloaded segment continue to
+	// work transparently; a restart reopens them from the store.
+	OffloadBefore(minOffset int64) (int, error)
+
 	// NewestOffset returns the offset of the last message in the log or -1 if
 	// empty.
 	NewestOffset() int64
