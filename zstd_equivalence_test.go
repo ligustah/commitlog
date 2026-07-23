@@ -101,6 +101,16 @@ func runTortureOpts(t *testing.T, seed int64, codec compress.Codec, maxSegBytes 
 			m := &Message{
 				Key:   []byte(fmt.Sprintf("k%02d", rng.Intn(40))),
 				Value: []byte(fmt.Sprintf("v%06d", nextVal)),
+				// A DETERMINISTIC, monotonic, far-past timestamp. The tombstone GC
+				// keeps a record whose ts is within TombstoneRetention of the clean's
+				// wall-clock now (compact_cleaner: ts < now-retention). With a real
+				// time.Now() ts and a nanosecond retention, whether a just-appended
+				// tombstone is GC'd depends on coarse timer-tick alignment (notably
+				// on Windows), which differs between the None and Zstd runs and under
+				// load — diverging the "visible records" this test asserts equal.
+				// A fixed past ts makes now-retention always exceed it, so every
+				// eligible tombstone is GC'd deterministically in both runs.
+				Timestamp: int64(nextVal),
 			}
 			if rng.Intn(6) == 0 {
 				m.Attributes |= AttrTombstone
