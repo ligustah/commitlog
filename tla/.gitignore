@@ -1,0 +1,6 @@
+# TLC model-checker working output
+states/
+*.st
+*.fp
+MC.out
+tla2tools.jar
