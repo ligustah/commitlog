@@ -1,0 +1,7 @@
+# Go source is stored and checked out with LF, so gofmt (which normalizes to LF)
+# and git agree on every platform — without this, git's autocrlf can leave CRLF
+# in a Windows working tree and make `gofmt -l .` flag files that are actually
+# clean in the repository.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
