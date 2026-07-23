@@ -5,6 +5,21 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.15.1 — 2026-07-23
+
+- **Fixed**: `Delete()` could fail on Windows when a reader was concurrently
+  mid-read — the reader still held the segment mmap/handle for a moment after
+  the log's own segments were closed, so the immediate `os.RemoveAll` raced its
+  release and failed with "being used by another process". The removal is now
+  retried briefly (the reader releases as its `ReadMessage` observes the
+  deletion); on Unix the first attempt still succeeds, so there is no added cost.
+- **Tests**: fixed two flaky tests (surfaced only under full-suite scheduling on
+  Windows) — `TestReaderLogDeleted` (the Delete race above, plus a stray
+  `require` inside a goroutine) and `TestCompressedOperationalEquivalence` (its
+  torture appended real-time timestamps and GC'd tombstones at nanosecond
+  retention, making GC decisions depend on coarse timer-tick alignment; the
+  torture now uses deterministic timestamps).
+
 ## v0.15.0 — 2026-07-20
 
 - **Changed (format break, clean cutover)**: block headers carry a
