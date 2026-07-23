@@ -142,13 +142,20 @@ func FuzzOffloadCrashConsistency(f *testing.F) {
 		}
 
 		// Reopen: offloaded segments must reopen from the store and read
-		// identically; the active tail reopens locally.
+		// identically; the active tail reopens locally. Optionally tear the
+		// active segment's tail first (a torn new record) so reopen exercises
+		// RecoverTail alongside the offloaded prefix — the committed data (all of
+		// `pre`) must still be intact after the torn suffix is dropped.
 		require.NoError(t, cl.Close())
+		if s.bool() {
+			fzTearGarbage(t, opts.Path)
+		}
 		l2, err := New(opts)
 		require.NoError(t, err)
 		defer l2.Close()
 		cl2 := l2.(*commitLog)
-		require.Equal(t, pre, fzReadAll(t, cl2), "reopen after offload changed reads")
+		require.NoError(t, cl2.RecoverTail())
+		require.Equal(t, pre, fzReadAll(t, cl2), "reopen after offload (+ torn tail) changed reads")
 
 		// Idempotent reopen.
 		require.NoError(t, cl2.Close())
