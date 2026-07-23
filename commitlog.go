@@ -392,7 +392,11 @@ func (l *commitLog) RecoverTail() error {
 	if oldest := l.OldestOffset(); oldest >= 0 && start < oldest {
 		start = oldest
 	}
-	r, err := l.NewReader(start, true)
+	// A non-blocking (no-wait) scan: it returns io.EOF the moment it drains the
+	// readable bytes rather than parking for appends that will never arrive.
+	// Recovery scans a static tail, so if the reconstructed LEO (newest) ever
+	// overshoots the log actually on disk, this terminates instead of hanging.
+	r, err := l.newRecoveryReader(start)
 	if err != nil {
 		// Nothing readable above the checkpoint: keep the old amputation.
 		return l.Truncate(hw + 1)
@@ -406,7 +410,19 @@ func (l *commitLog) RecoverTail() error {
 			if errors.Is(rerr, ErrCommitLogReadonly) {
 				break
 			}
-			// Torn suffix: keep everything before it, drop the rest.
+			if errors.Is(rerr, io.EOF) {
+				// The readable log drained before the reconstructed LEO: the
+				// segment metadata claims more records than the log holds on
+				// disk (an index-ahead-of-log inconsistency). Truncate the
+				// un-backed phantom suffix rather than trusting the index.
+				slog.Warn(
+					"commitlog: recovery LEO overshoots the log on disk; truncating un-backed tail",
+					slog.String("path", l.Path),
+					slog.Int64("lastGood", lastGood),
+					slog.Int64("expectedNewest", newest),
+				)
+			}
+			// Torn or phantom suffix: keep everything before it, drop the rest.
 			if terr := l.Truncate(lastGood + 1); terr != nil {
 				return terr
 			}

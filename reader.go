@@ -24,6 +24,7 @@ type Reader struct {
 	offset      int64
 	log         *commitLog
 	uncommitted bool
+	noWait      bool // recovery scan: never block for future appends (see newRecoveryReader)
 }
 
 // NewReader creates a new Reader starting at the given offset. If uncommitted
@@ -35,7 +36,7 @@ func (l *commitLog) NewReader(offset int64, uncommitted bool) (*Reader, error) {
 		err       error
 	)
 	if uncommitted {
-		ctxReader, err = l.newReaderUncommitted(offset)
+		ctxReader, err = l.newReaderUncommitted(offset, false)
 	} else {
 		ctxReader, err = l.newReaderCommitted(offset)
 	}
@@ -45,6 +46,26 @@ func (l *commitLog) NewReader(offset int64, uncommitted bool) (*Reader, error) {
 		log:         l,
 		uncommitted: uncommitted,
 	}, err
+}
+
+// newRecoveryReader returns an uncommitted reader that does NOT block waiting
+// for future appends: it returns io.EOF as soon as it drains the readable
+// bytes. RecoverTail scans a static tail (not a live writer), so blocking for
+// appends that will never come is never correct there — this guarantees the
+// scan always terminates even if the reconstructed LEO overshoots the log on
+// disk.
+func (l *commitLog) newRecoveryReader(offset int64) (*Reader, error) {
+	cr, err := l.newReaderUncommitted(offset, true)
+	if err != nil {
+		return nil, err
+	}
+	return &Reader{
+		ctxReader:   cr,
+		offset:      offset,
+		log:         l,
+		uncommitted: true,
+		noWait:      true,
+	}, nil
 }
 
 // ReadMessage reads a single message from the underlying CommitLog or blocks
@@ -75,7 +96,7 @@ RETRY:
 			// segment that was replaced due to compaction, so reinitialize the
 			// contextReader and try again to read from the new segment.
 			if r.uncommitted {
-				r.ctxReader, err = r.log.newReaderUncommitted(r.offset)
+				r.ctxReader, err = r.log.newReaderUncommitted(r.offset, r.noWait)
 			} else {
 				r.ctxReader, err = r.log.newReaderCommitted(r.offset)
 			}
@@ -111,7 +132,7 @@ RETRY:
 			return MessageMetadata{}, newBuf, ErrCommitLogReadonly
 		} else if pkgErrors.Cause(err) == ErrSegmentReplaced {
 			if r.uncommitted {
-				r.ctxReader, err = r.log.newReaderUncommitted(r.offset)
+				r.ctxReader, err = r.log.newReaderUncommitted(r.offset, r.noWait)
 			} else {
 				r.ctxReader, err = r.log.newReaderCommitted(r.offset)
 			}
@@ -134,6 +155,11 @@ type uncommittedReader struct {
 	mu  sync.Mutex
 	pos int64
 	br  bufReader
+	// noWait makes the reader return io.EOF the moment it drains the readable
+	// bytes instead of parking for future appends. RecoverTail uses it to scan
+	// a static tail so recovery can never hang if the reconstructed LEO
+	// overshoots the log actually on disk (an index-ahead-of-log inconsistency).
+	noWait bool
 }
 
 func (r *uncommittedReader) Read(ctx context.Context, p []byte) (n int, err error) {
@@ -212,6 +238,11 @@ LOOP:
 }
 
 func (r *uncommittedReader) waitForData(ctx context.Context, seg *segment) bool {
+	if r.noWait {
+		// Recovery scan: the readable bytes are drained and no more are coming.
+		// Return end-of-data instead of parking for appends that never arrive.
+		return false
+	}
 	wait := seg.WaitForData(r, r.pos)
 	select {
 	case <-r.cl.closed:
@@ -227,7 +258,7 @@ func (r *uncommittedReader) waitForData(ctx context.Context, seg *segment) bool 
 
 // newReaderUncommitted returns a contextReader which reads data from the log
 // starting at the given offset.
-func (l *commitLog) newReaderUncommitted(offset int64) (contextReader, error) {
+func (l *commitLog) newReaderUncommitted(offset int64, noWait bool) (contextReader, error) {
 	seg, contains := findSegmentContains(l.Segments(), offset)
 	if seg == nil {
 		return nil, ErrSegmentNotFound
@@ -241,10 +272,11 @@ func (l *commitLog) newReaderUncommitted(offset int64) (contextReader, error) {
 		position = e.Position
 	}
 	return &uncommittedReader{
-		cl:  l,
-		seg: seg,
-		pos: position,
-		br:  bufReader{seg: seg, pos: position, bufStart: position},
+		cl:     l,
+		seg:    seg,
+		pos:    position,
+		br:     bufReader{seg: seg, pos: position, bufStart: position},
+		noWait: noWait,
 	}, nil
 }
 
