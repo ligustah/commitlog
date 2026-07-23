@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,41 +209,69 @@ func FuzzCompactionRecovery(f *testing.F) {
 		fzAssertOracle(t, got2, expect, aborted)
 
 		// ---- crash + recovery stage ----
-		// A durability fence: fsync every segment and checkpoint the HW, so all
-		// current data is durable. The tear then only ever damages bytes written
-		// after the fence (a torn NEW record), or moves the checkpoint back —
-		// never destroys durable data. So recovery must restore the log exactly.
+		// Durability fence: fsync every segment and checkpoint the HW. Records at
+		// or below durableNewest are now durable and MUST survive the crash.
 		require.NoError(t, l.SyncAll())
-		preCrash := fzReadAll(t, l)
-		newestBefore := l.NewestOffset()
+		durable := fzReadAll(t, l) // the must-survive committed records
+		durableNewest := l.NewestOffset()
+		fenceLog, fenceSize := fzActiveLog(t, dir)
+
+		// Un-synced tail: extra committed-but-unsynced records under disjoint keys
+		// (so they never touch the real-key oracle). A crash may lose these.
+		for n := s.intn(4); n > 0; n-- {
+			valCounter++
+			app(&Message{Key: []byte(fmt.Sprintf("xtra%d", valCounter)), Value: []byte("x")})
+		}
 		require.NoError(t, l.Close())
 		l = nil
 
+		// A real crash never checkpoints the un-synced extras: the on-disk
+		// checkpoint reflects the fence (or an even older tick), never the extra
+		// tail. Close above wrote a clean checkpoint, so roll it back to model the
+		// crash — RecoverTail must forward-scan from there.
+		fzWriteCheckpoint(t, dir, fzStaleValue(durableNewest, s))
+
+		if s.bool() {
+			// A stray .cleaned artifact, as a crash mid-compaction (before the
+			// atomic rename swap) leaves behind; reopen must stay consistent.
+			fzStrayCleaned(t, dir)
+		}
 		switch s.intn(3) {
-		case 0: // torn new record: garbage at the tail of the active segment
+		case 0: // torn new record: garbage appended to the active segment
 			fzTearGarbage(t, dir)
-		case 1: // stale checkpoint: HW persisted below the true durable tail
-			fzStaleCheckpoint(t, dir, newestBefore, s)
-		case 2: // both at once
-			fzTearGarbage(t, dir)
-			fzStaleCheckpoint(t, dir, newestBefore, s)
+		case 1: // lost un-synced tail: truncate the active log within post-fence bytes
+			fzTruncateUnsynced(t, dir, fenceLog, fenceSize, s)
+		case 2: // pure stale checkpoint: RecoverTail extends over the complete extras
 		}
 
 		reopen()
 		require.NoError(t, l.RecoverTail())
-		require.EqualValues(t, newestBefore, l.NewestOffset(), "recovery changed the tail")
-		require.EqualValues(t, newestBefore, l.HighWatermark(), "HW not restored to the durable tail")
-		require.Equal(t, preCrash, fzReadAll(t, l), "committed state changed across crash+recovery")
+		fzAssertRecovered(t, l, durable, durableNewest, expect, aborted)
 
-		// Idempotent recovery: a second reopen (Close persisted the recovered HW)
-		// recovers nothing and changes nothing.
+		// Idempotent recovery: a second reopen recovers and changes nothing.
+		post := fzReadAll(t, l)
 		require.NoError(t, l.Close())
 		l = nil
 		reopen()
 		require.NoError(t, l.RecoverTail())
-		require.EqualValues(t, newestBefore, l.NewestOffset())
-		require.Equal(t, preCrash, fzReadAll(t, l), "second reopen was not a no-op")
+		require.Equal(t, post, fzReadAll(t, l), "second reopen was not a no-op")
 	})
+}
+
+// fzAssertRecovered checks the post-crash invariants: every durable record
+// survives byte-identically, the HW never drops below the durable tail and
+// equals the recovered tail, and the latest-per-key oracle still holds (the
+// extra un-synced records use disjoint keys, so they never affect it).
+func fzAssertRecovered(t *testing.T, l *commitLog, durable map[int64]SerializedMessage, durableNewest int64, expect map[string]fzKeyState, aborted map[int64]bool) {
+	post := fzReadAll(t, l)
+	for off, want := range durable {
+		got, ok := post[off]
+		require.True(t, ok, "durable record at offset %d lost after recovery", off)
+		require.Equal(t, want, got, "durable record at offset %d altered by recovery", off)
+	}
+	require.GreaterOrEqual(t, l.HighWatermark(), durableNewest, "HW dropped below the durable tail")
+	require.EqualValues(t, l.NewestOffset(), l.HighWatermark(), "HW is not the recovered tail")
+	fzAssertOracle(t, post, expect, aborted)
 }
 
 // fzLogFiles returns the segment .log files in dir, sorted oldest-first (the
@@ -268,13 +297,62 @@ func fzTearGarbage(t *testing.T, dir string) {
 	require.NoError(t, f.Close())
 }
 
-// fzStaleCheckpoint rewrites the HW checkpoint to a value at/below the true
-// durable tail, modelling a checkpoint that fell behind before the crash.
-// RecoverTail must forward-scan and extend the HW back to the real tail.
-func fzStaleCheckpoint(t *testing.T, dir string, trueTail int64, s *fzStream) {
-	stale := int64(s.intn(int(trueTail+2))) - 1 // in [-1, trueTail]
+// fzActiveLog returns the active (newest) segment's .log path and current size.
+func fzActiveLog(t *testing.T, dir string) (string, int64) {
+	logs := fzLogFiles(t, dir)
+	require.NotEmpty(t, logs)
+	p := logs[len(logs)-1]
+	fi, err := os.Stat(p)
+	require.NoError(t, err)
+	return p, fi.Size()
+}
+
+// fzWriteCheckpoint overwrites the HW checkpoint file with hw.
+func fzWriteCheckpoint(t *testing.T, dir string, hw int64) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, hwFileName),
-		[]byte(strconv.FormatInt(stale, 10)), 0666))
+		[]byte(strconv.FormatInt(hw, 10)), 0666))
+}
+
+// fzStaleValue returns a checkpoint value at/below the durable tail (down to
+// -1), modelling a checkpoint that fell behind before the crash.
+func fzStaleValue(durableNewest int64, s *fzStream) int64 {
+	if durableNewest < 0 {
+		return -1
+	}
+	v := durableNewest - int64(s.intn(int(durableNewest)+2)) // [durableNewest, -1]
+	if v < -1 {
+		v = -1
+	}
+	return v
+}
+
+// fzTruncateUnsynced truncates the active segment to a length within the bytes
+// written after the fence — a power-loss cut of the un-synced tail. It never
+// removes durable bytes: if the active segment rolled since the fence its whole
+// content is post-fence, otherwise the floor is the fence-time size.
+func fzTruncateUnsynced(t *testing.T, dir, fenceLog string, fenceSize int64, s *fzStream) {
+	path, size := fzActiveLog(t, dir)
+	floor := int64(0)
+	if path == fenceLog {
+		floor = fenceSize
+	}
+	if size <= floor {
+		return
+	}
+	newLen := floor + int64(s.intn(int(size-floor)+1)) // [floor, size]
+	require.NoError(t, os.Truncate(path, newLen))
+}
+
+// fzStrayCleaned drops a "<base>.log.cleaned" working-copy artifact next to the
+// oldest segment, as a crash mid-compaction (before the atomic rename) leaves.
+func fzStrayCleaned(t *testing.T, dir string) {
+	logs := fzLogFiles(t, dir)
+	if len(logs) == 0 {
+		return
+	}
+	stem := strings.TrimSuffix(filepath.Base(logs[0]), logSuffix)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, stem+logSuffix+cleanedSuffix),
+		[]byte{0xEE, 0xEE, 0xEE}, 0666))
 }
 
 // fzReadAll returns every message currently in the log, keyed by offset.
