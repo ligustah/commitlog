@@ -63,14 +63,17 @@ Recs == { log[i] : i \in 1..Len(log) }   \* the log as a set of records
 -----------------------------------------------------------------------------
 (* Compaction as a pure operator over a set of records S. *)
 
-\* An aborted record is a latest-per-key candidate only under the bug.
+\* Candidacy matches compact_cleaner.go: a record participates in latest-per-key
+\* when off <= Ceiling (the record AT the ceiling IS counted latest; only
+\* off > Ceiling is retained verbatim/uncounted). An aborted record is a
+\* candidate only under the bug.
 IsCandidate(r) == /\ r.key \in Keys
-                  /\ r.off < Ceiling
+                  /\ r.off <= Ceiling
                   /\ (BuggyAborted \/ ~r.aborted)
                   /\ r.kind \in {"data", "tomb"}
 
 CandFor(S, k) == { r \in S : /\ r.key = k
-                             /\ r.off < Ceiling
+                             /\ r.off <= Ceiling
                              /\ (BuggyAborted \/ ~r.aborted)
                              /\ r.kind \in {"data", "tomb"} }
 
@@ -84,12 +87,16 @@ GCElig(r) == /\ GcActive
              /\ r.ts = "old"
              /\ r.off < GCBelow
 
-\* Whether compaction drops record r, given the surrounding set S.
+\* Whether compaction drops record r, given the surrounding set S. classify
+\* retains every record at or above the ceiling verbatim; only strictly-below-
+\* ceiling records are decided (dropped/stripped), so all drops are gated on
+\* off < Ceiling.
 Drop(S, r) ==
-    \/ (~BuggyAborted /\ r.off < Ceiling /\ r.aborted)              \* aborted removed
-    \/ (r.kind = "control" /\ r.off < StripBelow)                   \* control below strip
-    \/ (IsCandidate(r) /\ r.off # LatestOff(S, r.key))              \* superseded copy
-    \/ (IsCandidate(r) /\ r.off = LatestOff(S, r.key) /\ GCElig(r)) \* GC'd latest tombstone
+    /\ r.off < Ceiling
+    /\ \/ (~BuggyAborted /\ r.aborted)                               \* aborted removed
+       \/ (r.kind = "control" /\ r.off < StripBelow)                 \* control below strip
+       \/ (IsCandidate(r) /\ r.off # LatestOff(S, r.key))            \* superseded copy
+       \/ (IsCandidate(r) /\ r.off = LatestOff(S, r.key) /\ GCElig(r)) \* GC'd latest tombstone
 
 \* Below StripBelow a surviving record is header-stripped (offset/value/etc kept).
 MarkStrip(r) == IF r.off < StripBelow THEN [r EXCEPT !.stripped = TRUE] ELSE r
@@ -101,7 +108,7 @@ Compact(S) == { MarkStrip(r) : r \in { x \in S : ~Drop(S, x) } }
 
 ViewOf(S) ==
     [ k \in Keys |->
-        LET c == { r \in S : r.key = k /\ ~r.aborted /\ r.off < Ceiling }
+        LET c == { r \in S : r.key = k /\ ~r.aborted /\ r.off <= Ceiling }
         IN IF c = {} THEN "absent"
            ELSE LET lt == CHOOSE r \in c : \A p \in c : r.off >= p.off
                 IN IF lt.kind = "data" THEN lt.val

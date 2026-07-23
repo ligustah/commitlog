@@ -119,10 +119,13 @@ Invariants (checked over every bounded log):
 
 Records keep their original offsets across compaction, so the log is modeled as
 a set of records each carrying its offset, and compaction is a pure set-to-set
-operator. The `Ceiling` boundary is modeled as strict (records with
-`offset < Ceiling` are decided/compacted; `offset >= Ceiling` are retained
-verbatim), a faithful abstraction of the inclusive-ceiling code where the
-boundary record is retained either way.
+operator. The `Ceiling` boundary matches `compact_cleaner.go` exactly:
+candidacy for latest-per-key is `offset <= Ceiling` (the record **at** the
+ceiling *is* counted latest and supersedes lower copies), a record is dropped
+only strictly below the ceiling (`classify` retains everything at/above it
+verbatim), and `offset > Ceiling` is retained and uncounted. Callers pass
+`Ceiling` = the transactional LSO, so undecided records above it are never
+compacted.
 
 **Teeth** (`Compaction_Buggy.cfg`, `BuggyAborted = TRUE`): models the
 transaction-blind scan that counts an aborted record as latest-per-key. TLC
@@ -158,8 +161,30 @@ from under an in-flight seek, the corruption the pin count prevents.
 - Bounded model checking, small constants (a handful of offsets/keys/segments).
   These bounds exercise every structural interleaving; they do not prove the
   properties for unbounded logs.
-- Durability is anchored at the fsync/checkpoint boundary (see CommitLog above);
-  replication-level durability is out of scope.
+- Durability is anchored at the fsync boundary, taken conservatively. Verified
+  code facts: `SetHighWatermark` never fsyncs; a segment roll seals without
+  fsyncing; `checkpointHW` fsyncs only the active segment and writes the
+  checkpoint; `SyncAll` fsyncs every segment then checkpoints. The core spec
+  collapses this per-segment granularity into one `durable` frontier and proves
+  the safety floor (fsync'd-committed data never lost, recovery never below the
+  checkpoint). The code additionally recovers written-but-unsynced data after a
+  kill -9 (`RecoverTail`'s forward scan over the OS-cached tail) — a stronger
+  recovery the model does not assert. Replication-level durability is out of
+  scope.
+- `OverrideHighWatermark` (a test-only backdoor that can lower the HW) is not
+  modeled; the spec's HW is monotone, matching production `SetHighWatermark`.
 - Leader-epoch tracking, timestamps-as-index, message framing/CRC bytes, and the
   concurrency/locking of the Go implementation are not modeled — the specs are
   about the logical committed state, not the byte layout or the mutex protocol.
+
+## Fidelity audit
+
+The specs were re-checked operation-by-operation against the implementation.
+One real divergence was found and fixed: `Compaction.tla` had modeled candidacy
+with a strict `offset < Ceiling`, but the code counts the record **at** the
+ceiling as latest-per-key (`compact_cleaner.go` excludes only `offset > Ceiling`
+from candidacy, while `classify` retains everything `>= Ceiling`). The model now
+matches — candidacy `<= Ceiling`, dropping only `< Ceiling` — and re-verifies
+clean, now exercising the boundary offset the strict model never reached. The
+durability abstraction and the offload prefetch-buffer abstraction are
+documented above; everything else was confirmed faithful.
