@@ -285,6 +285,15 @@ func (l *commitLog) open() error {
 		l.segments = append(l.segments, segment)
 	}
 	activeSegment := l.segments[len(l.segments)-1]
+	// A crash can leave the active segment's log physically ahead of its index
+	// (the write path appends the log frame before its index entry, and
+	// checkpointHW fsyncs only the log). Rebuild the missing index tail so
+	// NewestOffset / NextOffset reflect the true physical log — otherwise a seek
+	// and a sequential scan disagree on offsets and the next append can collide
+	// with an un-indexed record.
+	if err := activeSegment.reconcileIndexTail(); err != nil {
+		return err
+	}
 	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&l.vActiveSegment)),
 		unsafe.Pointer(activeSegment))
 	return nil

@@ -337,3 +337,11 @@ func (idx *index) InitializePosition() (*entry, error) {
 	}
 	return entry, nil
 }
+
+// numEntries returns how many entries the index currently holds. Valid after
+// InitializePosition.
+func (idx *index) numEntries() int64 {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.position / entryWidth
+}

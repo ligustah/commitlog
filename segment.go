@@ -546,6 +546,106 @@ func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
 	return last, nil
 }
 
+// reconcileIndexTail rebuilds index entries for any log records the index does
+// not yet cover. The append path writes a log frame BEFORE its index entry
+// (WriteMessageSet), and checkpointHW fsyncs only the log backing (not the
+// index), so a crash can leave the log physically AHEAD of the index. Without
+// this, the segment would take lastOffset/NextOffset from the stale index and
+// under-report its tail: a seek (index) and a sequential scan (physical log)
+// would disagree on which record an offset names, and the next append could
+// land on an existing un-indexed record. Run on open for the active segment;
+// a no-op when the index already covers the log.
+func (s *segment) reconcileIndexTail() error {
+	if s.Index == nil {
+		return nil // offloaded: index is remote and the segment is immutable
+	}
+	if s.blockMode {
+		return s.reconcileIndexTailBlocks()
+	}
+	return s.reconcileIndexTailRaw()
+}
+
+// reconcileIndexTailRaw scans raw message-set frames past the last indexed one
+// and appends their index entries, advancing lastOffset. A partial (torn) tail
+// frame is left for RecoverTail to truncate.
+func (s *segment) reconcileIndexTailRaw() error {
+	var startPos int64
+	if n := s.Index.numEntries(); n > 0 {
+		var last entry
+		if err := s.Index.ReadEntryAtFileOffset(&last, (n-1)*entryWidth); err != nil {
+			return err
+		}
+		startPos = last.Position + int64(last.Size)
+	}
+	hdr := make([]byte, msgSetHeaderLen)
+	for startPos+int64(msgSetHeaderLen) <= s.position {
+		if _, err := s.backing.ReadAt(hdr, startPos); err != nil {
+			break // short/torn header at the tail
+		}
+		m := messageSet(hdr)
+		frameLen := int64(msgSetHeaderLen) + int64(m.Size())
+		if startPos+frameLen > s.position {
+			break // partial tail frame — RecoverTail truncates it
+		}
+		e := &entry{
+			Offset:      m.Offset(),
+			Timestamp:   m.Timestamp(),
+			LeaderEpoch: m.LeaderEpoch(),
+			Position:    startPos,
+			Size:        int32(frameLen),
+		}
+		if err := s.Index.writeEntries([]*entry{e}); err != nil {
+			return err
+		}
+		if s.firstOffset == -1 {
+			s.firstOffset, s.firstWriteTime = e.Offset, e.Timestamp
+		}
+		s.lastOffset, s.lastWriteTime = e.Offset, e.Timestamp
+		startPos += frameLen
+	}
+	return nil
+}
+
+// reconcileIndexTailBlocks adds a sparse-index anchor for any block scanBlocks
+// reconstructed past the last anchored one (a crash between the block write and
+// its anchor write), then recomputes lastOffset from the true last block.
+func (s *segment) reconcileIndexTailBlocks() error {
+	anchored := int(s.Index.numEntries()) // one anchor per block
+	if anchored >= len(s.blocks) {
+		return nil
+	}
+	for i := anchored; i < len(s.blocks); i++ {
+		blk := s.blocks[i]
+		_, data, err := s.decodeBlock(blk, nil, nil)
+		if err != nil {
+			return err
+		}
+		if len(data) < msgSetHeaderLen {
+			break
+		}
+		m := messageSet(data)
+		anchor := &entry{
+			Offset:      m.Offset(),
+			Timestamp:   m.Timestamp(),
+			LeaderEpoch: m.LeaderEpoch(),
+			Position:    blk.logicalStart,
+			Size:        int32(msgSetHeaderLen) + m.Size(),
+		}
+		if err := s.Index.writeEntries([]*entry{anchor}); err != nil {
+			return err
+		}
+		if s.firstOffset == -1 {
+			s.firstOffset, s.firstWriteTime = anchor.Offset, anchor.Timestamp
+		}
+	}
+	last, err := s.lastFrameInBlock(s.blocks[len(s.blocks)-1].logicalStart)
+	if err != nil {
+		return err
+	}
+	s.lastOffset, s.lastWriteTime = last.Offset, last.Timestamp
+	return nil
+}
+
 // CheckSplit determines if a new log segment should be rolled out either
 // because this segment is full or LogRollTime has passed since the first
 // message was written to the segment.
