@@ -659,7 +659,24 @@ func (l *commitLog) Delete() error {
 	if err := l.closeSegments(); err != nil {
 		return err
 	}
-	return os.RemoveAll(l.Path)
+	return removeAllWithRetry(l.Path)
+}
+
+// removeAllWithRetry removes the directory tree, retrying briefly. On Windows a
+// concurrent reader's in-flight segment mmap/handle can still block removal for
+// a moment after the log's own segments are closed — the reader releases it as
+// soon as its read observes the deletion (ReadMessage returns ErrCommitLogDeleted),
+// so a short retry covers that window. On Unix the first attempt always succeeds
+// (an open file is unlinkable), so there is no added cost there.
+func removeAllWithRetry(path string) error {
+	var err error
+	for i := 0; i < 100; i++ {
+		if err = os.RemoveAll(path); err == nil {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return err
 }
 
 // IsDeleted returns true if the commit log has been deleted.

@@ -523,13 +523,15 @@ func TestReaderLogDeleted(t *testing.T) {
 	r, err := l.NewReader(0, false)
 	require.NoError(t, err)
 
-	go func() {
-		require.NoError(t, l.Delete())
-	}()
+	// Capture Delete's error on a channel — require.NoError inside a goroutine is
+	// unsafe (testify's FailNow must run on the test goroutine).
+	delErr := make(chan error, 1)
+	go func() { delErr <- l.Delete() }()
 
 	headers := make([]byte, 28)
 	_, _, _, _, err = r.ReadMessage(context.Background(), headers)
 	require.Equal(t, ErrCommitLogDeleted, err)
+	require.NoError(t, <-delErr)
 }
 
 // Ensure ReadMessage returns ErrCommitLogClosed when the commit log is closed.
