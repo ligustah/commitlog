@@ -1200,7 +1200,7 @@ func (l *commitLog) checkpointHW() error {
 	)
 
 	// fsync the log file before writing the HW to disk
-	err := l.activeSegment().log.Sync()
+	err := l.activeSegment().backing.Sync()
 	if err != nil {
 		return errors.Wrap(err, "failed to sync log file")
 	}

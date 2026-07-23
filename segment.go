@@ -55,9 +55,7 @@ var (
 )
 
 type segment struct {
-	writer         io.Writer
-	reader         io.Reader
-	log            *os.File
+	backing        segmentBacking
 	Index          *index
 	BaseOffset     int64
 	firstOffset    int64
@@ -103,16 +101,14 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 	if isNew && exists(s.logPath()) {
 		return nil, ErrSegmentExists
 	}
-	log, err := os.OpenFile(s.logPath(), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	backing, err := openLocalBacking(s.logPath())
 	if err != nil {
 		return nil, errors.Wrap(err, "open file failed")
 	}
-	s.log = log
+	s.backing = backing
 	if err := s.initPositions(); err != nil {
 		return nil, err
 	}
-	s.writer = log
-	s.reader = log
 	err = s.setupIndex()
 	return s, err
 }
@@ -125,11 +121,10 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 // segment (scan its block headers), anything else is a legacy raw segment, which
 // stays raw even if a codec is now configured so formats never mix in one file.
 func (s *segment) initPositions() error {
-	info, err := s.log.Stat()
+	size, err := s.backing.Size()
 	if err != nil {
 		return errors.Wrap(err, "stat file failed")
 	}
-	size := info.Size()
 	s.physPosition = size
 	s.cache = newBlockCache()
 	s.blocks = s.blocks[:0]
@@ -139,7 +134,7 @@ func (s *segment) initPositions() error {
 		return nil
 	}
 	var magic [1]byte
-	if _, err := s.log.ReadAt(magic[:], 0); err != nil {
+	if _, err := s.backing.ReadAt(magic[:], 0); err != nil {
 		return errors.Wrap(err, "read format magic failed")
 	}
 	if magic[0] == blockMagic {
@@ -160,7 +155,7 @@ func (s *segment) scanBlocks(size int64) error {
 		hdr     [blockHeaderLen]byte
 	)
 	for phys < size {
-		if _, err := s.log.ReadAt(hdr[:], phys); err != nil {
+		if _, err := s.backing.ReadAt(hdr[:], phys); err != nil {
 			return errors.Wrap(err, "read block header failed")
 		}
 		codec, uLen, cLen, err := parseBlockHeader(hdr[:])
@@ -428,7 +423,7 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 		}
 		n = len(p)
 	} else {
-		n, err = s.writer.Write(p)
+		n, err = s.backing.Write(p)
 		if err != nil {
 			return n, errors.Wrap(err, "log write failed")
 		}
@@ -479,7 +474,7 @@ func (s *segment) appendBlock(p []byte) error {
 	buf := make([]byte, 0, len(hdr)+len(payload))
 	buf = append(buf, hdr...)
 	buf = append(buf, payload...)
-	n, err := s.writer.Write(buf)
+	n, err := s.backing.Write(buf)
 	if err != nil {
 		return errors.Wrap(err, "block write failed")
 	}
@@ -539,7 +534,7 @@ func (s *segment) readAtLocked(p []byte, off int64) (n int, err error) {
 		return 0, ErrSegmentClosed
 	}
 	if !s.blockMode {
-		return s.log.ReadAt(p, off)
+		return s.backing.ReadAt(p, off)
 	}
 	return s.readBlocks(p, off)
 }
@@ -590,7 +585,7 @@ func (s *segment) scanReadAt(c *blockCache, p []byte, off int64) (n int, err err
 		return 0, ErrSegmentClosed
 	}
 	if !s.blockMode {
-		return s.log.ReadAt(p, off)
+		return s.backing.ReadAt(p, off)
 	}
 	return s.readBlocksCache(c, p, off)
 }
@@ -656,7 +651,7 @@ func (s *segment) decodeBlock(b blockRef, rawBuf, dataBuf []byte) (raw, data []b
 		rawBuf = make([]byte, need)
 	}
 	raw = rawBuf[:need]
-	if _, err := s.log.ReadAt(raw, b.payloadStart()); err != nil {
+	if _, err := s.backing.ReadAt(raw, b.payloadStart()); err != nil {
 		return raw, nil, errors.Wrap(err, "read block payload failed")
 	}
 	data, err = b.codec.DecompressInto(dataBuf, raw)
@@ -746,7 +741,7 @@ func (s *segment) Sync() error {
 	if s.closed {
 		return nil
 	}
-	if err := s.log.Sync(); err != nil {
+	if err := s.backing.Sync(); err != nil {
 		return err
 	}
 	return s.Index.Sync()
@@ -764,7 +759,7 @@ func (s *segment) close() error {
 	if s.closed {
 		return nil
 	}
-	if err := s.log.Close(); err != nil {
+	if err := s.backing.Close(); err != nil {
 		return err
 	}
 	if err := s.Index.Close(); err != nil {
@@ -810,13 +805,11 @@ func (s *segment) Finalize() error {
 		return errors.Wrap(err, "rename trimmed index failed")
 	}
 	s.suffix = ""
-	log, err := os.OpenFile(s.logPath(), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	backing, err := openLocalBacking(s.logPath())
 	if err != nil {
 		return errors.Wrap(err, "reopen trimmed segment failed")
 	}
-	s.log = log
-	s.writer = log
-	s.reader = log
+	s.backing = backing
 	s.closed = false
 	if err := s.initPositions(); err != nil {
 		return err
@@ -843,13 +836,11 @@ func (s *segment) Replace(old *segment) error {
 		return err
 	}
 	s.suffix = ""
-	log, err := os.OpenFile(s.logPath(), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	backing, err := openLocalBacking(s.logPath())
 	if err != nil {
 		return errors.Wrap(err, "open file failed")
 	}
-	s.log = log
-	s.writer = log
-	s.reader = log
+	s.backing = backing
 	s.closed = false
 	old.replaced = true
 	if err := s.initPositions(); err != nil {
@@ -1017,8 +1008,8 @@ func (s *segment) Delete() error {
 	}
 	s.Lock()
 	defer s.Unlock()
-	if exists(s.log.Name()) {
-		if err := os.Remove(s.log.Name()); err != nil {
+	if exists(s.backing.Name()) {
+		if err := os.Remove(s.backing.Name()); err != nil {
 			return err
 		}
 	}
