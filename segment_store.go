@@ -1,6 +1,14 @@
 package commitlog
 
-import "os"
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+
+	"github.com/pkg/errors"
+)
 
 // segmentBacking is the byte store behind a segment's log file. The default is a
 // local file (localBacking); a tiered/remote store implements the same
@@ -56,3 +64,230 @@ func (l *localBacking) Size() (int64, error) {
 	}
 	return fi.Size(), nil
 }
+
+// ErrRestoreRequired is returned by a restore-required tier (e.g. an archival
+// store like Glacier) when an offloaded object is read before it has been
+// restored to a live tier. Callers promote the segment with a restore step and
+// retry.
+var ErrRestoreRequired = errors.New("commitlog: segment offloaded to a restore-required tier; restore before reading")
+
+// SegmentStore is a backing store for offloaded (sealed, read-only) segment log
+// objects — a tier below local disk. A sealed segment's log bytes are put under
+// a key; reads fetch byte ranges from that key. The filesystem implementation
+// (FileSegmentStore) ships with commitlog and has no external dependencies;
+// cloud/blob stores (S3/GCS/…) implement the same interface from outside
+// commitlog so the cloud dependency never enters it.
+//
+// A store declares its read capability via LiveRead: a live-read store serves
+// transparent read-through, while a restore-required store returns
+// ErrRestoreRequired until the object is restored.
+type SegmentStore interface {
+	// Put stores size bytes read from r under key, overwriting any existing
+	// object (idempotent re-offload).
+	Put(key string, r io.Reader, size int64) error
+	// ReadAt reads len(p) bytes at off from the object under key, with
+	// io.ReaderAt semantics (a short read returns io.EOF). A restore-required
+	// store returns ErrRestoreRequired.
+	ReadAt(key string, p []byte, off int64) (int, error)
+	// Size returns the byte length of the object under key.
+	Size(key string) (int64, error)
+	// List returns the keys present in the store.
+	List() ([]string, error)
+	// Delete removes the object under key; deleting an absent key is a no-op.
+	Delete(key string) error
+	// LiveRead reports whether the store serves transparent read-through
+	// (true) or requires an explicit restore before reads succeed (false).
+	LiveRead() bool
+}
+
+// FileSegmentStore is a filesystem SegmentStore: each offloaded segment's log
+// bytes are a file under Dir. It covers the fast-disk → slow-disk tiering case
+// with zero external dependencies. It is a live-read store.
+type FileSegmentStore struct {
+	dir string
+}
+
+// NewFileSegmentStore returns a filesystem store rooted at dir, creating it if
+// needed.
+func NewFileSegmentStore(dir string) (*FileSegmentStore, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, errors.Wrap(err, "create segment store dir")
+	}
+	return &FileSegmentStore{dir: dir}, nil
+}
+
+// objectPath maps a key to a file path. Keys are log-relative segment
+// identifiers (no separators), so the join stays within dir.
+func (s *FileSegmentStore) objectPath(key string) string {
+	return filepath.Join(s.dir, key)
+}
+
+func (s *FileSegmentStore) Put(key string, r io.Reader, size int64) error {
+	tmp := s.objectPath(key) + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return errors.Wrap(err, "create store object")
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return errors.Wrap(err, "write store object")
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return errors.Wrap(err, "sync store object")
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	// Rename is the commit point: an offloaded object is either fully present or
+	// absent, never half-written.
+	return os.Rename(tmp, s.objectPath(key))
+}
+
+func (s *FileSegmentStore) ReadAt(key string, p []byte, off int64) (int, error) {
+	f, err := os.Open(s.objectPath(key))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.ReadAt(p, off)
+}
+
+func (s *FileSegmentStore) Size(key string) (int64, error) {
+	fi, err := os.Stat(s.objectPath(key))
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
+}
+
+func (s *FileSegmentStore) List() ([]string, error) {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) == ".tmp" {
+			continue
+		}
+		keys = append(keys, e.Name())
+	}
+	return keys, nil
+}
+
+func (s *FileSegmentStore) Delete(key string) error {
+	err := os.Remove(s.objectPath(key))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func (s *FileSegmentStore) LiveRead() bool { return true }
+
+// prefetchSize is how far ahead storeBacking reads on a cache miss. Sequential
+// scans (recovery, compaction, replay) then serve most reads from the buffer
+// instead of a per-frame round trip to the store — the read-ahead the tiered
+// design calls for. Sized to comfortably cover a message-set frame plus slack.
+const prefetchSize = 1 << 20 // 1 MiB
+
+// storeBacking is a read-only segmentBacking over an offloaded object in a
+// SegmentStore. It reads through transparently — a ReadAt fetches from the
+// store — with a single read-ahead buffer so a sequential scan doesn't pay a
+// store round trip per frame. Writes are rejected: a segment is offloaded only
+// after it is sealed.
+type storeBacking struct {
+	store SegmentStore
+	key   string
+	size  int64
+
+	mu     sync.Mutex
+	buf    []byte // read-ahead buffer contents
+	bufOff int64  // logical offset of buf[0]; -1 when empty
+}
+
+// newStoreBacking opens a read-only backing over key in store. It fetches the
+// object size once; a restore-required store surfaces ErrRestoreRequired here.
+func newStoreBacking(store SegmentStore, key string) (*storeBacking, error) {
+	size, err := store.Size(key)
+	if err != nil {
+		return nil, err
+	}
+	return &storeBacking{store: store, key: key, size: size, bufOff: -1}, nil
+}
+
+func (b *storeBacking) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, fmt.Errorf("commitlog: negative read offset %d", off)
+	}
+	if off >= b.size {
+		return 0, io.EOF
+	}
+	n := 0
+	for n < len(p) {
+		cur := off + int64(n)
+		if cur >= b.size {
+			return n, io.EOF
+		}
+		m, err := b.readOne(p[n:], cur)
+		n += m
+		if err != nil {
+			if err == io.EOF && n == len(p) {
+				return n, nil
+			}
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+// readOne serves as much of the request as the read-ahead buffer covers,
+// refilling it from the store (a prefetch window) on a miss.
+func (b *storeBacking) readOne(p []byte, off int64) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.bufOff < 0 || off < b.bufOff || off >= b.bufOff+int64(len(b.buf)) {
+		if err := b.refill(off); err != nil {
+			return 0, err
+		}
+	}
+	start := off - b.bufOff
+	return copy(p, b.buf[start:]), nil
+}
+
+// refill fetches a prefetch window starting at off (clamped to the object) into
+// the buffer. A short store read at the tail is expected and fine.
+func (b *storeBacking) refill(off int64) error {
+	want := int64(prefetchSize)
+	if off+want > b.size {
+		want = b.size - off
+	}
+	if cap(b.buf) < int(want) {
+		b.buf = make([]byte, want)
+	}
+	b.buf = b.buf[:want]
+	nread, err := b.store.ReadAt(b.key, b.buf, off)
+	if err != nil && !(err == io.EOF && nread > 0) {
+		b.bufOff = -1
+		b.buf = b.buf[:0]
+		return err
+	}
+	b.buf = b.buf[:nread]
+	b.bufOff = off
+	if nread == 0 {
+		return io.EOF
+	}
+	return nil
+}
+
+func (b *storeBacking) Write(p []byte) (int, error) {
+	return 0, errors.New("commitlog: offloaded segment is read-only")
+}
+func (b *storeBacking) Size() (int64, error) { return b.size, nil }
+func (b *storeBacking) Sync() error          { return nil }
+func (b *storeBacking) Close() error         { return nil }
+func (b *storeBacking) Name() string         { return "store:" + b.key }
