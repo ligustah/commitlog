@@ -36,8 +36,8 @@ const (
 var (
 	// Bounded encoder/decoder state: the library defaults size their lane
 	// pools by GOMAXPROCS with multi-MB windows — hundreds of MB of standing
-	// memory on a many-core box (measured as a ~750MB daemon baseline in the
-	// sqlcdc soak the day zstd was enabled). Commitlog blocks are small; a
+	// memory on a many-core box (measured as a ~750MB baseline in a
+	// long-running soak the day zstd was enabled). Commitlog blocks are small; a
 	// 1MB window loses nothing, and 2/4 lanes keep encode/decode concurrent
 	// enough for an IO-bound log.
 	zstdEnc, _ = zstd.NewWriter(nil,
