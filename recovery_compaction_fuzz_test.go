@@ -20,6 +20,10 @@ package commitlog
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -98,15 +102,27 @@ func FuzzCompactionRecovery(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s := &fzStream{b: data}
 
-		l, cleanup := setupWithOptions(t, Options{
-			Path:                 tempDir(t),
+		dir := tempDir(t)
+		opts := Options{
+			Path:                 dir,
 			MaxSegmentBytes:      64, // roll constantly: ~one record per segment
 			Compact:              true,
 			DisableAutoClean:     true,      // the harness drives every clean
 			HWCheckpointInterval: time.Hour, // no background checkpoint races
 			CleanerInterval:      time.Hour,
+		}
+		var l *commitLog
+		reopen := func() {
+			ll, err := New(opts)
+			require.NoError(t, err)
+			l = ll.(*commitLog)
+		}
+		reopen()
+		t.Cleanup(func() {
+			if l != nil {
+				l.Close()
+			}
 		})
-		defer cleanup()
 
 		expect := map[string]fzKeyState{}
 		aborted := map[int64]bool{}
@@ -179,7 +195,75 @@ func FuzzCompactionRecovery(f *testing.F) {
 		got2 := fzReadAll(t, l)
 		require.Equal(t, got, got2, "compaction did not converge: second pass changed the log")
 		fzAssertOracle(t, got2, expect, aborted)
+
+		// ---- crash + recovery stage ----
+		// A durability fence: fsync every segment and checkpoint the HW, so all
+		// current data is durable. The tear then only ever damages bytes written
+		// after the fence (a torn NEW record), or moves the checkpoint back —
+		// never destroys durable data. So recovery must restore the log exactly.
+		require.NoError(t, l.SyncAll())
+		preCrash := fzReadAll(t, l)
+		newestBefore := l.NewestOffset()
+		require.NoError(t, l.Close())
+		l = nil
+
+		switch s.intn(3) {
+		case 0: // torn new record: garbage at the tail of the active segment
+			fzTearGarbage(t, dir)
+		case 1: // stale checkpoint: HW persisted below the true durable tail
+			fzStaleCheckpoint(t, dir, newestBefore, s)
+		case 2: // both at once
+			fzTearGarbage(t, dir)
+			fzStaleCheckpoint(t, dir, newestBefore, s)
+		}
+
+		reopen()
+		require.NoError(t, l.RecoverTail())
+		require.EqualValues(t, newestBefore, l.NewestOffset(), "recovery changed the tail")
+		require.EqualValues(t, newestBefore, l.HighWatermark(), "HW not restored to the durable tail")
+		require.Equal(t, preCrash, fzReadAll(t, l), "committed state changed across crash+recovery")
+
+		// Idempotent recovery: a second reopen (Close persisted the recovered HW)
+		// recovers nothing and changes nothing.
+		require.NoError(t, l.Close())
+		l = nil
+		reopen()
+		require.NoError(t, l.RecoverTail())
+		require.EqualValues(t, newestBefore, l.NewestOffset())
+		require.Equal(t, preCrash, fzReadAll(t, l), "second reopen was not a no-op")
 	})
+}
+
+// fzLogFiles returns the segment .log files in dir, sorted oldest-first (the
+// last is the active segment).
+func fzLogFiles(t *testing.T, dir string) []string {
+	logs, err := filepath.Glob(filepath.Join(dir, "*"+logSuffix))
+	require.NoError(t, err)
+	sort.Strings(logs)
+	return logs
+}
+
+// fzTearGarbage appends a partial/garbage frame to the active segment — a torn
+// write of a new record. It never removes existing (durable) records.
+func fzTearGarbage(t *testing.T, dir string) {
+	logs := fzLogFiles(t, dir)
+	if len(logs) == 0 {
+		return
+	}
+	f, err := os.OpenFile(logs[len(logs)-1], os.O_APPEND|os.O_WRONLY, 0666)
+	require.NoError(t, err)
+	_, werr := f.Write([]byte{0xDE, 0xAD, 0xBE})
+	require.NoError(t, werr)
+	require.NoError(t, f.Close())
+}
+
+// fzStaleCheckpoint rewrites the HW checkpoint to a value at/below the true
+// durable tail, modelling a checkpoint that fell behind before the crash.
+// RecoverTail must forward-scan and extend the HW back to the real tail.
+func fzStaleCheckpoint(t *testing.T, dir string, trueTail int64, s *fzStream) {
+	stale := int64(s.intn(int(trueTail+2))) - 1 // in [-1, trueTail]
+	require.NoError(t, os.WriteFile(filepath.Join(dir, hwFileName),
+		[]byte(strconv.FormatInt(stale, 10)), 0666))
 }
 
 // fzReadAll returns every message currently in the log, keyed by offset.
