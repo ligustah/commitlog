@@ -108,11 +108,17 @@ type Options struct {
 	Compression compress.Codec
 	// SegmentStore, when set, is the tier below local disk that OffloadBefore
 	// moves sealed segments' log bytes into. Reads of an offloaded segment go
-	// through the store transparently; the segment's index stays local. Nil
-	// disables tiering (the default). The caller scopes the store per-log (e.g.
-	// a directory or object-store prefix per stream) since segment keys are the
-	// bare base offset.
+	// through the store transparently. Nil disables tiering (the default). The
+	// caller scopes the store per-log (e.g. a directory or object-store prefix per
+	// stream) since segment keys are the bare base offset.
 	SegmentStore SegmentStore
+	// RemoteIndexCache, when set (with SegmentStore), enables tiered-storage
+	// option 2: OffloadBefore also offloads each sealed segment's index object and
+	// drops the local index, so no per-segment index file remains on local disk.
+	// Reads fetch the index into this process-wide LRU cache on demand. Nil keeps
+	// option 1 (index stays local). Share ONE cache across every log in the
+	// process for a single on-disk budget.
+	RemoteIndexCache *RemoteIndexCache
 }
 
 // New creates a new CommitLog and starts a background goroutine which
@@ -235,11 +241,14 @@ func (l *commitLog) open() error {
 			if l.SegmentStore == nil {
 				return errors.Errorf("commitlog: segment %d is offloaded but no SegmentStore is configured", baseOffset)
 			}
-			key, err := os.ReadFile(filepath.Join(l.Path, file.Name()))
+			meta, err := readOffloadMarker(filepath.Join(l.Path, file.Name()))
 			if err != nil {
 				return errors.Wrap(err, "read offload marker failed")
 			}
-			segment, err := openOffloadedSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, l.Compression, l.SegmentStore, string(key))
+			if meta.IndexKey != "" && l.RemoteIndexCache == nil {
+				return errors.Errorf("commitlog: segment %d has an offloaded index but no RemoteIndexCache is configured", baseOffset)
+			}
+			segment, err := openOffloadedSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, l.Compression, l.SegmentStore, meta, l.RemoteIndexCache)
 			if err != nil {
 				return err
 			}
@@ -822,7 +831,16 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 
 	n := 0
 	for _, s := range targets {
-		if err := s.offloadTo(l.SegmentStore, segmentStoreKey(s.BaseOffset)); err != nil {
+		// Gate on convergence: never offload a segment that still owes a block
+		// consolidation rewrite. Offload is a pure byte copy, so a fragmented
+		// segment offloaded early would freeze its bloated many-block layout (and
+		// fat sparse index) into the store, where it can no longer be cheaply
+		// re-consolidated and wastes cache budget forever. A later Clean converges
+		// it and a subsequent OffloadBefore takes it then.
+		if s.needsBlockConsolidation() {
+			continue
+		}
+		if err := s.offloadTo(l.SegmentStore, segmentStoreKey(s.BaseOffset), l.RemoteIndexCache); err != nil {
 			return n, err
 		}
 		n++

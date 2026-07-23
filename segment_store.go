@@ -220,6 +220,14 @@ func newStoreBacking(store SegmentStore, key string) (*storeBacking, error) {
 	return &storeBacking{store: store, key: key, size: size, bufOff: -1}, nil
 }
 
+// newStoreBackingSize opens a read-only backing over key with an already-known
+// object size, skipping the store round-trip newStoreBacking makes. Used on boot
+// from a v2 offload marker (which records the log object's size) so placing a
+// cold segment touches the store zero times.
+func newStoreBackingSize(store SegmentStore, key string, size int64) (*storeBacking, error) {
+	return &storeBacking{store: store, key: key, size: size, bufOff: -1}, nil
+}
+
 func (b *storeBacking) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("commitlog: negative read offset %d", off)

@@ -1,11 +1,13 @@
 package commitlog
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,12 +96,50 @@ type segment struct {
 	store    SegmentStore
 	storeKey string
 
+	// Set additionally when the segment's INDEX has also been offloaded (tiered
+	// storage, option 2): the index object lives under indexKey and is fetched on
+	// demand into indexCache; Index is nil. For an option-1 offloaded segment
+	// (log offloaded, index kept local) and for a local segment these are unset
+	// and Index is the resident local index.
+	indexKey   string
+	indexCache *RemoteIndexCache
+
 	sync.RWMutex
 }
 
 // isOffloaded reports whether the segment's log bytes live in a SegmentStore
 // rather than a local file. Caller holds at least the read lock.
 func (s *segment) isOffloaded() bool { return s.store != nil }
+
+// indexOffloaded reports whether the segment's index (not just its log) lives in
+// the store (tiered storage, option 2), so seeks fetch it via indexCache.
+func (s *segment) indexOffloaded() bool { return s.Index == nil && s.indexCache != nil }
+
+// indexCacheKey uniquely identifies this segment's index across every log in the
+// process (the shared cache is keyed by it), so two logs' like-named index
+// objects never collide.
+func (s *segment) indexCacheKey() string {
+	return s.path + "|" + strconv.FormatInt(s.BaseOffset, 10)
+}
+
+// withIndex runs fn against the segment's index: the resident local index for a
+// normal or option-1 offloaded segment, or — for an option-2 offloaded segment
+// whose index lives in the store — the index fetched into the shared cache on
+// this seek and released after. Callers hold the segment read lock.
+func (s *segment) withIndex(fn func(idx *index) error) error {
+	if s.Index != nil {
+		return fn(s.Index)
+	}
+	if s.indexCache == nil || s.store == nil {
+		return errIndexCorrupt
+	}
+	idx, release, err := s.indexCache.acquire(s.store, s.indexKey, s.indexCacheKey(), s.BaseOffset)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn(idx)
+}
 
 func (s *segment) offloadMarkerPath() string {
 	return filepath.Join(s.path, fmt.Sprintf(fileFormat, s.BaseOffset, offloadedSuffix))
@@ -112,6 +152,47 @@ func segmentStoreKey(baseOffset int64) string {
 	return fmt.Sprintf("%020d%s", baseOffset, logSuffix)
 }
 
+// segmentIndexStoreKey is the store object key for an offloaded segment's index
+// (option 2), mirroring the log key with the index suffix.
+func segmentIndexStoreKey(baseOffset int64) string {
+	return fmt.Sprintf("%020d%s", baseOffset, indexSuffix)
+}
+
+// offloadMeta is the JSON content of a v2 .offloaded marker. It carries enough to
+// place the segment at boot without reading its (now remote) index: boundaries
+// for offset/time routing, and the log object size so the store backing opens
+// without a size round-trip. A v1 marker (option 1, index kept local) is instead
+// the raw log key bytes; readOffloadMarker tells them apart by the leading '{'.
+type offloadMeta struct {
+	LogKey         string `json:"log_key"`
+	IndexKey       string `json:"index_key,omitempty"` // empty => index kept local (option 1)
+	FirstOffset    int64  `json:"first_offset"`
+	LastOffset     int64  `json:"last_offset"`
+	FirstWriteTime int64  `json:"first_write_time"`
+	LastWriteTime  int64  `json:"last_write_time"`
+	Position       int64  `json:"position"`
+	PhysPosition   int64  `json:"phys_position"`
+	BlockMode      bool   `json:"block_mode"`
+}
+
+// readOffloadMarker reads a .offloaded marker. A v2 marker is JSON; a v1 marker
+// (option 1) is the raw log key, returned as offloadMeta{LogKey} with IndexKey
+// empty so the caller keeps using the local index.
+func readOffloadMarker(path string) (offloadMeta, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return offloadMeta{}, err
+	}
+	if len(b) > 0 && b[0] == '{' {
+		var m offloadMeta
+		if err := json.Unmarshal(b, &m); err != nil {
+			return offloadMeta{}, errors.Wrap(err, "parse offload marker")
+		}
+		return m, nil
+	}
+	return offloadMeta{LogKey: string(b)}, nil
+}
+
 // offloadTo uploads the segment's local log bytes to store under key, swaps the
 // backing to a read-only storeBacking, writes the .offloaded marker, and
 // deletes the local .log file. The index stays local. The segment must be
@@ -119,7 +200,16 @@ func segmentStoreKey(baseOffset int64) string {
 // is removed so a crash mid-offload leaves a recoverable state (marker present
 // + object uploaded, local log may or may not be gone — open() prefers the
 // store when the marker exists).
-func (s *segment) offloadTo(store SegmentStore, key string) error {
+// offloadTo uploads the segment's log bytes to store under key and swaps the
+// backing to a read-only storeBacking. When cache is non-nil (tiered storage,
+// option 2) it also uploads the index object and drops the local index, so no
+// per-segment index file remains on local disk; reads then fetch the index into
+// the shared cache on demand. A v2 .offloaded marker records the segment's
+// boundaries and log size so a restart places it without reading the remote
+// index. The marker is the commit point: it is written after both objects are
+// uploaded and before the local files are removed, so a crash mid-offload leaves
+// a recoverable state (objects present + marker => open through the store).
+func (s *segment) offloadTo(store SegmentStore, key string, cache *RemoteIndexCache) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
@@ -138,24 +228,73 @@ func (s *segment) offloadTo(store SegmentStore, key string) error {
 	if err := store.Put(key, io.NewSectionReader(s.backing, 0, size), size); err != nil {
 		return errors.Wrap(err, "offload put")
 	}
-	sb, err := newStoreBacking(store, key)
+
+	// Option 2: upload the index object too (before the marker), so the marker's
+	// presence implies both objects exist.
+	var indexKey string
+	if cache != nil {
+		indexKey = segmentIndexStoreKey(s.BaseOffset)
+		r, isize, err := s.Index.offloadReader()
+		if err != nil {
+			return errors.Wrap(err, "read index for offload")
+		}
+		if err := store.Put(indexKey, r, isize); err != nil {
+			return errors.Wrap(err, "offload index put")
+		}
+	}
+
+	sb, err := newStoreBackingSize(store, key, size)
 	if err != nil {
 		return err
 	}
-	localName := s.backing.Name()
+	localLog := s.backing.Name()
 	if err := s.backing.Close(); err != nil {
 		return errors.Wrap(err, "close local backing")
 	}
-	// Marker first (the commit point for recovery), then drop the local log.
-	if err := os.WriteFile(s.offloadMarkerPath(), []byte(key), 0o644); err != nil {
+	var localIndex string
+	if cache != nil {
+		localIndex = s.Index.Name()
+		if err := s.Index.Close(); err != nil {
+			return errors.Wrap(err, "close local index")
+		}
+	}
+
+	meta := offloadMeta{
+		LogKey:         key,
+		IndexKey:       indexKey,
+		FirstOffset:    s.firstOffset,
+		LastOffset:     s.lastOffset,
+		FirstWriteTime: s.firstWriteTime,
+		LastWriteTime:  s.lastWriteTime,
+		Position:       s.position,
+		PhysPosition:   size,
+		BlockMode:      s.blockMode,
+	}
+	markerBytes, err := json.Marshal(meta)
+	if err != nil {
+		return errors.Wrap(err, "encode offload marker")
+	}
+	// Marker (commit point), then drop the local files.
+	if err := os.WriteFile(s.offloadMarkerPath(), markerBytes, 0o644); err != nil {
 		return errors.Wrap(err, "write offload marker")
 	}
-	if err := os.Remove(localName); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(localLog); err != nil && !os.IsNotExist(err) {
 		return errors.Wrap(err, "remove local log")
 	}
+	if localIndex != "" {
+		if err := os.Remove(localIndex); err != nil && !os.IsNotExist(err) {
+			return errors.Wrap(err, "remove local index")
+		}
+	}
+
 	s.backing = sb
 	s.store = store
 	s.storeKey = key
+	if cache != nil {
+		s.Index = nil
+		s.indexKey = indexKey
+		s.indexCache = cache
+	}
 	return nil
 }
 
@@ -190,7 +329,12 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 // under key (the local .log is gone; the index is still local). It reads block
 // metadata and positions through the store backing and loads the local index,
 // so it behaves like any other sealed segment for reads.
-func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compress.Codec, store SegmentStore, key string) (*segment, error) {
+// openOffloadedSegment opens a sealed segment whose log bytes live in store. meta
+// comes from the .offloaded marker. For a v1 marker (option 1, meta.IndexKey
+// empty) the local index is still present and is loaded normally. For a v2 marker
+// (option 2) the index has been offloaded too: boundaries come from the marker,
+// the index stays remote (fetched into cache on first seek), and Index is nil.
+func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compress.Codec, store SegmentStore, meta offloadMeta, cache *RemoteIndexCache) (*segment, error) {
 	s := &segment{
 		maxBytes:    maxBytes,
 		BaseOffset:  baseOffset,
@@ -201,9 +345,28 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		waiters:     make(map[interface{}]chan struct{}),
 		sealed:      true,
 		store:       store,
-		storeKey:    key,
+		storeKey:    meta.LogKey,
 	}
-	sb, err := newStoreBacking(store, key)
+
+	if meta.IndexKey == "" {
+		// Option 1: index kept local. Size unknown from the marker, so the
+		// backing fetches it; then load the local index as usual.
+		sb, err := newStoreBacking(store, meta.LogKey)
+		if err != nil {
+			return nil, errors.Wrap(err, "open store backing")
+		}
+		s.backing = sb
+		if err := s.initPositions(); err != nil {
+			return nil, err
+		}
+		return s, s.setupIndex()
+	}
+
+	// Option 2: index offloaded. The marker records the log object size, so the
+	// backing opens without a size round-trip. initPositions still reconstructs
+	// the block layout from the log (as option 1 does); the boundaries the index
+	// would supply come from the marker instead, and no index is read on open.
+	sb, err := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
 	if err != nil {
 		return nil, errors.Wrap(err, "open store backing")
 	}
@@ -211,9 +374,13 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 	if err := s.initPositions(); err != nil {
 		return nil, err
 	}
-	if err := s.setupIndex(); err != nil {
-		return nil, err
-	}
+	s.firstOffset = meta.FirstOffset
+	s.lastOffset = meta.LastOffset
+	s.firstWriteTime = meta.FirstWriteTime
+	s.lastWriteTime = meta.LastWriteTime
+	s.Index = nil
+	s.indexKey = meta.IndexKey
+	s.indexCache = cache
 	return s, nil
 }
 
@@ -427,7 +594,9 @@ func (s *segment) seal() {
 	s.sealed = true
 	// Notify any readers waiting for data.
 	s.notifyWaiters()
-	s.Index.Shrink() // nolint: errcheck
+	if s.Index != nil {
+		s.Index.Shrink() // nolint: errcheck
+	}
 }
 
 func (s *segment) NextOffset() int64 {
@@ -489,7 +658,11 @@ func (s *segment) MessageCount() int64 {
 	// After compaction a compressed segment stores one message per block and
 	// may have offset gaps, in which case this is an upper bound — acceptable
 	// for the retention heuristic that consumes it.
-	if !s.blockMode {
+	// A raw segment with a resident index counts entries directly. A raw segment
+	// whose index is offloaded (Index nil) derives the count from its offset span
+	// — exact for a raw segment (one contiguous message per offset) and avoiding a
+	// store fetch for a mere retention heuristic.
+	if !s.blockMode && s.Index != nil {
 		return s.Index.CountEntries()
 	}
 	if s.lastOffset < 0 {
@@ -848,6 +1021,9 @@ func (s *segment) Sync() error {
 	if err := s.backing.Sync(); err != nil {
 		return err
 	}
+	if s.Index == nil {
+		return nil // offloaded index: nothing local to sync
+	}
 	return s.Index.Sync()
 }
 
@@ -866,8 +1042,10 @@ func (s *segment) close() error {
 	if err := s.backing.Close(); err != nil {
 		return err
 	}
-	if err := s.Index.Close(); err != nil {
-		return err
+	if s.Index != nil {
+		if err := s.Index.Close(); err != nil {
+			return err
+		}
 	}
 	s.closed = true
 	s.seal()
@@ -964,30 +1142,39 @@ func (s *segment) findEntry(offset int64) (*entry, error) {
 	s.RLock()
 	defer s.RUnlock()
 	if s.blockMode {
-		return s.scanForward(s.anchorPositionForOffset(offset), func(m messageSet) bool {
+		anchor, err := s.anchorPositionForOffset(offset)
+		if err != nil {
+			return nil, err
+		}
+		return s.scanForward(anchor, func(m messageSet) bool {
 			return m.Offset() >= offset
 		})
 	}
-	var (
-		entry = &entry{}
-		n     = int(s.Index.Position() / entryWidth)
-		err   error
-	)
-	idx := sort.Search(n, func(i int) bool {
-		if e := s.Index.ReadEntryAtFileOffset(entry, int64(i*entryWidth)); e != nil {
-			err = e
-			return true
+	var result *entry
+	err := s.withIndex(func(index *index) error {
+		entry := &entry{}
+		n := int(index.Position() / entryWidth)
+		var serr error
+		i := sort.Search(n, func(i int) bool {
+			if e := index.ReadEntryAtFileOffset(entry, int64(i*entryWidth)); e != nil {
+				serr = e
+				return true
+			}
+			return entry.Offset >= offset
+		})
+		if serr != nil {
+			return serr
 		}
-		return entry.Offset >= offset
+		if i == n {
+			return ErrEntryNotFound
+		}
+		if e := index.ReadEntryAtFileOffset(entry, int64(i*entryWidth)); e != nil {
+			return e
+		}
+		result = entry
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	if idx == n {
-		return nil, ErrEntryNotFound
-	}
-	err = s.Index.ReadEntryAtFileOffset(entry, int64(idx*entryWidth))
-	return entry, err
+	return result, err
 }
 
 // findEntryByTimestamp returns the first entry whose timestamp is greater than
@@ -999,57 +1186,71 @@ func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
 	s.RLock()
 	defer s.RUnlock()
 	if s.blockMode {
-		return s.scanForward(s.anchorPositionForTimestamp(timestamp), func(m messageSet) bool {
+		anchor, err := s.anchorPositionForTimestamp(timestamp)
+		if err != nil {
+			return nil, err
+		}
+		return s.scanForward(anchor, func(m messageSet) bool {
 			return m.Timestamp() >= timestamp
 		})
 	}
-	var (
-		entry = &entry{}
-		n     = int(s.Index.CountEntries())
-		err   error
-	)
-	idx := sort.Search(n, func(i int) bool {
-		if e := s.Index.ReadEntryAtLogOffset(entry, int64(i)); e != nil {
-			err = e
-			return true
+	var result *entry
+	err := s.withIndex(func(index *index) error {
+		entry := &entry{}
+		n := int(index.CountEntries())
+		var serr error
+		i := sort.Search(n, func(i int) bool {
+			if e := index.ReadEntryAtLogOffset(entry, int64(i)); e != nil {
+				serr = e
+				return true
+			}
+			return entry.Timestamp >= timestamp
+		})
+		if serr != nil {
+			return serr
 		}
-		return entry.Timestamp >= timestamp
+		if i == n {
+			return ErrEntryNotFound
+		}
+		if e := index.ReadEntryAtLogOffset(entry, int64(i)); e != nil {
+			return e
+		}
+		result = entry
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	if idx == n {
-		return nil, ErrEntryNotFound
-	}
-	err = s.Index.ReadEntryAtLogOffset(entry, int64(idx))
-	return entry, err
+	return result, err
 }
 
 // anchorPositionForOffset binary-searches the sparse index for the block that
 // may contain the given offset (the greatest block base offset <= offset) and
 // returns that block's logical start position, the point from which to scan
 // frames forward. Callers hold the segment read lock.
-func (s *segment) anchorPositionForOffset(offset int64) int64 {
-	n := int(s.Index.Position() / entryWidth)
-	if n == 0 {
-		return 0
-	}
-	e := &entry{}
-	// First anchor whose base offset is strictly greater than the target; the
-	// containing block is the one before it.
-	idx := sort.Search(n, func(i int) bool {
-		if err := s.Index.ReadEntryAtFileOffset(e, int64(i*entryWidth)); err != nil {
-			return true
+func (s *segment) anchorPositionForOffset(offset int64) (int64, error) {
+	var pos int64
+	err := s.withIndex(func(index *index) error {
+		n := int(index.Position() / entryWidth)
+		if n == 0 {
+			return nil
 		}
-		return e.Offset > offset
+		e := &entry{}
+		// First anchor whose base offset is strictly greater than the target; the
+		// containing block is the one before it.
+		idx := sort.Search(n, func(i int) bool {
+			if err := index.ReadEntryAtFileOffset(e, int64(i*entryWidth)); err != nil {
+				return true
+			}
+			return e.Offset > offset
+		})
+		if idx > 0 {
+			idx--
+		}
+		if err := index.ReadEntryAtFileOffset(e, int64(idx*entryWidth)); err != nil {
+			return nil
+		}
+		pos = e.Position
+		return nil
 	})
-	if idx > 0 {
-		idx--
-	}
-	if err := s.Index.ReadEntryAtFileOffset(e, int64(idx*entryWidth)); err != nil {
-		return 0
-	}
-	return e.Position
+	return pos, err
 }
 
 // anchorPositionForTimestamp binary-searches the sparse index for the block
@@ -1057,25 +1258,30 @@ func (s *segment) anchorPositionForOffset(offset int64) int64 {
 // target. It starts one block before the first anchor whose timestamp is >=
 // the target, since the qualifying message may be an interior message of the
 // preceding block. Callers hold the segment read lock.
-func (s *segment) anchorPositionForTimestamp(timestamp int64) int64 {
-	n := int(s.Index.Position() / entryWidth)
-	if n == 0 {
-		return 0
-	}
-	e := &entry{}
-	idx := sort.Search(n, func(i int) bool {
-		if err := s.Index.ReadEntryAtFileOffset(e, int64(i*entryWidth)); err != nil {
-			return true
+func (s *segment) anchorPositionForTimestamp(timestamp int64) (int64, error) {
+	var pos int64
+	err := s.withIndex(func(index *index) error {
+		n := int(index.Position() / entryWidth)
+		if n == 0 {
+			return nil
 		}
-		return e.Timestamp >= timestamp
+		e := &entry{}
+		idx := sort.Search(n, func(i int) bool {
+			if err := index.ReadEntryAtFileOffset(e, int64(i*entryWidth)); err != nil {
+				return true
+			}
+			return e.Timestamp >= timestamp
+		})
+		if idx > 0 {
+			idx--
+		}
+		if err := index.ReadEntryAtFileOffset(e, int64(idx*entryWidth)); err != nil {
+			return nil
+		}
+		pos = e.Position
+		return nil
 	})
-	if idx > 0 {
-		idx--
-	}
-	if err := s.Index.ReadEntryAtFileOffset(e, int64(idx*entryWidth)); err != nil {
-		return 0
-	}
-	return e.Position
+	return pos, err
 }
 
 // scanForward walks message frames from the given logical start position and
@@ -1119,6 +1325,13 @@ func (s *segment) Delete() error {
 		if err := s.store.Delete(s.storeKey); err != nil {
 			return errors.Wrap(err, "delete offloaded object")
 		}
+		// Option 2: the index is an object too — remove it (retention reclaims the
+		// store).
+		if s.indexKey != "" {
+			if err := s.store.Delete(s.indexKey); err != nil {
+				return errors.Wrap(err, "delete offloaded index object")
+			}
+		}
 		if err := os.Remove(s.offloadMarkerPath()); err != nil && !os.IsNotExist(err) {
 			return errors.Wrap(err, "remove offload marker")
 		}
@@ -1127,7 +1340,8 @@ func (s *segment) Delete() error {
 			return err
 		}
 	}
-	if exists(s.Index.Name()) {
+	// A local index file exists unless the index was offloaded (Index nil).
+	if s.Index != nil && exists(s.Index.Name()) {
 		if err := os.Remove(s.Index.Name()); err != nil {
 			return err
 		}

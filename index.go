@@ -289,6 +289,18 @@ func (idx *index) Name() string {
 	return idx.file.Name()
 }
 
+// offloadReader returns a reader over the index's content bytes (up to position)
+// and their length, for uploading the index to a SegmentStore. A sealed index is
+// shrunk to its content, so this is the whole meaningful file.
+func (idx *index) offloadReader() (io.Reader, int64, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	if idx.closed {
+		return nil, 0, ErrSegmentClosed
+	}
+	return io.NewSectionReader(idx.file, 0, idx.position), idx.position, nil
+}
+
 func (idx *index) InitializePosition() (*entry, error) {
 	// Find the first empty entry.
 	n := int(idx.size / entryWidth)
