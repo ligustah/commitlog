@@ -83,3 +83,35 @@ func TestNewScanReaderUnbackedOffsetIsRefused(t *testing.T) {
 	require.NoError(t, rerr)
 	require.Equal(t, int64(0), off)
 }
+
+// A start offset below the oldest surviving record clamps up to it rather than
+// failing — the same behaviour as NewReader. This matters because the correct
+// way to write a rebuild is to sweep from 0 (a stale OldestOffset would
+// otherwise start it late and miss records), and that must keep working after
+// retention has trimmed the head.
+//
+// Pinned by measurement after documenting the opposite: the first version of
+// this contract claimed a reclaimed log errors, which it does not.
+func TestNewScanReaderClampsBelowOldest(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 128})
+	t.Cleanup(cleanup)
+
+	var last int64
+	for i := 0; i < 12; i++ {
+		offs, err := l.Append([]*Message{{Key: []byte("k"), Value: []byte("vvvvvvvvvvvvvvvv")}})
+		require.NoError(t, err)
+		last = offs[0]
+	}
+	l.SetHighWatermark(last)
+	require.NoError(t, l.TruncateBefore(6))
+	require.Equal(t, int64(6), l.OldestOffset())
+
+	r, err := l.NewScanReader(0) // below the oldest survivor
+	require.NoError(t, err, "a start below the oldest record must clamp, not fail")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, off, _, _, rerr := r.ReadMessage(ctx, make([]byte, 28))
+	require.NoError(t, rerr)
+	require.Equal(t, int64(6), off, "scan must start at the oldest surviving record")
+}

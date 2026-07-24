@@ -32,18 +32,17 @@ type CommitLog interface {
 	//   - the scan ends when ReadMessage returns an error satisfying
 	//     errors.Is(err, io.EOF). The EOF is WRAPPED, so compare with errors.Is
 	//     and not ==.
-	//   - construction returns ErrSegmentNotFound when no segment backs the
-	//     start offset — an empty log, or an offset already dropped by
-	//     retention. That is deliberately distinct from an empty scan: "the
-	//     range is gone" and "the range held nothing" are different answers, and
-	//     collapsing them would let a sweep silently cover no data at all.
+	//   - construction returns ErrSegmentNotFound only when the log holds no
+	//     segments at all. A start offset merely BELOW the oldest surviving
+	//     record clamps up to it, exactly as NewReader does, so sweeping from 0
+	//     over a log that retention has since trimmed is fine and starts at the
+	//     oldest record still present.
 	//
-	// The second point is not an edge case for the obvious caller. A rebuild
-	// that sweeps from 0 — the right choice, since a stale OldestOffset would
-	// otherwise start it late and miss records — hits ErrSegmentNotFound every
-	// time on a fresh or fully reclaimed log. Such a caller wants "nothing to
-	// scan", so it must map that one error to an empty result itself. This is
-	// not a drop-in replacement for a tailing reader.
+	// So the single case a caller must handle itself is the empty log. That is
+	// deliberately an error rather than a reader that instantly ends: "there is
+	// nothing here" and "the range you asked for held nothing" are different
+	// answers, and collapsing them would let a sweep report success having
+	// covered no data at all.
 	NewScanReader(offset int64) (*Reader, error)
 
 	// Truncate removes all messages from the log starting at the given offset.
