@@ -1,0 +1,28 @@
+version: 2
+
+updates:
+  # Keeps the workflow action pins current. Added after having to bump them by
+  # hand: every action had drifted a major behind and the jobs only still ran
+  # because the runner substitutes a newer Node for the deprecated runtime they
+  # targeted. That substitution is a migration aid, not a contract — when it is
+  # withdrawn, every job fails at its first step. The only reason it was noticed
+  # is that a workflow run happened to emit an annotation, which is not a
+  # mechanism worth relying on.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Go dependencies. Grouped and monthly on purpose: this is a library with a
+  # small, stable dependency set, so a pull request per module per week would be
+  # noise that trains everyone to ignore the queue.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      go-deps:
+        patterns: ["*"]
