@@ -127,6 +127,9 @@ func FuzzCompactionRecovery(f *testing.F) {
 
 		expect := map[string]fzKeyState{}
 		aborted := map[int64]bool{}
+		// Offsets of control markers and of records appended with transactional
+		// headers, for the marker/strip consistency check below.
+		var markerOffs, txnOffs []int64
 		valCounter := 0
 
 		app := func(m *Message) int64 {
@@ -162,8 +165,9 @@ func FuzzCompactionRecovery(f *testing.F) {
 					Headers: fzTxnHeaders(),
 				})
 				aborted[off] = true // expect[k] intentionally unchanged
+				txnOffs = append(txnOffs, off)
 			case 4: // transactional control marker (stripped below StripBelow)
-				app(&Message{Value: []byte("marker"), Attributes: AttrControl})
+				markerOffs = append(markerOffs, app(&Message{Value: []byte("marker"), Attributes: AttrControl}))
 			case 5: // durability fence
 				require.NoError(t, l.SyncAll())
 			}
@@ -194,6 +198,14 @@ func FuzzCompactionRecovery(f *testing.F) {
 			_, berr := l.CleanWithSpec(bs)
 			require.NoError(t, berr)
 		}
+
+		// classify may only remove a control marker below StripBelow because the
+		// records it governed are stripped to plain records in the SAME pass —
+		// otherwise a reader buffers them waiting for a marker that is gone, or
+		// releases them on a LATER transaction's marker. The budget rewrites one
+		// segment at a time, so this is checked HERE, on the partially-compacted
+		// state the capped passes leave behind, not after the final pass.
+		fzAssertNoOrphanedRecords(t, l, markerOffs, txnOffs)
 
 		// A final unbounded pass fully compacts, then the oracle must hold.
 		_, err := l.CleanWithSpec(spec)
@@ -354,6 +366,45 @@ func fzReadAll(t *testing.T, l *commitLog) map[int64]SerializedMessage {
 		out[off] = cp
 		if off >= newest {
 			return out
+		}
+	}
+}
+
+// fzAssertNoOrphanedRecords enforces classify's cross-segment promise: control
+// markers below StripBelow are removable only because the records they governed
+// are stripped in the same pass. So if ANY marker has been removed, no
+// surviving record may still be carrying the strip targets — otherwise a reader
+// is left buffering records whose marker no longer exists.
+//
+// Deliberately checked on a partially-compacted log: the rewrite budget applies
+// rewrites one segment at a time, and this invariant is only violable when a
+// pass stops part-way through.
+func fzAssertNoOrphanedRecords(t *testing.T, l *commitLog, markerOffs, txnOffs []int64) {
+	t.Helper()
+	if len(markerOffs) == 0 || len(txnOffs) == 0 {
+		return
+	}
+	got := fzReadAll(t, l)
+
+	removedMarkers := 0
+	for _, off := range markerOffs {
+		if _, ok := got[off]; !ok {
+			removedMarkers++
+		}
+	}
+	if removedMarkers == 0 {
+		return // every marker still present: nothing can be orphaned
+	}
+	for _, off := range txnOffs {
+		m, ok := got[off]
+		if !ok {
+			continue
+		}
+		for _, h := range []string{"pid", "epoch", "seq"} {
+			_, has := m.Headers()[h]
+			require.False(t, has,
+				"record at %d still carries %q while %d control marker(s) have been removed",
+				off, h, removedMarkers)
 		}
 	}
 }
