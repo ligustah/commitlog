@@ -1,0 +1,49 @@
+name: TLA+ (manual)
+
+# The TLA+ specs are a one-off confidence pass, deliberately NOT wired into the
+# push/PR gate (see tla/README.md). This workflow makes the TLC model check
+# runnable on demand — a spec edit, or a periodic re-verification — without
+# gating everyday commits.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tlc:
+    name: TLC model check
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Fetch tla2tools
+        working-directory: tla
+        run: |
+          curl -fL -o tla2tools.jar \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+      - name: "Verify specs (expect: no error found)"
+        working-directory: tla
+        run: |
+          set -e
+          for spec in CommitLog Compaction Offload; do
+            echo "::group::$spec"
+            java -cp tla2tools.jar tlc2.TLC -workers auto -config "$spec.cfg" "$spec.tla"
+            echo "::endgroup::"
+          done
+      - name: "Buggy configs (expect: invariant violation)"
+        working-directory: tla
+        run: |
+          for spec in CommitLog Compaction Offload; do
+            echo "::group::${spec}_Buggy (expecting a counterexample)"
+            if java -cp tla2tools.jar tlc2.TLC -workers auto -config "${spec}_Buggy.cfg" "$spec.tla"; then
+              echo "ERROR: ${spec}_Buggy.cfg exited 0 but was expected to report an invariant violation"
+              exit 1
+            fi
+            echo "OK: ${spec}_Buggy.cfg reported the expected counterexample"
+            echo "::endgroup::"
+          done

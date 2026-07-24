@@ -5,3 +5,8 @@
 *.go text eol=lf
 go.mod text eol=lf
 go.sum text eol=lf
+
+# The CI workflows embed shell scripts in `run:` blocks that execute on Linux
+# runners; a CRLF checkout would feed \r into every command.
+*.yml text eol=lf
+*.yaml text eol=lf

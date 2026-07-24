@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Newer pushes to the same ref supersede in-flight runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Build, vet, and run the full test suite on every supported platform.
+  # Windows is a first-class target here: the index is memory-mapped through
+  # gommap and has a separate windows implementation (index_mmap_windows.go),
+  # and the Sync/Close/Shrink paths use FlushFileBuffers + SetEndOfFile — all
+  # of which only fail on Windows, so it must be exercised in CI.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 -timeout=30m ./...
+
+  # go.mod declares `go 1.22`; downstream modules are entitled to build on it.
+  # The matrix above runs current Go, so this job is what keeps the declared
+  # floor honest — it fails the moment something reaches for a newer stdlib.
+  minver:
+    name: min go (go.mod)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -count=1 -timeout=30m ./...
+
+  # The race detector on Linux, where cgo + gcc are always available. Covers the
+  # concurrent paths: the gommap map/unmap mutex, the process-wide RemoteIndexCache
+  # LRU, and offload read-through under contention (offload_concurrency_test.go).
+  race:
+    name: race (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Test (race)
+        run: go test -race -count=1 -timeout=50m ./...
+
+  # Formatting, vet, and module integrity. .gitattributes stores *.go with LF,
+  # so gofmt (which normalizes to LF) agrees on every runner.
+  format:
+    name: gofmt + vet + mod
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            echo "Run: gofmt -w ."
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go mod verify
+        run: go mod verify
+
+  # A short active fuzzing sweep on top of the seed corpus (the seeds already run
+  # as normal subtests in the `test` job). Bounded so it stays a smoke test; a
+  # crasher fails the job and is written to testdata/fuzz for a maintainer to pull.
+  fuzz:
+    name: fuzz smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzCompactionRecovery, FuzzOffloadCrashConsistency]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Fuzz ${{ matrix.target }} (90s)
+        run: go test -run '^$' -fuzz='^${{ matrix.target }}$' -fuzztime=90s -timeout=15m .
