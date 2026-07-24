@@ -5,8 +5,28 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.18.2 — 2026-07-24
 
+- **Fixed (correctness)**: a clean that ran out of rewrite budget could orphan a
+  transaction's records. `classify` may only remove a control marker below
+  `StripBelow` because the records that marker governed are stripped to plain
+  records in the *same pass* — otherwise a reader buffers them waiting for a
+  marker that no longer exists, or releases them on a later transaction's
+  marker. That promise spans segments while the budget applies rewrites one
+  segment at a time, and a marker's segment can be denser than the segment
+  holding its records, so density order rewrote it first. Second instance of the
+  v0.18.1 hazard, found by generalising it: an expired tombstone and a control
+  marker both *govern* records at lower offsets, so both now share one rule —
+  segments performing either removal are rewritten last, in ascending order.
+- **Fixed (Windows)**: the high-watermark checkpoint and `PutSidecar` could fail
+  with `cannot replace ...: Access is denied` and take the process with them.
+  `ReplaceFile` is refused while any other handle to the destination is open,
+  which under a kill/restart cycle is routinely a process on its way out or a
+  scanner that opened the file after the previous write. Both writers now retry
+  on a bound (25 × 20ms); a real conflict never clears, so it still fails, and
+  promptly. The payload is buffered before the first attempt — the writer
+  consumes its reader, so an unbuffered retry would have replaced the checkpoint
+  with an empty file.
 - **Changed**: the tombstone-GC rewrite ordering from v0.18.1 now applies the
   minimum constraint instead of a blunt one. Only segments that actually drop a
   tombstone give up density ordering (they go last, ascending); every other
