@@ -5,6 +5,24 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Changed**: the tombstone-GC rewrite ordering from v0.18.1 now applies the
+  minimum constraint instead of a blunt one. Only segments that actually drop a
+  tombstone give up density ordering (they go last, ascending); every other
+  segment keeps it. The safety property is unchanged — a segment dropping a
+  tombstone is still rewritten after every segment holding a copy it shadows —
+  and `TestCleanSpecBudgetedPassCannotResurrect` still fails when the
+  comparator is reduced to plain density.
+
+  Recorded honestly: this was motivated by a consumer reporting their
+  integration suite going 77s → 202s on v0.18.1, which they have since
+  **retracted** — re-measuring gave 65s, faster than the 77s that preceded the
+  fix, and the 202s was seed variance. So v0.18.1's ordering cost nothing
+  measurable and this change fixes no observed regression. It is kept because
+  constraining only what safety requires is the better shape, not because the
+  broad version was slow.
+
 ## v0.18.1 — 2026-07-24
 
 - **Fixed (data loss)**: a clean that ran out of rewrite budget could bring a
