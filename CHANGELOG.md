@@ -5,6 +5,39 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.19.0 — 2026-07-24
+
+- **Added**: `CommitLog.NewScanReader(offset)` — a reader for sweeping a static
+  range that returns EOF when it drains rather than parking for appends that
+  may never come. The readers from `NewReader` are *tailing* readers, so
+  reaching the end of the data is not an end condition for them and a bounded
+  sweep that expects to finish there hangs instead. That is not hypothetical:
+  it is how `RecoverTail` could hang before v0.18.0, and a consumer hit the
+  same shape independently in its own abort scan and lost its compactor to it.
+  The reader already existed internally; this names it, because the consumer
+  was reconstructing it in three separate places.
+
+  Two contract details, both documented on the interface and pinned by tests
+  because both bite: the terminating EOF is **wrapped** (compare with
+  `errors.Is`, not `==`), and a start offset with no segment behind it is
+  **refused at construction** with `ErrSegmentNotFound` rather than handed back
+  as a reader that instantly ends — "this range was dropped by retention" and
+  "this range held nothing" are different answers, and a rebuild that scanned
+  no data at all should not look like one that found none.
+
+  Minor rather than patch: it adds a method to the `CommitLog` interface, which
+  breaks anything else implementing it.
+- **Tests**: `FuzzOffloadCompactionRetention`, the offload analogue of
+  `FuzzCompactionRecovery` — offload interleaved with compaction and retention
+  across crash and reopen, asserting latest-per-key survival, read
+  transparency, and that no store object outlives the segment it belonged to.
+  Clean over a 6-minute sweep; wired into the per-push smoke matrix and the
+  nightly deep sweep.
+- **Tests**: the compaction fuzz oracle now asserts the marker/strip invariant
+  that v0.18.2 fixed. It could not have caught that bug before — the harness
+  drove the workload but never checked the property. Reverting the fix now
+  fails on the existing seed corpus.
+
 ## v0.18.2 — 2026-07-24
 
 - **Fixed (correctness)**: a clean that ran out of rewrite budget could orphan a
