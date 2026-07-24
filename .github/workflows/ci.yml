@@ -79,7 +79,7 @@ jobs:
   # Formatting, vet, and module integrity. .gitattributes stores *.go with LF,
   # so gofmt (which normalizes to LF) agrees on every runner.
   format:
-    name: gofmt + vet + mod
+    name: gofmt + vet + mod + actionlint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -101,6 +101,16 @@ jobs:
         run: go vet ./...
       - name: go mod verify
         run: go mod verify
+      # Static check of the workflows themselves: bad expressions, unknown
+      # action inputs, and — via shellcheck, preinstalled on the runner — the
+      # `run:` blocks. Pinned and fetched through the module proxy rather than
+      # curl-pipe-bash, since setup-go is already here. Caught nothing on the
+      # current files; it is here so a future edit fails cheaply instead of
+      # burning a run to discover a typo'd expression.
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" -color
 
   # A short active fuzzing sweep on top of the seed corpus (the seeds already run
   # as normal subtests in the `test` job). Bounded so it stays a smoke test; a
