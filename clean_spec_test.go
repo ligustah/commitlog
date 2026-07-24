@@ -188,6 +188,64 @@ func TestCleanSpecStripSurvivesReopen(t *testing.T) {
 	require.NotContains(t, got[offs[2]].Headers(), "pid")
 }
 
+// A key written once and never touched again survives a pass verbatim, however
+// much churn the other keys see. This pins the "innocent bystander" direction
+// of ViewPreserved: the existing spec tests each drive one drop path and assert
+// what it removes, but none asserts that a record no path selects is still
+// there afterwards. A downstream consumer saw exactly that shape — for a subset
+// of ids the sibling records of a row were live while the row record itself was
+// absent — which compaction can only produce by dropping an unsuperseded record
+// or by being told to via the CleanSpec.
+func TestCleanSpecBystanderKeySurvives(t *testing.T) {
+	l, app := specLog(t)
+	old := timestamp() - int64(2*time.Hour)
+
+	// Three keys describing one logical id. None is ever superseded, tombstoned
+	// or aborted, so all three must come through untouched.
+	offRow := app(&Message{Key: []byte("row:1"), Value: []byte("row-value")})
+	offOrder := app(&Message{Key: []byte("ord:1"), Value: []byte("order-value")})
+	offIndex := app(&Message{Key: []byte("kidx:1"), Value: []byte("index-value")})
+
+	// Churn around them so every drop path fires in the same pass: supersession,
+	// expired-tombstone GC, and an aborted record.
+	offSuperOld := app(&Message{Key: []byte("super"), Value: []byte("v1")})
+	offSuperNew := app(&Message{Key: []byte("super"), Value: []byte("v2")})
+	app(&Message{Key: []byte("tomb"), Value: []byte("v1")})
+	offTomb := app(&Message{Key: []byte("tomb"), Value: []byte("del"), Attributes: AttrTombstone, Timestamp: old})
+	offAborted := app(&Message{Key: []byte("abrt"), Value: []byte("aborted"),
+		Headers: map[string][]byte{"pid": {0, 0, 0, 0, 0, 0, 0, 1}}})
+	app(&Message{Key: []byte("pad"), Value: []byte("pad")}) // active segment padding
+
+	requireCleanOK(t, l, (CleanSpec{
+		Ceiling:            l.HighWatermark(),
+		StripBelow:         l.HighWatermark(),
+		StripHeaders:       []string{"pid", "epoch", "seq"},
+		TombstoneGCBelow:   l.HighWatermark(),
+		TombstoneRetention: time.Hour,
+		Aborted:            func(off int64) bool { return off == offAborted },
+	}))
+
+	got := readAllMsgs(t, l)
+	for _, c := range []struct {
+		off int64
+		val string
+	}{
+		{offRow, "row-value"},
+		{offOrder, "order-value"},
+		{offIndex, "index-value"},
+	} {
+		require.Contains(t, got, c.off, "compaction dropped a record nothing superseded")
+		require.Equal(t, c.val, string(got[c.off].Value()))
+	}
+
+	// ...and the churn really was compacted, so the survivals above are not just
+	// a pass that did nothing.
+	require.NotContains(t, got, offSuperOld, "superseded copy must be compacted away")
+	require.Contains(t, got, offSuperNew)
+	require.NotContains(t, got, offTomb, "expired tombstone must be GC'd")
+	require.NotContains(t, got, offAborted, "aborted record must be removed")
+}
+
 // DisableAutoClean: the internal loop must stop cleaning (retention would
 // otherwise delete the old prefix) while explicit Clean still works.
 func TestDisableAutoClean(t *testing.T) {
