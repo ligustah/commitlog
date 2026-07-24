@@ -109,6 +109,14 @@ jobs:
       # burning a run to discover a typo'd expression.
       - name: actionlint
         run: |
+          # actionlint DISABLES its shell-linting rule and still exits 0 when
+          # the shellcheck binary is missing, so a green here can silently mean
+          # "linted the workflow syntax but none of the run: blocks". Assert it
+          # up front: if a runner image ever stops shipping it, fail loudly
+          # instead of quietly checking less.
+          # (Careful: a comment line starting with the word shellcheck is
+          # parsed as a shellcheck directive, so keep it mid-sentence.)
+          shellcheck --version > /dev/null
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$(go env GOPATH)/bin/actionlint" -color
 
