@@ -31,6 +31,12 @@ the log removed); substantially extended since — see
   per-segment key-digest sidecars (streaming k-way merge, no global key
   map) with time-budgeted, drop-density-ordered rewrites. Returns a
   verified floor that callers persist to bound reopen scans.
+- **Tiered storage** (`OffloadBefore`): sealed segments — log *and* index —
+  move to a `SegmentStore` (`FileSegmentStore` included) and are served
+  read-through, so an offloaded segment is indistinguishable from a local
+  one at the read API. Offloaded indexes are held in `RemoteIndexCache`, a
+  process-wide LRU with pin counts, so an index cannot be evicted out from
+  under a live seek.
 - **Client sidecars**: atomic named metadata files in the log directory
   (`PutSidecar`/`GetSidecar`/`RemoveSidecar`) for checkpoints like
   recovery floors.
