@@ -5,6 +5,74 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Tests**: `TestCleanSpecBystanderKeySurvives` and
+  `TestCleanSpecCeilingAboveUndecidedLosesKey`. The existing spec tests each
+  drive one drop path and assert what it removes; neither direction asserted
+  that a record no path selects survives, nor that the drop paths can *compose*
+  to remove a key entirely. They can — but only across two passes, and only when
+  the earlier pass ran with a `Ceiling` above a still-undecided record. Within a
+  single pass it cannot happen: `mergeDigests` excludes aborted offsets from
+  candidacy before choosing the latest, so an aborted record never supersedes
+  anything. The two subtests are the same records and the same abort, differing
+  only in where the first pass's ceiling sat.
+- **Docs**: `tla/README.md` now records that `Ceiling` is an *input* the specs
+  assume to be the transactional LSO. A caller that advances one past an
+  undecided record is outside the modelled state space, so no amount of model
+  checking there will find that class — the specs prove the engine honours its
+  contract, not that the contract is supplied correctly.
+- Fixed a stray `%s` in the compaction debug log: `slog` does no format
+  substitution, so it rendered literally.
+- **CI**: GitHub Actions — test matrix (ubuntu/windows/macos), the declared
+  `go 1.22` floor, race, gofmt/vet/`go mod verify`/actionlint, and a bounded
+  fuzz sweep per target. Plus a `workflow_dispatch` TLA+ workflow that asserts
+  each negative control violates its *own* named invariant, and dependabot for
+  the action pins and Go modules.
+
+## v0.18.0 — 2026-07-24
+
+- **Fixed**: a crash could leave the active segment's log physically AHEAD of
+  its index — the append path writes a log frame *before* its index entry, and
+  `checkpointHW` fsyncs only the log backing. On reopen the segment took its
+  tail from the stale index and under-reported it: `NewestOffset` was too low, a
+  seek and a sequential uncommitted scan disagreed about which record an offset
+  names, and the next `Append` landed on an existing un-indexed record, silently
+  shadowing it. `reconcileIndexTail` now rebuilds the missing entries on open by
+  scanning the log past the last indexed record, leaving a torn frame for
+  `RecoverTail`. No-op when the index already covers the log.
+- **Fixed**: `RecoverTail` could hang instead of healing. It forward-scanned
+  with an uncommitted reader on `context.Background()`, which parks in
+  `waitForData` forever once the readable bytes drain — so if the reconstructed
+  LEO ever overshot the log on disk, recovery blocked rather than repairing.
+  Recovery now scans a static tail through a no-wait reader that returns
+  `io.EOF` the instant data drains, and treats the drain like a torn suffix.
+  Existing guarantees unchanged: extend past a stale checkpoint via a CRC-good
+  forward scan, drop a torn suffix, never recover below the checkpoint.
+- **Tests**: seeded compaction property/fuzz harness and an offload
+  crash-consistency fuzz harness (transparency, reopen, fault injection,
+  index-cache race stress, and `RecoverTail` against a torn active tail).
+- **Tests**: TLA+ specs for the core log, transaction-aware compaction, and
+  tiered-storage offload, each TLC-verified with a deliberately broken variant
+  to show the invariants discriminate. A fidelity audit against the
+  implementation corrected the compaction ceiling boundary in the model.
+
+## v0.17.0 — 2026-07-23
+
+- **Added**: tiered storage, part two — the segment *index* is offloaded
+  alongside its log, fetched read-through, and held in `RemoteIndexCache`, a
+  process-wide LRU with pin counts so an index cannot be evicted out from under
+  a live seek.
+
+## v0.16.0 — 2026-07-23
+
+- **Added**: tiered storage, part one — sealed segments can be offloaded to a
+  `SegmentStore` (`OffloadBefore`, `FileSegmentStore`) and are read back
+  transparently, so an offloaded segment is indistinguishable from a local one
+  at the read API.
+- Internal: segment log I/O routes through a `segmentBacking` seam, which is
+  what makes the remote backing substitutable.
+
 ## v0.15.1 — 2026-07-23
 
 - **Fixed**: `Delete()` could fail on Windows when a reader was concurrently
