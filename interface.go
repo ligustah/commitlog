@@ -11,6 +11,34 @@ type CommitLog interface {
 	// log. Otherwise, it will only return committed messages.
 	NewReader(offset int64, uncommitted bool) (*Reader, error)
 
+	// NewScanReader creates a Reader for sweeping a STATIC range: it reads
+	// uncommitted records and returns io.EOF the moment it drains the readable
+	// bytes, rather than parking until an append arrives or the high watermark
+	// advances.
+	//
+	// Use it for any pass that must terminate at the tail — an abort scan, a
+	// sequence rebuild, a consistency sweep. The readers from NewReader are
+	// TAILING readers: reaching the end of the data is not an end condition for
+	// them, so a pass that expects to finish there instead blocks forever if
+	// nothing further is ever appended or committed. That is not hypothetical —
+	// it is how RecoverTail could hang before v0.18.0, and a consumer hit the
+	// same shape independently in its own abort scan.
+	//
+	// The range is whatever is readable when each read happens; the reader does
+	// not snapshot. Records above the high watermark are visible, so a caller
+	// that cares about the commit boundary must bound the scan itself.
+	//
+	// Termination contract, both halves of which callers must handle:
+	//   - the scan ends when ReadMessage returns an error satisfying
+	//     errors.Is(err, io.EOF). The EOF is WRAPPED, so compare with errors.Is
+	//     and not ==.
+	//   - construction returns ErrSegmentNotFound when no segment backs the
+	//     start offset — an empty log, or an offset already dropped by
+	//     retention. That is deliberately distinct from an empty scan: "the
+	//     range is gone" and "the range held nothing" are different answers, and
+	//     collapsing them would let a sweep silently cover no data at all.
+	NewScanReader(offset int64) (*Reader, error)
+
 	// Truncate removes all messages from the log starting at the given offset.
 	Truncate(offset int64) error
 

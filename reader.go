@@ -48,6 +48,15 @@ func (l *commitLog) NewReader(offset int64, uncommitted bool) (*Reader, error) {
 	}, err
 }
 
+// NewScanReader implements CommitLog.NewScanReader: a reader for sweeping a
+// static range that terminates at the end of the data instead of parking for
+// appends. It is the same reader RecoverTail uses; exported because every
+// caller doing a bounded scan needs it, and hand-rolling it is how a scan ends
+// up hanging on a watermark that never advances.
+func (l *commitLog) NewScanReader(offset int64) (*Reader, error) {
+	return l.newRecoveryReader(offset)
+}
+
 // newRecoveryReader returns an uncommitted reader that does NOT block waiting
 // for future appends: it returns io.EOF as soon as it drains the readable
 // bytes. RecoverTail scans a static tail (not a live writer), so blocking for
