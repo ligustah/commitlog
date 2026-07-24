@@ -10,3 +10,7 @@ go.sum text eol=lf
 # runners; a CRLF checkout would feed \r into every command.
 *.yml text eol=lf
 *.yaml text eol=lf
+
+# Fuzz corpus entries are parsed by `go test`; a CRLF checkout would rewrite
+# seeds git stores with LF and risk them failing to load on Windows.
+testdata/fuzz/** text eol=lf
