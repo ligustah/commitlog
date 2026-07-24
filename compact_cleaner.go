@@ -208,32 +208,54 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		}
 		return merged.drops[i].count
 	}
-	// Tombstone GC removes a key's NEWEST copy, so it is the one drop whose
-	// order matters. The budget can stop this loop between any two segments; if
-	// a tombstone's segment is rewritten while a segment holding a copy it
-	// shadows is not, that copy becomes latest-per-key on the next pass and the
-	// DELETED VALUE COMES BACK — permanently, since nothing supersedes it any
-	// more.
+	// Two removals are order-sensitive, because each takes out a record that
+	// GOVERNS older ones, and the budget can stop this loop between any two
+	// segments:
 	//
-	// A GC'd tombstone is by definition its key's latest copy, so it always
-	// sits at a segment index >= every copy it shadows. Two phases are enough
-	// to make every cut fail safe, and cost far less than ordering the whole
-	// pass by offset:
+	//   - an expired tombstone shadows every earlier copy of its key. Remove it
+	//     while a segment holding one of those copies is unrewritten and that
+	//     copy becomes latest-per-key on the next pass: the DELETED VALUE COMES
+	//     BACK, permanently, since nothing supersedes it any more.
+	//   - a control marker decides the records of its transaction, which sit at
+	//     LOWER offsets. Remove it while those records are still carrying their
+	//     transactional headers and a reader buffers them waiting for a marker
+	//     that no longer exists — or releases them on a LATER transaction's
+	//     marker (see classify).
 	//
-	//   1. segments with no GC drop, in density order (unchanged behaviour)
-	//   2. segments that DO drop a tombstone, ascending
+	// Both governing records sit at a segment index >= everything they govern,
+	// so one rule covers both: segments performing either removal go LAST, in
+	// ascending order. Everything else keeps density ordering, which is where
+	// nearly every segment lands.
 	//
-	// A shadowed copy sits either in phase 1 — rewritten before any tombstone,
-	// or the cut lands before phase 2 and the tombstone survives to keep
-	// shadowing it — or in phase 2 at a lower index, where ascending order
-	// already puts it first. Either way the deleted value cannot come back.
-	sort.SliceStable(order, func(a, b int) bool {
-		ga, gb := merged.gcSegs[order[a]], merged.gcSegs[order[b]]
-		if ga != gb {
-			return !ga // non-GC segments first
+	// A governed record is then either in phase 1 — rewritten before its
+	// governor, or the cut lands before phase 2 and the governor survives to
+	// keep governing it — or in phase 2 at a lower index, which ascending order
+	// already visits first.
+	lateRewrite := func(i int) bool {
+		if merged.gcSegs[i] {
+			return true
 		}
-		if ga {
-			return order[a] < order[b] // within GC: ascending, never overtake
+		if !(spec.StripBelow > 0 && len(spec.StripHeaders) > 0) {
+			return false
+		}
+		for _, off := range digests[i].control {
+			if off < spec.StripBelow {
+				return true
+			}
+		}
+		return false
+	}
+	late := make([]bool, n)
+	for i := range late {
+		late[i] = lateRewrite(i)
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		la, lb := late[order[a]], late[order[b]]
+		if la != lb {
+			return !la // order-insensitive segments first
+		}
+		if la {
+			return order[a] < order[b] // never overtake what you govern
 		}
 		return dropCount(order[a]) > dropCount(order[b])
 	})

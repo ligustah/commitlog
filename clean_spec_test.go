@@ -395,6 +395,79 @@ func TestCleanSpecBudgetedPassCannotResurrect(t *testing.T) {
 	require.NotEmpty(t, got)
 }
 
+// The same budget hazard, second instance: a control marker decides the
+// records of its transaction, which sit at LOWER offsets. classify may only
+// remove a marker below StripBelow because the records it governed are
+// stripped to plain records in the same pass — otherwise a reader buffers them
+// waiting for a marker that no longer exists, or releases them on a LATER
+// transaction's marker. That is a cross-segment promise, and the rewrite
+// budget applies rewrites one segment at a time.
+//
+// Layout mirrors a real transaction: records first in their own segment, the
+// commit marker after them in a segment that also holds superseded copies, so
+// drop-density order would rewrite the marker's segment FIRST.
+func TestCleanSpecBudgetedPassCannotOrphanRecords(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path:             tempDir(t),
+		MaxSegmentBytes:  200,
+		Compact:          true,
+		DisableAutoClean: true,
+	})
+	t.Cleanup(cleanup)
+
+	txHdrs := func() map[string][]byte {
+		return map[string][]byte{
+			"pid":   {0, 0, 0, 0, 0, 0, 0, 7},
+			"epoch": {0, 0, 0, 1},
+			"seq":   {0, 0, 0, 0, 0, 0, 0, 3},
+		}
+	}
+	app := func(m *Message) int64 {
+		offs, err := l.Append([]*Message{m})
+		require.NoError(t, err)
+		l.SetHighWatermark(offs[0])
+		return offs[0]
+	}
+
+	var dataOffs []int64
+	for i := 0; i < 3; i++ {
+		dataOffs = append(dataOffs, app(&Message{
+			Key: []byte("t" + strconv.Itoa(i)), Value: []byte("v"), Headers: txHdrs(),
+		}))
+	}
+	app(&Message{Key: []byte("fA"), Value: []byte("xxxxxxxxxxxxxxxxxxxxxxxxxxxx")}) // roll
+
+	offMarker := app(&Message{Value: []byte("marker"), Attributes: AttrControl})
+	app(&Message{Key: []byte("s1"), Value: []byte("a")}) // superseded pairs make the
+	app(&Message{Key: []byte("s1"), Value: []byte("b")}) // marker's segment denser
+	app(&Message{Key: []byte("s2"), Value: []byte("a")})
+	app(&Message{Key: []byte("s2"), Value: []byte("b")})
+
+	hw := l.HighWatermark()
+	spec := CleanSpec{
+		Ceiling:      hw + 1,
+		StripBelow:   hw + 1,
+		StripHeaders: []string{"pid", "epoch", "seq"},
+	}
+
+	capped := spec
+	capped.maxRewrites = 1
+	requireCleanOK(t, l, capped)
+
+	got := readAllMsgs(t, l)
+	_, markerAlive := got[offMarker]
+	for _, off := range dataOffs {
+		m, ok := got[off]
+		if !ok {
+			continue
+		}
+		if _, headered := m.Headers()["pid"]; headered {
+			require.True(t, markerAlive,
+				"record at %d still carries transactional headers but its marker was removed", off)
+		}
+	}
+}
+
 // DisableAutoClean: the internal loop must stop cleaning (retention would
 // otherwise delete the old prefix) while explicit Clean still works.
 func TestDisableAutoClean(t *testing.T) {
