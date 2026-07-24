@@ -2,6 +2,7 @@ package commitlog
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -319,6 +320,79 @@ func TestCleanSpecCeilingAboveUndecidedLosesKey(t *testing.T) {
 		require.Contains(t, got, offOrd)
 		require.Contains(t, got, offIdx)
 	})
+}
+
+// A pass that runs out of rewrite budget must not resurrect a deleted value.
+//
+// Tombstone GC is the one drop that removes a key's NEWEST copy, so unlike
+// supersession its order matters. The budget can stop the rewrite loop between
+// any two segments; if the tombstone's segment is rewritten while a segment
+// holding a copy it shadows is not, that copy becomes latest-per-key on the
+// next pass and the deleted value is back for good — nothing supersedes it any
+// more. Found by the compaction fuzz sweep, and reachable in production through
+// CleanSpec.RewriteBudget, not just the deterministic cap used here.
+//
+// The layout is deliberate: the tombstone's segment carries more droppable
+// records than the value's, so drop-density order would rewrite it FIRST.
+func TestCleanSpecBudgetedPassCannotResurrect(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path:             tempDir(t),
+		MaxSegmentBytes:  220, // a handful of records per segment
+		Compact:          true,
+		DisableAutoClean: true,
+	})
+	t.Cleanup(cleanup)
+
+	app := func(m *Message) int64 {
+		offs, err := l.Append([]*Message{m})
+		require.NoError(t, err)
+		l.SetHighWatermark(offs[0])
+		return offs[0]
+	}
+	old := timestamp() - int64(2*time.Hour)
+
+	// Segment A: the value that must stay dead, plus filler to force a roll.
+	offVal := app(&Message{Key: []byte("k1"), Value: []byte("deleted-value")})
+	for i := 0; i < 3; i++ {
+		app(&Message{Key: []byte("f" + strconv.Itoa(i)), Value: []byte("xxxxxxxxxxxxxxxxxxxx")})
+	}
+
+	// Segment B: k1's expired tombstone, plus two superseded pairs so this
+	// segment outranks segment A on drop density.
+	app(&Message{Key: []byte("k1"), Value: []byte("del"), Attributes: AttrTombstone, Timestamp: old})
+	app(&Message{Key: []byte("k2"), Value: []byte("a")})
+	app(&Message{Key: []byte("k2"), Value: []byte("b")})
+	app(&Message{Key: []byte("k3"), Value: []byte("a")})
+	app(&Message{Key: []byte("k3"), Value: []byte("b")})
+
+	app(&Message{Key: []byte("pad0"), Value: []byte("p")}) // keep the real
+	app(&Message{Key: []byte("pad1"), Value: []byte("p")}) // records out of active
+
+	hw := l.HighWatermark()
+	spec := CleanSpec{
+		Ceiling:            hw + 1,
+		TombstoneGCBelow:   hw + 1,
+		TombstoneRetention: time.Hour,
+	}
+
+	// One rewrite only: the budget stops the pass mid-way.
+	capped := spec
+	capped.maxRewrites = 1
+	requireCleanOK(t, l, capped)
+
+	// Then let it settle completely.
+	for i := 0; i < 3; i++ {
+		requireCleanOK(t, l, spec)
+	}
+
+	got := readAllMsgs(t, l)
+	require.NotContains(t, got, offVal, "deleted value resurrected: its tombstone was GC'd first")
+	for off, m := range got {
+		require.NotEqual(t, "k1", string(m.Key()),
+			"k1 must be gone entirely (offset %d, value %q)", off, m.Value())
+	}
+	// The unrelated keys still compacted normally.
+	require.NotEmpty(t, got)
 }
 
 // DisableAutoClean: the internal loop must stop cleaning (retention would

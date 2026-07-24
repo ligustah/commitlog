@@ -208,9 +208,25 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		}
 		return merged.drops[i].count
 	}
-	sort.SliceStable(order, func(a, b int) bool {
-		return dropCount(order[a]) > dropCount(order[b])
-	})
+	if merged.gcDropped {
+		// Tombstone GC removes a key's NEWEST copy, so it is the one drop whose
+		// order matters. The budget can stop this loop between any two segments;
+		// if the tombstone's segment is rewritten while a segment holding a copy
+		// it shadows is not, that copy becomes latest-per-key on the next pass
+		// and the DELETED VALUE COMES BACK — permanently, since nothing
+		// supersedes it any more.
+		//
+		// A GC'd tombstone is by definition its key's latest copy, so it always
+		// sits at a segment index >= every copy it shadows. Ascending order
+		// therefore makes a budget cut fail safe in every case: the shadowed
+		// copies are already gone, or the tombstone is still there to shadow
+		// them. Density ordering is given up only on passes that actually GC.
+		sort.Ints(order)
+	} else {
+		sort.SliceStable(order, func(a, b int) bool {
+			return dropCount(order[a]) > dropCount(order[b])
+		})
+	}
 
 	// Rewrite phase, density order, one shared budget and block accumulator.
 	// Epoch assignments are only COLLECTED here (the cache requires
@@ -311,6 +327,10 @@ type mergeResult struct {
 	// stripKeyed[i]: segment i holds a keyed data record below StripBelow
 	// that still carries headers — strip work MAY exist (see stamp).
 	stripKeyed []bool
+	// gcDropped: the pass removed at least one expired tombstone. Unlike every
+	// other drop this one removes a key's NEWEST copy, so the rewrite order has
+	// to keep it from outrunning the copies it shadows (see compact).
+	gcDropped bool
 }
 
 // mergeDigests streams all digests' keyed sections in key order and marks
@@ -442,6 +462,7 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 			latestOff < spec.TombstoneGCBelow && latestRec.ts > 0 &&
 			latestRec.ts < now-int64(spec.TombstoneRetention) {
 			drop(latestIdx, latestOff)
+			res.gcDropped = true
 		}
 	}
 	return res, nil
