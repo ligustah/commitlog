@@ -19,6 +19,14 @@ jobs:
   # gommap and has a separate windows implementation (index_mmap_windows.go),
   # and the Sync/Close/Shrink paths use FlushFileBuffers + SetEndOfFile — all
   # of which only fail on Windows, so it must be exercised in CI.
+  #
+  # On the -timeout: TestConsolidationOperationalEquivalence measured ~156s of
+  # the suite's ~167s locally (six torture runs of 9000 steps), so wall-clock
+  # here is essentially that one test, and it is filesystem-bound — 22s on a
+  # Linux runner against minutes on Windows. Observed Windows runs range from
+  # ~4m to ~12m45s on identical code, purely on runner luck. go test's 10m
+  # default would have failed the 12m45s run with nothing actually wrong, so
+  # the explicit timeout is what keeps a slow runner from reading as a defect.
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
