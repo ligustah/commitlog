@@ -208,25 +208,35 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		}
 		return merged.drops[i].count
 	}
-	if merged.gcDropped {
-		// Tombstone GC removes a key's NEWEST copy, so it is the one drop whose
-		// order matters. The budget can stop this loop between any two segments;
-		// if the tombstone's segment is rewritten while a segment holding a copy
-		// it shadows is not, that copy becomes latest-per-key on the next pass
-		// and the DELETED VALUE COMES BACK — permanently, since nothing
-		// supersedes it any more.
-		//
-		// A GC'd tombstone is by definition its key's latest copy, so it always
-		// sits at a segment index >= every copy it shadows. Ascending order
-		// therefore makes a budget cut fail safe in every case: the shadowed
-		// copies are already gone, or the tombstone is still there to shadow
-		// them. Density ordering is given up only on passes that actually GC.
-		sort.Ints(order)
-	} else {
-		sort.SliceStable(order, func(a, b int) bool {
-			return dropCount(order[a]) > dropCount(order[b])
-		})
-	}
+	// Tombstone GC removes a key's NEWEST copy, so it is the one drop whose
+	// order matters. The budget can stop this loop between any two segments; if
+	// a tombstone's segment is rewritten while a segment holding a copy it
+	// shadows is not, that copy becomes latest-per-key on the next pass and the
+	// DELETED VALUE COMES BACK — permanently, since nothing supersedes it any
+	// more.
+	//
+	// A GC'd tombstone is by definition its key's latest copy, so it always
+	// sits at a segment index >= every copy it shadows. Two phases are enough
+	// to make every cut fail safe, and cost far less than ordering the whole
+	// pass by offset:
+	//
+	//   1. segments with no GC drop, in density order (unchanged behaviour)
+	//   2. segments that DO drop a tombstone, ascending
+	//
+	// A shadowed copy sits either in phase 1 — rewritten before any tombstone,
+	// or the cut lands before phase 2 and the tombstone survives to keep
+	// shadowing it — or in phase 2 at a lower index, where ascending order
+	// already puts it first. Either way the deleted value cannot come back.
+	sort.SliceStable(order, func(a, b int) bool {
+		ga, gb := merged.gcSegs[order[a]], merged.gcSegs[order[b]]
+		if ga != gb {
+			return !ga // non-GC segments first
+		}
+		if ga {
+			return order[a] < order[b] // within GC: ascending, never overtake
+		}
+		return dropCount(order[a]) > dropCount(order[b])
+	})
 
 	// Rewrite phase, density order, one shared budget and block accumulator.
 	// Epoch assignments are only COLLECTED here (the cache requires
@@ -327,10 +337,10 @@ type mergeResult struct {
 	// stripKeyed[i]: segment i holds a keyed data record below StripBelow
 	// that still carries headers — strip work MAY exist (see stamp).
 	stripKeyed []bool
-	// gcDropped: the pass removed at least one expired tombstone. Unlike every
-	// other drop this one removes a key's NEWEST copy, so the rewrite order has
-	// to keep it from outrunning the copies it shadows (see compact).
-	gcDropped bool
+	// gcSegs[i]: segment i holds an expired tombstone this pass removes. Unlike
+	// every other drop that one removes a key's NEWEST copy, so the rewrite
+	// order has to keep it from outrunning the copies it shadows (see compact).
+	gcSegs []bool
 }
 
 // mergeDigests streams all digests' keyed sections in key order and marks
@@ -344,6 +354,7 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 		drops:        make([]*dropSet, len(segments)),
 		abortedKeyed: make([]bool, len(segments)),
 		stripKeyed:   make([]bool, len(segments)),
+		gcSegs:       make([]bool, len(segments)),
 	}
 	drop := func(i int, off int64) {
 		if res.drops[i] == nil {
@@ -462,7 +473,7 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 			latestOff < spec.TombstoneGCBelow && latestRec.ts > 0 &&
 			latestRec.ts < now-int64(spec.TombstoneRetention) {
 			drop(latestIdx, latestOff)
-			res.gcDropped = true
+			res.gcSegs[latestIdx] = true
 		}
 	}
 	return res, nil
