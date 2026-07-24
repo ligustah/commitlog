@@ -37,6 +37,13 @@ type CommitLog interface {
 	//     retention. That is deliberately distinct from an empty scan: "the
 	//     range is gone" and "the range held nothing" are different answers, and
 	//     collapsing them would let a sweep silently cover no data at all.
+	//
+	// The second point is not an edge case for the obvious caller. A rebuild
+	// that sweeps from 0 — the right choice, since a stale OldestOffset would
+	// otherwise start it late and miss records — hits ErrSegmentNotFound every
+	// time on a fresh or fully reclaimed log. Such a caller wants "nothing to
+	// scan", so it must map that one error to an empty result itself. This is
+	// not a drop-in replacement for a tailing reader.
 	NewScanReader(offset int64) (*Reader, error)
 
 	// Truncate removes all messages from the log starting at the given offset.
