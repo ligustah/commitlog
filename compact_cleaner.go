@@ -61,7 +61,7 @@ func (c *compactCleaner) CompactSpec(spec CleanSpec, segments []*segment) ([]*se
 	before := time.Now()
 	compacted, epochCache, removed, verified, err := c.compact(spec, segments)
 	if err == nil {
-		slog.Debug("Finished compacting log %s",
+		slog.Debug("Finished compacting log",
 			slog.String("name", c.Name),
 			slog.Int("removed", removed),
 			slog.Int("before", len(segments)),
