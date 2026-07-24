@@ -29,21 +29,37 @@ jobs:
       - name: "Verify specs (expect: no error found)"
         working-directory: tla
         run: |
-          set -e
           for spec in CommitLog Compaction Offload; do
             echo "::group::$spec"
-            java -cp tla2tools.jar tlc2.TLC -workers auto -config "$spec.cfg" "$spec.tla"
+            out="$(java -cp tla2tools.jar tlc2.TLC -workers auto \
+                     -config "$spec.cfg" "$spec.tla" 2>&1)" || { echo "$out"; exit 1; }
+            echo "$out"
+            grep -q "No error has been found" <<<"$out" || {
+              echo "ERROR: $spec.cfg exited 0 without TLC's success line"
+              exit 1
+            }
             echo "::endgroup::"
           done
-      - name: "Buggy configs (expect: invariant violation)"
+
+      # Asserting WHICH invariant the counterexample violates, not merely that
+      # TLC exited non-zero: a parse error or a bad config also exits non-zero,
+      # and would otherwise masquerade as proof the invariants still have teeth.
+      - name: "Buggy configs (expect: the matching invariant violated)"
         working-directory: tla
         run: |
-          for spec in CommitLog Compaction Offload; do
-            echo "::group::${spec}_Buggy (expecting a counterexample)"
-            if java -cp tla2tools.jar tlc2.TLC -workers auto -config "${spec}_Buggy.cfg" "$spec.tla"; then
-              echo "ERROR: ${spec}_Buggy.cfg exited 0 but was expected to report an invariant violation"
+          check() {
+            spec="$1"; want="$2"
+            echo "::group::${spec}_Buggy (expecting: $want)"
+            out="$(java -cp tla2tools.jar tlc2.TLC -workers auto \
+                     -config "${spec}_Buggy.cfg" "$spec.tla" 2>&1 || true)"
+            echo "$out"
+            if ! grep -Eq "Invariant ($want) is violated" <<<"$out"; then
+              echo "ERROR: ${spec}_Buggy.cfg did not report a violation of: $want"
               exit 1
             fi
-            echo "OK: ${spec}_Buggy.cfg reported the expected counterexample"
+            echo "OK: ${spec}_Buggy.cfg violated $want as expected"
             echo "::endgroup::"
-          done
+          }
+          check CommitLog  "CommittedPrefixStability"
+          check Compaction "ViewPreserved|NoAbortedBelowCeiling"
+          check Offload    "PinnedStaysCached"
