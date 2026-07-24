@@ -36,6 +36,13 @@ curl -L -o tla2tools.jar \
   https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 ```
 
+There is also a `workflow_dispatch`-only GitHub Actions workflow
+(`.github/workflows/tla.yml`) that runs everything below on demand. It is
+deliberately **not** on the push/PR gate — see above — but it means a spec edit
+can be re-verified without a local JDK. It asserts the verified configs print
+TLC's success line and that each `*_Buggy.cfg` violates its *own* named
+invariant, so a spec that stopped model-checking cannot masquerade as a pass.
+
 Then, from this directory:
 
 ```sh
@@ -171,6 +178,18 @@ from under an in-flight seek, the corruption the pin count prevents.
   kill -9 (`RecoverTail`'s forward scan over the OS-cached tail) — a stronger
   recovery the model does not assert. Replication-level durability is out of
   scope.
+- **`Ceiling` is assumed to be the transactional LSO — it is an input, not a
+  derived quantity, and nothing here checks it.** `Compaction.tla` reasons about
+  what the engine does *given* a ceiling; a caller that advances one past a
+  record no one has decided yet is outside the state space, so no amount of
+  model checking here will find that. It is a real class: supersession and an
+  abort compose across two passes to remove a key entirely, but only when an
+  earlier pass ran with a ceiling above an undecided record (pinned in Go by
+  `TestCleanSpecCeilingAboveUndecidedLosesKey`, which shows the same records
+  surviving or vanishing purely on where the first pass's ceiling sat). The
+  engine has no notion of "undecided" and cannot defend against it, so this
+  invariant belongs to whoever computes the LSO. These specs prove the engine
+  honours its contract, **not** that the contract is supplied correctly.
 - `OverrideHighWatermark` (a test-only backdoor that can lower the HW) is not
   modeled; the spec's HW is monotone, matching production `SetHighWatermark`.
 - Leader-epoch tracking, timestamps-as-index, message framing/CRC bytes, and the
