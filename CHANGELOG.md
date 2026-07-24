@@ -5,8 +5,22 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.18.1 — 2026-07-24
 
+- **Fixed (data loss)**: a clean that ran out of rewrite budget could bring a
+  deleted value back. Tombstone GC is the only drop that removes a key's
+  *newest* copy, so it is the only one whose rewrite order matters, and
+  rewrites were spent in drop-density order. If the budget stopped the pass
+  after rewriting the tombstone's segment but before a segment holding a copy
+  it shadowed, the tombstone was gone and the older copy became latest-per-key
+  on the next pass — permanently, since nothing superseded it any more. Live
+  for any caller combining `CleanSpec.RewriteBudget` with tombstone retention.
+  Passes that GC now spend the budget in ascending segment order: a GC'd
+  tombstone always sits at a segment index at or above every copy it shadows,
+  so a budget cut leaves either the shadowed copies already dropped or the
+  tombstone still there to shadow them. Density ordering is unchanged for
+  passes that do not GC. Found by an extended fuzz sweep; the crashing input
+  ships as a corpus seed.
 - **Tests**: `TestCleanSpecBystanderKeySurvives` and
   `TestCleanSpecCeilingAboveUndecidedLosesKey`. The existing spec tests each
   drive one drop path and assert what it removes; neither direction asserted
