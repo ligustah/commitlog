@@ -246,6 +246,81 @@ func TestCleanSpecBystanderKeySurvives(t *testing.T) {
 	require.NotContains(t, got, offAborted, "aborted record must be removed")
 }
 
+// tornRowLog lays out the shape a downstream consumer lost rows in: one key
+// written twice (a row updated once) alongside two sibling keys written exactly
+// once, then padding to keep the active segment out of the way.
+func tornRowLog(t *testing.T) (l *commitLog, offOld, offNew, offOrd, offIdx int64) {
+	l, app := specLog(t)
+	offOrd = app(&Message{Key: []byte("ord:1"), Value: []byte("order")})
+	offIdx = app(&Message{Key: []byte("kidx:1"), Value: []byte("index")})
+	offOld = app(&Message{Key: []byte("row:1"), Value: []byte("v1")})
+	offNew = app(&Message{Key: []byte("row:1"), Value: []byte("v2")})
+	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
+	return l, offOld, offNew, offOrd, offIdx
+}
+
+// Supersession and an abort can compose to remove BOTH copies of a key — but
+// only across two passes, and only when the first pass ran with a Ceiling above
+// a record that was still undecided. Within a single pass it cannot happen: an
+// aborted record is excluded from candidacy before the latest is chosen, so it
+// never supersedes anything (TestCleanSpecAbortedShadowing).
+//
+// The contrast is the point. Same records, same abort, only the first pass's
+// Ceiling differs — and that alone decides whether the key survives. Callers
+// pass Ceiling = the transactional LSO precisely so the undecided case lands in
+// the second subtest.
+func TestCleanSpecCeilingAboveUndecidedLosesKey(t *testing.T) {
+	t.Run("ceiling above an undecided record loses the key", func(t *testing.T) {
+		l, offOld, offNew, offOrd, offIdx := tornRowLog(t)
+
+		// Pass 1: the newer copy is still undecided, but Ceiling sits above it,
+		// so it counts as latest and supersedes the older committed copy.
+		requireCleanOK(t, l, (CleanSpec{Ceiling: l.HighWatermark()}))
+		got := readAllMsgs(t, l)
+		require.NotContains(t, got, offOld, "pass 1 should have superseded the older copy")
+		require.Contains(t, got, offNew)
+
+		// Pass 2: the transaction is now known aborted, so the survivor goes too.
+		requireCleanOK(t, l, (CleanSpec{
+			Ceiling: l.HighWatermark(),
+			Aborted: func(off int64) bool { return off == offNew },
+		}))
+		got = readAllMsgs(t, l)
+
+		require.NotContains(t, got, offNew)
+		require.NotContains(t, got, offOld)
+		for off, m := range got {
+			require.NotEqual(t, "row:1", string(m.Key()), "row key should be gone entirely (offset %d)", off)
+		}
+		// ...while the siblings, never superseded, are still live: the symptom.
+		require.Contains(t, got, offOrd)
+		require.Contains(t, got, offIdx)
+	})
+
+	t.Run("ceiling at the lso keeps the key", func(t *testing.T) {
+		l, offOld, offNew, offOrd, offIdx := tornRowLog(t)
+
+		// Pass 1 with Ceiling below the undecided record: it is retained and
+		// uncounted, so it supersedes nothing.
+		requireCleanOK(t, l, (CleanSpec{Ceiling: offOld}))
+		require.Contains(t, readAllMsgs(t, l), offOld,
+			"an undecided record above the ceiling must not supersede a committed copy")
+
+		// Pass 2: now decided-aborted. The older committed copy must survive.
+		requireCleanOK(t, l, (CleanSpec{
+			Ceiling: l.HighWatermark(),
+			Aborted: func(off int64) bool { return off == offNew },
+		}))
+		got := readAllMsgs(t, l)
+
+		require.NotContains(t, got, offNew, "aborted record must be removed")
+		require.Contains(t, got, offOld, "committed value lost")
+		require.Equal(t, "v1", string(got[offOld].Value()))
+		require.Contains(t, got, offOrd)
+		require.Contains(t, got, offIdx)
+	})
+}
+
 // DisableAutoClean: the internal loop must stop cleaning (retention would
 // otherwise delete the old prefix) while explicit Clean still works.
 func TestDisableAutoClean(t *testing.T) {
