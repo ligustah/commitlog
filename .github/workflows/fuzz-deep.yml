@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [FuzzCompactionRecovery, FuzzOffloadCrashConsistency]
+        target: [FuzzCompactionRecovery, FuzzOffloadCrashConsistency, FuzzOffloadCompactionRetention]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
