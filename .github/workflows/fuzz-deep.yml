@@ -1,0 +1,58 @@
+name: Fuzz (deep)
+
+# The per-push `fuzz` job in ci.yml runs 90s per target, which is barely past
+# baseline coverage gathering — it is a smoke test that the harness still works,
+# not a search. That distinction is not theoretical: 90s has never surfaced
+# anything, while a 12-minute local sweep found a data-resurrection bug in
+# budget-capped compaction that was reachable through the public API.
+#
+# So the actual searching happens here, on a schedule, where a long run costs
+# nothing (public repo, free runners) and nobody waits for it. A crasher is
+# uploaded as an artifact rather than committed, since a maintainer should look
+# at it before it becomes a permanent seed.
+on:
+  schedule:
+    - cron: '17 3 * * *' # nightly, off the hour to avoid the scheduling spike
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: How long to fuzz each target
+        required: false
+        default: 30m
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-deep
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: deep fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzCompactionRecovery, FuzzOffloadCrashConsistency]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+      - name: Fuzz ${{ matrix.target }}
+        run: |
+          go test -run '^$' -fuzz='^${{ matrix.target }}$' \
+            -fuzztime='${{ inputs.fuzztime || '30m' }}' -timeout=80m .
+
+      # Only fires when the run above failed, which for a fuzz target means a
+      # crashing input was found and written under testdata/fuzz.
+      - name: Upload crasher
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crasher-${{ matrix.target }}
+          path: testdata/fuzz/
+          if-no-files-found: ignore
