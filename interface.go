@@ -48,8 +48,28 @@ type CommitLog interface {
 	// Truncate removes all messages from the log starting at the given offset.
 	Truncate(offset int64) error
 
-	// SyncAll fsyncs every segment (log + index) and checkpoints the high
-	// watermark, making everything appended so far durable against power loss.
+	// Sync makes everything appended so far durable against power loss: it
+	// fsyncs the log and index of every segment written since its last sync.
+	// After Sync returns, a reopened log recovers every record appended before
+	// the call.
+	//
+	// This is the durability primitive — use it to make a commit durable. It
+	// does NOT checkpoint the high watermark, which is only an optimization
+	// (recovery rides out a stale checkpoint), and which costs a second fsync of
+	// the active segment plus an atomic rewrite of the checkpoint file. Reach
+	// for SyncAll instead only when the checkpoint itself must be current.
+	//
+	// Safe to call concurrently with appends, and concurrent callers are the
+	// point: the fsync runs outside the segment lock, so appends keep landing
+	// while a sync is in flight and can be batched into the next one.
+	Sync() error
+
+	// SyncAll makes everything appended so far durable (as Sync) and ALSO
+	// checkpoints the high watermark. Used before externally-visible filesystem
+	// operations on the log's directory (e.g. an atomic stream promote via
+	// rename) whose observers must never see the log roll back past this point.
+	// For plain durability prefer Sync, which skips the checkpoint's extra fsync
+	// and file rewrite.
 	SyncAll() error
 
 	// TruncateBefore removes all messages from the log with offset strictly less

@@ -77,6 +77,12 @@ type segment struct {
 	sealed         bool
 	closed         bool
 	replaced       bool
+	// dirty reports whether anything has been appended since the last fsync, so
+	// a durability pass can skip segments already on stable storage instead of
+	// paying an fsync per segment per call. Starts true: a segment opened from
+	// disk was written by a process whose flush state we cannot know, so the
+	// first sync always flushes. Guarded by the segment lock.
+	dirty bool
 
 	// Block compression. When blockMode is set, each WriteMessageSet is stored
 	// as a compressed block and the log's logical byte space (position, index
@@ -308,6 +314,7 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 		suffix:      suffix,
 		codec:       codec,
 		waiters:     make(map[interface{}]chan struct{}),
+		dirty:       true,
 	}
 	// If this is a new segment, ensure the file doesn't already exist.
 	if isNew && exists(s.logPath()) {
@@ -794,6 +801,7 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 	if s.closed {
 		return 0, ErrSegmentClosed
 	}
+	s.dirty = true
 	if s.blockMode {
 		if err = s.appendBlock(p); err != nil {
 			return 0, err
@@ -1111,20 +1119,48 @@ func (s *segment) removeWaiter(waiter interface{}) {
 }
 
 // Sync flushes the segment's log file and index to stable storage. A no-op on
-// a closed segment.
+// a closed segment, and on one with nothing written since its last sync.
+//
+// The fsync deliberately runs OUTSIDE the segment lock. The append path needs
+// that same lock, so holding it across an fsync stalls every append to this
+// segment for the fsync's whole duration — which defeats a caller's group
+// commit, since the appends that would form its next batch are exactly the ones
+// landing while a sync is in flight. An append that lands mid-fsync is simply
+// not covered by that fsync and waits for the next one, which is already the
+// group-commit contract, so nothing is weakened: the segment stays marked dirty
+// and the following sync flushes it.
 func (s *segment) Sync() error {
+	// Snapshot what to flush, and take the dirty mark with it. Clearing BEFORE
+	// the fsync (not after) is the safe order: an append landing during the
+	// fsync re-marks the segment and is covered by the next sync, whereas
+	// clearing afterwards would erase that mark and lose the append.
 	s.Lock()
-	defer s.Unlock()
-	if s.closed {
+	if s.closed || !s.dirty {
+		s.Unlock()
 		return nil
 	}
-	if err := s.backing.Sync(); err != nil {
+	backing, idx := s.backing, s.Index
+	s.dirty = false
+	s.Unlock()
+
+	// With the lock released a concurrent Clean can close the segment under us
+	// (rewrites run outside the log mutex). Such a segment is already durable,
+	// or is being made durable by the rewrite that closed it, so treat a closed
+	// half as success — the same tolerance the whole-log sync path applies.
+	if err := backing.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
 		return err
 	}
-	if s.Index == nil {
+	if idx == nil {
 		return nil // offloaded index: nothing local to sync
 	}
-	return s.Index.Sync()
+	// The index carries its own mutex and takes it for both writes and flushes,
+	// so flushing without the segment lock cannot race the remap-on-expand that
+	// would otherwise flush a mapping being torn down.
+	if err := idx.Sync(); err != nil &&
+		!errors.Is(err, os.ErrClosed) && !errors.Is(err, ErrSegmentClosed) {
+		return err
+	}
+	return nil
 }
 
 // Close a segment such that it can no longer be read from or written to. This

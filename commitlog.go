@@ -1335,21 +1335,47 @@ func (l *commitLog) checkpointHWLoop() {
 	}
 }
 
+// Sync is the durability primitive: it fsyncs the log and index of every
+// segment written since its last sync, without checkpointing the high
+// watermark. See the interface doc for why a durability caller should prefer it
+// over SyncAll.
+func (l *commitLog) Sync() error {
+	return l.syncSegments()
+}
+
 // SyncAll makes everything appended so far durable against power loss: it
-// fsyncs EVERY segment's log and index (the periodic HW checkpoint only syncs
-// the active segment, so sealed segments written since the last checkpoint may
-// still be in OS buffers), then checkpoints the high watermark. After SyncAll
-// returns, a reopened log recovers every record appended before the call.
-// Used before externally-visible filesystem operations on the log's directory
-// (e.g. an atomic stream promote via rename) whose observers must never see
-// the log roll back past this point.
+// fsyncs EVERY segment's log and index written since its last sync (the
+// periodic HW checkpoint only syncs the active segment, so sealed segments
+// written since the last checkpoint may still be in OS buffers), then
+// checkpoints the high watermark. After SyncAll returns, a reopened log
+// recovers every record appended before the call. Used before
+// externally-visible filesystem operations on the log's directory (e.g. an
+// atomic stream promote via rename) whose observers must never see the log roll
+// back past this point.
 func (l *commitLog) SyncAll() error {
+	if err := l.syncSegments(); err != nil {
+		return err
+	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	for _, seg := range l.segments {
+	return l.checkpointHW()
+}
+
+// syncSegments fsyncs every dirty segment. It snapshots the segment slice
+// rather than holding l.mu across the fsyncs: an append that rolls a new
+// segment needs the write lock, so holding the read lock for the duration would
+// stall the roll behind the very fsync a concurrent commit is waiting on. A
+// segment appended after the snapshot is simply not covered by this call, which
+// is the same boundary the per-segment sync already draws.
+func (l *commitLog) syncSegments() error {
+	l.mu.RLock()
+	segments := make([]*segment, len(l.segments))
+	copy(segments, l.segments)
+	l.mu.RUnlock()
+	for _, seg := range segments {
 		if err := seg.Sync(); err != nil {
 			// A segment closed concurrently: Clean rewrites/closes segments
-			// OUTSIDE l.mu (see the struct comment), so a SyncAll racing a Clean
+			// OUTSIDE l.mu (see the struct comment), so a sync racing a Clean
 			// can grab a segment Clean just closed. Such a segment is already
 			// durable (or being made durable by the rewrite that closed it), so
 			// skip it and keep syncing the REST — crucially the active segment —
@@ -1362,7 +1388,7 @@ func (l *commitLog) SyncAll() error {
 			return errors.Wrap(err, "failed to sync segment")
 		}
 	}
-	return l.checkpointHW()
+	return nil
 }
 
 func (l *commitLog) checkpointHW() error {
