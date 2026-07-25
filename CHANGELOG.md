@@ -5,6 +5,58 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Added**: `CommitLog.Sync()` — the durability primitive, for callers making a
+  commit durable. It fsyncs log and index and stops there, where `SyncAll` also
+  checkpoints the high watermark: a second fsync of the active segment plus an
+  atomic rewrite of the checkpoint file, roughly three fsyncs and a rename where
+  durability needs one. The checkpoint is only an optimization — recovery rides
+  out a stale one — so a durability caller should not have to buy it. `SyncAll`
+  keeps it for the promote path, whose observers must never see the log roll
+  back.
+
+  Segments now track whether anything has been appended since their last fsync,
+  so neither entry point pays per-segment fsyncs for data already on stable
+  storage; a `Sync` with nothing new is free rather than an fsync per segment.
+  The mark starts set, because a segment opened from disk was written by a
+  process whose flush state we cannot know.
+
+  Minor rather than patch: it adds a method to the `CommitLog` interface, which
+  breaks anything else implementing it.
+- **Fixed (performance)**: the fsync ran while holding the segment lock, and the
+  append path needs that same lock — so no append could land while a sync was in
+  flight. Those appends are exactly what forms a caller-side group commit's next
+  batch, so batching that coalesces correctly in isolation collapsed one layer
+  down: a consumer measured 1.7× end to end where coalescing should approach the
+  single-fsync floor. The sync now snapshots what to flush under the lock,
+  releases it, then fsyncs. An append landing mid-fsync is not covered by that
+  fsync and waits for the next one — already the group-commit contract — and the
+  segment stays dirty, so nothing is lost. The index is safe to flush outside the
+  segment lock because it carries its own mutex for both writes and flushes,
+  which is what keeps a flush off a mapping that remap-on-expand is tearing down.
+
+  Measured per commit of one record: `Sync` 2.0 ms against `SyncAll` 5.3 ms, and
+  1.0 ms per commit across 24 concurrent writers — below a single fsync, which
+  is coalescing actually happening.
+- **Fixed (data loss)**: a process killed mid-compaction left its half-written
+  `.cleaned` working copy on disk. Reopening skips it — `open` matches only
+  `.log` — so it survived to the next maintenance pass, where the working copy
+  was reopened `O_CREATE|O_APPEND` and the new rewrite appended *after* the dead
+  pass's bytes, then renamed over the live segment. The digest rebuild then
+  panicked on the malformed leading frame, and the panic unwound leaving the
+  source segment's index still mapped, which on Windows makes the file
+  unremovable — so the segment became permanently undeletable, every restart's
+  first maintenance pass failed, and the log grew without bound. A working copy
+  now starts empty; it holds no committed data until its rename, so discarding a
+  leftover is always safe.
+- **Fixed**: the segment close path bailed out after a failed log close, skipping
+  the index close and leaving the index mapped and the segment marked open —
+  reaching that same undeletable state by a second route. Both halves are now
+  closed before either failure is reported, and an already-closed half counts as
+  success, matching the sync path: a maintenance pass can reach a segment another
+  pass just closed, since rewrites run outside the log mutex.
+
 ## v0.19.1 — 2026-07-25
 
 - **Fixed**: `CommitLog.SyncAll` aborted the whole sync — skipping the still-open
