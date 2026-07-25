@@ -5,6 +5,17 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.19.1 — 2026-07-25
+
+- **Fixed**: `CommitLog.SyncAll` aborted the whole sync — skipping the still-open
+  active segment — when it hit a segment closed concurrently by `Clean`, which
+  rewrites and closes segments OUTSIDE the log mutex. Such a segment is already
+  durable, so `SyncAll` now skips it on `os.ErrClosed` and keeps syncing the rest.
+  This surfaced downstream as a spurious `sync ...: file already closed`, exposed
+  by durable_streams' shared-coordinator model (many transactional producers
+  sharing one coordinator's txLog while maintenance runs); the
+  per-producer-coordinator layout made the overlap rare.
+
 ## v0.19.0 — 2026-07-24
 
 - **Added**: `CommitLog.NewScanReader(offset)` — a reader for sweeping a static
