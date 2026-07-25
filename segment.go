@@ -1139,34 +1139,74 @@ func (s *segment) close() error {
 	if s.closed {
 		return nil
 	}
-	if err := s.backing.Close(); err != nil {
-		return err
+	// Close BOTH halves before reporting either failure. Bailing out after a
+	// failed backing close skipped the index close, leaving the index MAPPED and
+	// the segment still marked open — and a mapped file cannot be unlinked on
+	// Windows, so every later attempt to remove that segment failed with a
+	// sharing violation and the log grew without bound.
+	//
+	// An already-closed half is the state close() wants, not a failure: like the
+	// sync path, a maintenance pass can reach a segment another pass just closed
+	// (rewrites run outside the log mutex). Treat os.ErrClosed as success so the
+	// segment still reaches the closed state instead of getting stuck open.
+	berr := s.backing.Close()
+	if errors.Is(berr, os.ErrClosed) {
+		berr = nil
 	}
+	var ierr error
 	if s.Index != nil {
-		if err := s.Index.Close(); err != nil {
-			return err
+		if ierr = s.Index.Close(); errors.Is(ierr, os.ErrClosed) {
+			ierr = nil
 		}
+	}
+	if berr != nil {
+		return berr
+	}
+	if ierr != nil {
+		return ierr
 	}
 	s.closed = true
 	s.seal()
 	return nil
 }
 
+// newWorkingSegment opens the suffixed working copy a rewrite builds before
+// renaming it over its source (Cleaned/Truncated/Trimmed).
+//
+// The working copy MUST start empty. A process killed mid-rewrite leaves its
+// half-written copy on disk — reopening skips it (open() matches only ".log"),
+// so it survives to the next maintenance pass, and the backing opens
+// O_CREATE|O_APPEND. Without this the next pass would append its rewrite AFTER
+// the dead pass's bytes and then rename that frankenstein over live data: the
+// digest rebuild panics on the malformed leading frame, and the panic unwinds
+// leaving the source segment's index still mapped, so every later attempt to
+// remove it fails on Windows with a sharing violation. Discarding the leftover
+// is always safe — a working copy holds no committed data until its rename.
+func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, codec compress.Codec) (*segment, error) {
+	for _, stem := range []string{logSuffix, indexSuffix} {
+		p := filepath.Join(path, fmt.Sprintf(fileFormat, baseOffset, stem+suffix))
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return nil, errors.Wrap(err, "remove stale rewrite working copy")
+		}
+	}
+	return newSegment(path, baseOffset, maxBytes, false, suffix, codec)
+}
+
 // Cleaned creates a cleaned segment for this segment.
 func (s *segment) Cleaned() (*segment, error) {
-	return newSegment(s.path, s.BaseOffset, s.maxBytes, false, cleanedSuffix, s.codec)
+	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, cleanedSuffix, s.codec)
 }
 
 // Truncated creates a truncated segment for this segment.
 func (s *segment) Truncated() (*segment, error) {
-	return newSegment(s.path, s.BaseOffset, s.maxBytes, false, truncatedSuffix, s.codec)
+	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, truncatedSuffix, s.codec)
 }
 
 // Trimmed creates a new segment at baseOffset with trimmedSuffix, used when
 // rewriting a segment to drop records before a given offset during TruncateBefore.
 // The new segment has a different BaseOffset than the receiver.
 func (s *segment) Trimmed(baseOffset int64) (*segment, error) {
-	return newSegment(s.path, baseOffset, s.maxBytes, false, trimmedSuffix, s.codec)
+	return newWorkingSegment(s.path, baseOffset, s.maxBytes, trimmedSuffix, s.codec)
 }
 
 // Finalize promotes a trimmed segment (one with trimmedSuffix) to its final
