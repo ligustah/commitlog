@@ -1348,6 +1348,17 @@ func (l *commitLog) SyncAll() error {
 	defer l.mu.RUnlock()
 	for _, seg := range l.segments {
 		if err := seg.Sync(); err != nil {
+			// A segment closed concurrently: Clean rewrites/closes segments
+			// OUTSIDE l.mu (see the struct comment), so a SyncAll racing a Clean
+			// can grab a segment Clean just closed. Such a segment is already
+			// durable (or being made durable by the rewrite that closed it), so
+			// skip it and keep syncing the REST — crucially the active segment —
+			// instead of aborting the whole sync. Aborting otherwise surfaced as a
+			// spurious "sync ...: file already closed" under concurrent load (many
+			// producers sharing one coordinator's txLog while maintenance runs).
+			if errors.Is(err, os.ErrClosed) {
+				continue
+			}
 			return errors.Wrap(err, "failed to sync segment")
 		}
 	}
