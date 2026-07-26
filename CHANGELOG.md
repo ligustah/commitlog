@@ -5,12 +5,12 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.20.0 — 2026-07-26
 
 - **Fixed (performance)**: the index flush ran while holding the mutex that
   guards entry writes, so an append to a log blocked for the duration of that
-  log's index flush — the same shape as the segment-level fix in v0.20.0, one
-  layer down, and the limiter once that landed. A consumer's mutex profile at 64
+  log's index flush — the same shape as the segment-level fix below, one layer
+  down, and the limiter once that landed. A consumer's mutex profile at 64
   concurrent durable commits found it underneath their own coordinator lock.
 
   The mapping was the obstacle: the index remaps when it expands, and a flush
@@ -30,13 +30,10 @@ library from that fork onward.
   index mapped, its handle open and the index marked open. A mapped file cannot
   be unlinked on Windows, so a transient flush failure became a segment that
   could never be deleted and a maintenance pass that failed identically forever
-  — the same failure mode as the segment close path in v0.20.0, one layer down.
+  — the same failure mode as the segment close path below, one layer down.
   The mapping and handle are now released regardless, and the flush failure is
   reported after: losing an unflushed tail is recoverable, leaking the mapping
   is not.
-
-## v0.20.0 — 2026-07-26
-
 - **Added**: `CommitLog.Sync()` — the durability primitive, for callers making a
   commit durable. It fsyncs log and index and stops there, where `SyncAll` also
   checkpoints the high watermark: a second fsync of the active segment plus an
@@ -50,7 +47,10 @@ library from that fork onward.
   so neither entry point pays per-segment fsyncs for data already on stable
   storage; a `Sync` with nothing new is free rather than an fsync per segment.
   The mark starts set, because a segment opened from disk was written by a
-  process whose flush state we cannot know.
+  process whose flush state we cannot know. It is cleared *before* the fsync, so
+  an append landing mid-flush is covered by the next sync rather than lost, and
+  restored if the fsync fails, so a reported failure can never leave a segment
+  looking durable when its data is still in OS buffers.
 
   Minor rather than patch: it adds a method to the `CommitLog` interface, which
   breaks anything else implementing it.
