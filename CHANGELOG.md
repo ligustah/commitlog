@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.21.0 — 2026-07-26
 
 - **Breaking / Added**: a log now records what it IS. Its compaction-defining
   settings are persisted to a `log-descriptor` sidecar in the log directory —
