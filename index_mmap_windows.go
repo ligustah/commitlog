@@ -41,20 +41,27 @@ func syncMmap(mmap gommap.MMap, f *os.File) error {
 // truncate, then remap at the smaller size so readers remain valid.
 // When mmap is already nil (called from Close after UnsafeUnmap), we skip
 // the unmap/remap and just truncate.
+// The caller holds idx.mu exclusively. mapMu is taken on top of it for the
+// unmap/remap, to exclude a flush — which pins the mapping WITHOUT mu.
 func (idx *index) shrink() error {
 	remap := idx.mmap != nil
 	if remap {
-		if err := unmapFile(idx.mmap); err != nil {
+		idx.mapMu.Lock()
+		err := unmapFile(idx.mmap)
+		idx.mmap = nil
+		idx.mapMu.Unlock()
+		if err != nil {
 			return errors.Wrap(err, "unmap failed during shrink")
 		}
-		idx.mmap = nil
 	}
 	if err := idx.file.Truncate(idx.position); err != nil {
 		return errors.Wrap(err, "truncate failed during shrink")
 	}
 	if remap && idx.position > 0 {
-		var err error
-		idx.mmap, err = mmapFile(idx.file)
+		idx.mapMu.Lock()
+		mmap, err := mmapFile(idx.file)
+		idx.mmap = mmap
+		idx.mapMu.Unlock()
 		if err != nil {
 			return errors.Wrap(err, "remap failed after shrink")
 		}

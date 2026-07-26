@@ -44,10 +44,18 @@ const (
 
 type index struct {
 	options
-	mmap     gommap.MMap
-	file     *os.File
-	size     int64
-	mu       sync.RWMutex
+	mmap gommap.MMap
+	file *os.File
+	size int64
+	mu   sync.RWMutex
+	// mapMu guards the LIFETIME of mmap, so a flush can run without mu and
+	// still be sure the mapping it is flushing is not being torn down. Held
+	// shared by the flush, exclusively by the unmap/remap paths (expand, shrink,
+	// close). Every teardown path also holds mu exclusively, so code that
+	// touches the mapping under mu does not need it.
+	//
+	// Lock order is mu then mapMu, never the reverse.
+	mapMu    sync.RWMutex
 	position int64
 	closed   bool
 }
@@ -222,11 +230,17 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 		// the new handle overwrites the old one; the subsequent UnsafeUnmap of
 		// the old slice then closes the new handle, leaving idx.mmap with an
 		// invalid entry and causing ERROR_INVALID_HANDLE on the next Sync.
+		//
+		// Exclude a concurrent flush for the swap: it holds the mapping shared
+		// without mu, so this is the one teardown mu alone does not cover.
+		idx.mapMu.Lock()
 		oldMmap := idx.mmap
 		if err := unmapFile(oldMmap); err != nil {
+			idx.mapMu.Unlock()
 			return errors.Wrap(err, "failed to unmap memory mapped index file")
 		}
 		idx.mmap, err = mmapFile(idx.file)
+		idx.mapMu.Unlock()
 		if err != nil {
 			panic(errors.Wrap(err, "failed to mmap expanded index file"))
 		}
@@ -236,12 +250,33 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 	return nil
 }
 
+// Sync flushes the index to stable storage WITHOUT holding mu across the
+// flush. mu also guards entry writes, so holding it here would block every
+// append to this index for the flush's whole duration — and an append blocked
+// behind a flush is an append that cannot join a caller's next commit batch,
+// which is how group commit gets defeated a layer down. The mapping is pinned
+// with mapMu instead, which the remap-on-expand path takes exclusively, so the
+// flush can never touch a mapping being torn down.
+//
+// An entry written during the flush may or may not be covered by it, exactly as
+// at the segment level; the caller's next sync covers it.
 func (idx *index) Sync() error {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	return idx.sync()
+	idx.mu.RLock()
+	if idx.closed {
+		idx.mu.RUnlock()
+		return ErrSegmentClosed
+	}
+	// Pin the mapping BEFORE releasing mu — in the same order the remap path
+	// takes them — so it cannot be unmapped in the gap between the two.
+	idx.mapMu.RLock()
+	defer idx.mapMu.RUnlock()
+	mmap, file := idx.mmap, idx.file
+	idx.mu.RUnlock()
+	return syncMmap(mmap, file)
 }
 
+// sync flushes the index with mu already held exclusively, for the close path
+// where the whole teardown is serialized anyway.
 func (idx *index) sync() error {
 	if idx.closed {
 		return ErrSegmentClosed
@@ -262,10 +297,13 @@ func (idx *index) Close() error {
 	// ERROR_USER_MAPPED_FILE if any view of the file mapping is still open.
 	// idx.mmap may already be nil if Shrink() was called on an empty index.
 	if idx.mmap != nil {
-		if err := unmapFile(idx.mmap); err != nil {
+		idx.mapMu.Lock()
+		err := unmapFile(idx.mmap)
+		idx.mmap = nil
+		idx.mapMu.Unlock()
+		if err != nil {
 			return err
 		}
-		idx.mmap = nil
 	}
 	if err := idx.shrink(); err != nil {
 		return err
