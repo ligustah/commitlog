@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.20.0 — 2026-07-26
 
 - **Added**: `CommitLog.Sync()` — the durability primitive, for callers making a
   commit durable. It fsyncs log and index and stops there, where `SyncAll` also
