@@ -5,6 +5,29 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed (data loss)**: concurrent `Append` calls on one log could be handed
+  the SAME offset, and their records written over the same byte range. An append
+  reads the active segment's next offset and position, encodes a message set
+  stamped with them, and only then takes the segment's write lock — so two
+  appends racing on one log both read the same tail, were both stamped with it,
+  and both wrote there. The loser's records were simply gone and the offset
+  sequence held duplicates, with no error returned to either caller. Measured on
+  the regression test: **32 concurrent appends left 3 readable records.**
+
+  Reading the tail and writing to it is now one atomic step, for both `Append`
+  and `AppendMessageSet`. The encoding has to sit inside that critical section
+  because the offsets are baked into the encoded bytes, so appends serialize
+  against each other — but not against fsyncs, which is the part that governs
+  throughput and is why the sync path deliberately runs outside the segment
+  lock.
+
+  The bug is old, not new. It stayed invisible because callers tended to
+  serialize their own writes; one that narrowed a coarse lock of its own started
+  appending concurrently for the first time and lost records immediately.
+  `ConcurrencyControl` is off by default and did not protect against this.
+
 ## v0.21.0 — 2026-07-26
 
 - **Breaking / Added**: a log now records what it IS. Its compaction-defining

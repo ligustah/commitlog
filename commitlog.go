@@ -57,8 +57,26 @@ type commitLog struct {
 	// and appends stay concurrent; without cleanMu a concurrent truncation (or
 	// second Clean) can delete segment files mid-rewrite and the final swap
 	// resurrects them. Lock order: cleanMu before mu, never the reverse.
-	cleanMu          sync.Mutex
-	hw               int64
+	cleanMu sync.Mutex
+	// appendMu makes an append atomic from "read the tail" to "write there".
+	// An append reads the active segment's next offset and position, encodes a
+	// message set stamped with them, and only then takes the segment's write
+	// lock — so without this two concurrent appends read the SAME tail, are both
+	// stamped with it, and both write over the same byte range. The loser's
+	// records are gone and the offset sequence has duplicates, with no error to
+	// either caller. Callers that happened to serialize their own writes never
+	// saw it; one that stopped doing so lost 29 of 32 records.
+	//
+	// The encoding sits inside the critical section because the offsets are
+	// baked into the encoded bytes, so it cannot be hoisted out without
+	// reserving offset ranges and writing out of order. Appends therefore
+	// serialize against each other — but not against fsyncs, which is what
+	// actually matters for throughput and is why the sync path deliberately
+	// runs outside the segment lock.
+	//
+	// Lock order: appendMu before mu, never the reverse.
+	appendMu sync.Mutex
+	hw       int64
 	closed           chan struct{}
 	closeOnce        sync.Once      // guards close(l.closed)
 	bgWG             sync.WaitGroup // tracks the checkpoint + cleaner loops
@@ -343,6 +361,9 @@ func (l *commitLog) Append(msgs []*Message) ([]int64, error) {
 			m.Timestamp = now
 		}
 	}
+	// Reading the tail and writing to it must be one step; see appendMu.
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
 	if _, err := l.checkAndPerformSplit(); err != nil {
 		return nil, err
 	}
@@ -363,6 +384,11 @@ func (l *commitLog) Append(msgs []*Message) ([]int64, error) {
 // in readonly mode to allow for reconciliation, e.g. when replicating from
 // another log.
 func (l *commitLog) AppendMessageSet(ms []byte) ([]int64, error) {
+	// Same atomicity requirement as Append: the entries are derived from the
+	// segment's current position, so reading it and writing there cannot be
+	// interleaved with another append.
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
 	if _, err := l.checkAndPerformSplit(); err != nil {
 		return nil, err
 	}
