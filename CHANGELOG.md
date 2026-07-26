@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.21.1 — 2026-07-26
 
 - **Fixed (data loss)**: concurrent `Append` calls on one log could be handed
   the SAME offset, and their records written over the same byte range. An append
