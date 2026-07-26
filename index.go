@@ -290,9 +290,12 @@ func (idx *index) Close() error {
 	if idx.closed {
 		return nil
 	}
-	if err := idx.sync(); err != nil {
-		return err
-	}
+	// Report a failed flush, but NEVER before releasing the mapping and the
+	// handle: an index left mapped cannot have its file unlinked on Windows, so
+	// bailing out here turns a flush failure into a segment that can never be
+	// deleted and a maintenance pass that fails identically forever. Losing the
+	// unflushed tail is recoverable; leaking the mapping is not.
+	syncErr := idx.sync()
 	// Unmap before shrinking: on Windows, SetEndOfFile fails with
 	// ERROR_USER_MAPPED_FILE if any view of the file mapping is still open.
 	// idx.mmap may already be nil if Shrink() was called on an empty index.
@@ -304,6 +307,13 @@ func (idx *index) Close() error {
 		if err != nil {
 			return err
 		}
+	}
+	if syncErr != nil {
+		// The mapping is gone; drop the handle too so the file is removable,
+		// then report why the flush failed.
+		idx.file.Close() // nolint: errcheck
+		idx.closed = true
+		return syncErr
 	}
 	if err := idx.shrink(); err != nil {
 		return err
