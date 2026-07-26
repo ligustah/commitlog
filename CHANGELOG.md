@@ -5,6 +5,28 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed (performance)**: the index flush ran while holding the mutex that
+  guards entry writes, so an append to a log blocked for the duration of that
+  log's index flush — the same shape as the segment-level fix in v0.20.0, one
+  layer down, and the limiter once that landed. A consumer's mutex profile at 64
+  concurrent durable commits found it underneath their own coordinator lock.
+
+  The mapping was the obstacle: the index remaps when it expands, and a flush
+  must never walk a mapping being torn down. The mapping now has its own
+  lifetime lock — shared by the flush, exclusive in the unmap/remap paths —
+  while the metadata mutex is held only briefly. The flush pins the mapping
+  before releasing the metadata mutex, in the same order the remap path takes
+  them, so it cannot be unmapped in the gap.
+
+  An entry written during a flush may or may not be covered by it, as at the
+  segment level; the caller's next sync covers it.
+
+  Measured: entry writes during continuous flushing go from ~8 per flush to
+  ~477. Per commit of one record, `Sync` 2.02 ms → 1.65 ms and `SyncAll`
+  5.33 ms → 4.45 ms; across 24 concurrent writers, 1.03 ms → 0.63 ms.
+
 ## v0.20.0 — 2026-07-26
 
 - **Added**: `CommitLog.Sync()` — the durability primitive, for callers making a
