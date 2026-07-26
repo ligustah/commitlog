@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -146,5 +147,49 @@ type countingBacking struct {
 func (b *countingBacking) Sync() error {
 	b.syncs++
 	return b.segmentBacking.Sync()
+}
+
+// failingBacking fails its fsync a fixed number of times, then behaves.
+type failingBacking struct {
+	segmentBacking
+	failures int
+	syncs    int
+}
+
+func (b *failingBacking) Sync() error {
+	b.syncs++
+	if b.failures > 0 {
+		b.failures--
+		return errors.New("simulated fsync failure")
+	}
+	return b.segmentBacking.Sync()
+}
+
+// A failed fsync must leave the segment marked dirty. The mark is cleared
+// before the fsync so an append landing mid-flush is not lost — but if the
+// flush then fails, leaving it clear would mean the retry, and every later
+// sync, reports success without flushing anything. A durability primitive
+// silently doing nothing after a reported failure is the worst possible
+// outcome: the caller believes the data is on disk and it is not.
+func TestFailedSyncStaysDirty(t *testing.T) {
+	dir := tempDir(t)
+	seg := createSegment(t, dir, 0, 1024)
+	require.NoError(t, seg.WriteMessageSet(oneMessageSet(t, seg)))
+
+	failing := &failingBacking{segmentBacking: seg.backing, failures: 1}
+	seg.Lock()
+	seg.backing = failing
+	seg.Unlock()
+
+	require.Error(t, seg.Sync(), "the failing fsync must be reported")
+
+	seg.RLock()
+	dirty := seg.dirty
+	seg.RUnlock()
+	require.True(t, dirty, "a segment whose fsync failed is NOT durable")
+
+	// The retry must actually flush rather than short-circuit as already-clean.
+	require.NoError(t, seg.Sync())
+	require.Equal(t, 2, failing.syncs, "the retry must reach the backing")
 }
 

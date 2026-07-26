@@ -1147,17 +1147,29 @@ func (s *segment) Sync() error {
 	// (rewrites run outside the log mutex). Such a segment is already durable,
 	// or is being made durable by the rewrite that closed it, so treat a closed
 	// half as success — the same tolerance the whole-log sync path applies.
-	if err := backing.Sync(); err != nil && !errors.Is(err, os.ErrClosed) {
-		return err
-	}
-	if idx == nil {
-		return nil // offloaded index: nothing local to sync
+	err := backing.Sync()
+	if errors.Is(err, os.ErrClosed) {
+		err = nil
 	}
 	// The index carries its own mutex and takes it for both writes and flushes,
 	// so flushing without the segment lock cannot race the remap-on-expand that
-	// would otherwise flush a mapping being torn down.
-	if err := idx.Sync(); err != nil &&
-		!errors.Is(err, os.ErrClosed) && !errors.Is(err, ErrSegmentClosed) {
+	// would otherwise flush a mapping being torn down. A nil index is an
+	// offloaded one: nothing local to sync.
+	if err == nil && idx != nil {
+		if ierr := idx.Sync(); ierr != nil &&
+			!errors.Is(ierr, os.ErrClosed) && !errors.Is(ierr, ErrSegmentClosed) {
+			err = ierr
+		}
+	}
+	if err != nil {
+		// Put the dirty mark BACK. The data is still only in OS buffers, so
+		// leaving the segment marked clean would make the caller's retry — and
+		// every later sync — return success without flushing anything, turning a
+		// reported failure into silent data loss on the next power cut. Re-marking
+		// can only cost a redundant fsync.
+		s.Lock()
+		s.dirty = true
+		s.Unlock()
 		return err
 	}
 	return nil
