@@ -26,6 +26,14 @@ library from that fork onward.
   Measured: entry writes during continuous flushing go from ~8 per flush to
   ~477. Per commit of one record, `Sync` 2.02 ms → 1.65 ms and `SyncAll`
   5.33 ms → 4.45 ms; across 24 concurrent writers, 1.03 ms → 0.63 ms.
+- **Fixed**: closing an index returned early when its flush failed, leaving the
+  index mapped, its handle open and the index marked open. A mapped file cannot
+  be unlinked on Windows, so a transient flush failure became a segment that
+  could never be deleted and a maintenance pass that failed identically forever
+  — the same failure mode as the segment close path in v0.20.0, one layer down.
+  The mapping and handle are now released regardless, and the flush failure is
+  reported after: losing an unflushed tail is recoverable, leaking the mapping
+  is not.
 
 ## v0.20.0 — 2026-07-26
 
