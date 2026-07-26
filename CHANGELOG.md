@@ -5,6 +5,42 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Breaking / Added**: a log now records what it IS. Its compaction-defining
+  settings are persisted to a `log-descriptor` sidecar in the log directory —
+  human-readable, in the style of the existing `leader-epoch-checkpoint` and
+  `replication-offset-checkpoint` — and checked against the `Options` passed on
+  every open. If they disagree, the log refuses to open with
+  `ErrDescriptorMismatch`.
+
+  This closes a silent data-loss path. Compaction behaviour previously lived
+  only in the `Options` a caller happened to pass, so reopening a directory with
+  different — or absent — options quietly changed what got deleted. A downstream
+  caller reopened a compacted log with no config; `CompactMinAge` and
+  `CompactTombstoneRetention` both defaulted to zero, which means *no
+  protection* rather than "disabled", so compaction ran unprotected and removed
+  records their replay needed. Live was fine, only reopen broke, and nothing
+  errored at any point. Preferring either side silently would have kept the
+  failure invisible, which is the bug — so it is an error.
+
+  `Compact`, `CompactMinAge` and `CompactTombstoneRetention` gate the open.
+  `Compression` and `MaxSegmentBytes` are recorded to describe the log but never
+  gate it: both can change safely on an existing log, since segments keep the
+  format and size they were written with.
+
+  **A log with no descriptor is the same error**, which is what makes this
+  breaking — every log created before this has none. Silently adopting whatever
+  the caller passes is precisely the behaviour being removed. Set the new
+  `Options.AdoptOptions` to record the passed options as the log's descriptor
+  instead of checking against it: one explicit opt-in covering both the
+  migration of an existing log and a deliberate retune. A log being created is
+  unaffected — it simply records what it was created with.
+
+  A descriptor that exists but does not parse is corruption, not a migration,
+  and is reported as itself rather than being overwritten. Unknown keys are
+  ignored, so a descriptor written by a newer version stays readable.
+
 ## v0.20.0 — 2026-07-26
 
 - **Fixed (performance)**: the index flush ran while holding the mutex that

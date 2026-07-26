@@ -93,6 +93,14 @@ type Options struct {
 	// NON-transactional compacted logs (transactional layers pass their own
 	// CleanSpec instead, with transaction-aware bounds). Zero disables.
 	CompactTombstoneRetention time.Duration
+	// AdoptOptions records THESE options as the log's descriptor instead of
+	// checking against the one already on disk. It is the deliberate answer to
+	// the two cases New otherwise refuses: retuning an existing log's compaction
+	// settings, and opening a log created before descriptors existed (which has
+	// none). Requiring an explicit opt-in is the point — an accidentally empty
+	// config must not be able to redefine what a log keeps. Ignored for a log
+	// being created, which simply records what it was created with.
+	AdoptOptions bool
 	// DisableAutoClean stops the internal cleaner loop from running Clean.
 	// Segment splitting (MaxSegmentAge rolls) keeps running. For logs whose
 	// owner drives cleaning explicitly (CleanWithSpec) — an automatic clean
@@ -172,6 +180,20 @@ func New(opts Options) (CommitLog, error) {
 	}
 
 	if err := l.init(); err != nil {
+		return nil, err
+	}
+
+	// Settle what this log IS before opening anything. It has to happen here:
+	// once open() runs, the cleaner loop can start applying a retention policy,
+	// and the whole point is that a policy the log was not created with never
+	// gets applied at all.
+	descOpts := opts
+	descOpts.Path = path
+	isNew, err := logIsNew(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := reconcileDescriptor(descOpts, isNew); err != nil {
 		return nil, err
 	}
 

@@ -39,7 +39,11 @@ import (
 func fzOffCompSetup(t *testing.T, s *fzStream) (*commitLog, Options, *fzFaultStore) {
 	cl, opts, store := fzOffloadSetup(t, s)
 	require.NoError(t, cl.Close())
+	// Turning compaction on for a log created without it is a retune of what the
+	// log keeps, so it needs the explicit opt-in — the harness is doing on
+	// purpose the thing the descriptor exists to stop happening by accident.
 	opts.Compact = true
+	opts.AdoptOptions = true
 	l, err := New(opts)
 	require.NoError(t, err)
 	return l.(*commitLog), opts, store
