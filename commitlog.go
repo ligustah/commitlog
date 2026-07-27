@@ -388,6 +388,35 @@ func (l *commitLog) open() error {
 			l.hw = hw
 		}
 	}
+	// Take whatever the STORE says its tier holds and this log does not. Local
+	// markers have already been read above and win where both describe a
+	// segment; this only fills gaps.
+	//
+	// It is what makes the tier self-describing rather than an appendage of
+	// this directory: a process holding the store and an empty or partial log
+	// directory opens the log and reaches the offloaded records, without being
+	// handed bookkeeping by anyone.
+	if l.SegmentStore != nil {
+		objs, err := readTierManifest(l.SegmentStore)
+		if err != nil {
+			return err
+		}
+		if _, err := l.adoptTierManifestLocked(objs); err != nil {
+			return err
+		}
+	}
+	// A log whose newest segment is offloaded has nowhere to append: every
+	// offloaded segment is sealed, and the active segment must be local and
+	// writable. This is the normal state after adopting a tier into an empty
+	// directory, so give it one starting where the tier ends.
+	if n := len(l.segments); n > 0 && l.segments[n-1].isOffloaded() {
+		next := l.segments[n-1].NextOffset()
+		segment, err := newSegment(l.Path, next, l.MaxSegmentBytes, true, "", l.Compression)
+		if err != nil {
+			return err
+		}
+		l.segments = append(l.segments, segment)
+	}
 	if len(l.segments) == 0 {
 		segment, err := newSegment(l.Path, 0, l.MaxSegmentBytes, true, "", l.Compression)
 		if err != nil {
@@ -549,7 +578,11 @@ func (l *commitLog) UnreferencedObjects() ([]string, error) {
 	// marker rewritten by a rewrite that has not yet swapped its backing names
 	// the new object while a reader is still on the old one, and reading the
 	// marker would call that reader's object garbage.
+	// The manifest is never garbage: it is what makes the tier readable, and no
+	// segment references it, so a sweep that judged only by segment references
+	// would hand the caller its own index to delete.
 	referenced := make(map[string]bool, len(keys))
+	referenced[manifestKey] = true
 	l.mu.RLock()
 	for _, s := range l.segments {
 		s.RLock()
@@ -1056,6 +1089,10 @@ func (l *commitLog) IsClosed() bool {
 // copy holding a torn frame, and the rebuilt log then cannot be read end to
 // end. Reproduced in roughly one run in eight.
 func (l *commitLog) Truncate(offset int64) error {
+	// Republish the tier after the segment set changes: dropping segments
+	// can remove offloaded ones, and a manifest naming an object that is
+	// gone sends a reader at something that will not open.
+	defer func() { _ = l.writeTierManifest() }()
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.appendMu.Lock()
@@ -1178,6 +1215,14 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 		}
 		n++
 	}
+	if n > 0 {
+		// After the objects, never before: the manifest is the tier's commit
+		// point, so an object it does not name was never committed and is a
+		// recognisable orphan rather than an ambiguity.
+		if err := l.writeTierManifest(); err != nil {
+			return n, err
+		}
+	}
 	return n, nil
 }
 
@@ -1186,6 +1231,10 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 // segment (one that straddles minOffset) is rewritten keeping only records at
 // or after minOffset. The active segment is never rewritten.
 func (l *commitLog) TruncateBefore(minOffset int64) error {
+	// Republish the tier after the segment set changes: dropping segments
+	// can remove offloaded ones, and a manifest naming an object that is
+	// gone sends a reader at something that will not open.
+	defer func() { _ = l.writeTierManifest() }()
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.mu.Lock()
@@ -1564,6 +1613,20 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, []string, error) {
 		err = l.leaderEpochCache.ClearEarliest(l.segments[0].BaseOffset)
 	}
 	l.mu.Unlock()
+
+	// Republish what the tier now holds. A pass can rewrite a segment onto new
+	// objects and retention can drop others, so the manifest is stale the
+	// moment either happens — and a stale manifest is worse than none, since it
+	// names objects a reader would then fail to open.
+	// Not when the pass skipped the tier: SkipTiered promises ZERO store
+	// writes, and a manifest Put is a store write like any other. Nothing in
+	// the tier changed, so the manifest is still accurate anyway.
+	if !spec.SkipTiered {
+		if manifestErr := l.writeTierManifest(); manifestErr != nil && err == nil && cleanErr == nil {
+			err = manifestErr
+		}
+	}
+
 	// A partial retention failure (cleanErr) still swapped in the surviving
 	// segments above; report it once the read path is consistent.
 	if cleanErr != nil {

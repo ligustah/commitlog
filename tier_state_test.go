@@ -75,6 +75,11 @@ func TestImportTierStateAdoptsObjectsWrittenByAnotherProcess(t *testing.T) {
 	want := readFrom(t, old)
 	require.NotEmpty(t, want)
 
+	// Without the manifest a log cannot discover the tier by itself — a store
+	// written before manifests existed — which is what leaves an explicit
+	// import to do. Automatic adoption is covered separately.
+	require.NoError(t, store.Delete(manifestKey))
+
 	// A second log over the same records and the same store, which never
 	// offloaded anything: the successor.
 	dir := tempDir(t)
@@ -114,7 +119,15 @@ func TestImportTierStateAdoptsObjectsWrittenByAnotherProcess(t *testing.T) {
 	// exactly the objects the first log put there.
 	keys, err := store.List()
 	require.NoError(t, err)
-	require.Len(t, keys, len(state), "adoption must not have written new objects")
+	// Counting only segment objects: whether a manifest is present is not what
+	// this is about.
+	objects := 0
+	for _, k := range keys {
+		if k != manifestKey {
+			objects++
+		}
+	}
+	require.Equal(t, len(state), objects, "adoption must not have written new objects")
 }
 
 // Having adopted them, the successor can also reclaim them — which is the other
@@ -124,6 +137,8 @@ func TestImportedObjectsBecomeReclaimable(t *testing.T) {
 	old, store, last := tieredLog(t)
 	state, err := old.ExportTierState()
 	require.NoError(t, err)
+
+	require.NoError(t, store.Delete(manifestKey))
 
 	dir := tempDir(t)
 	successor, cleanup := setupWithOptions(t, Options{
@@ -176,6 +191,11 @@ func TestImportTierStateRefusesAnObjectCoveringOtherRecords(t *testing.T) {
 	state, err := old.ExportTierState()
 	require.NoError(t, err)
 	require.NotEmpty(t, state)
+
+	// Without the manifest the successor cannot discover the tier on its own —
+	// a store written before manifests existed — so it opens holding these
+	// records LOCALLY, which is the case this guard is about.
+	require.NoError(t, store.Delete(manifestKey))
 
 	dir := tempDir(t)
 	successor, cleanup := setupWithOptions(t, Options{

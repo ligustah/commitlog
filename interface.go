@@ -194,6 +194,24 @@ type CommitLog interface {
 	// to tell the cases apart.
 	DeleteStoreObjects(keys []string) ([]string, error)
 
+	// TierManifest returns what the STORE says its tier holds, read from the
+	// store itself rather than from this log's local bookkeeping.
+	//
+	// The tier describes itself: a manifest object, written after the segment
+	// objects it names, records which object holds which segment and the offset
+	// and time ranges each covers. So "what is in this tier" is answerable by
+	// anyone holding the store, and a log opening over a store it has no local
+	// markers for picks the offloaded segments up automatically.
+	//
+	// Being written last also makes it the tier's commit point: an object no
+	// manifest names was never committed — a crash between an upload and its
+	// manifest — so it is a recognisable orphan rather than something a reader
+	// has to guess about.
+	//
+	// Returns nil for a log with no store, and for a store with nothing
+	// offloaded or one written before manifests existed.
+	TierManifest() ([]TierObject, error)
+
 	// ExportTierState returns this log's tier bookkeeping — which store object
 	// currently holds each offloaded segment, and everything needed to place
 	// that segment without reading it.

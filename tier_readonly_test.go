@@ -104,25 +104,45 @@ func TestReadOnlyTierStillReadsThroughTheStore(t *testing.T) {
 		DisableAutoClean: true,
 	})
 	defer cleanup()
-	for i := 0; i < 24; i++ {
-		_, err := follower.Append([]*Message{{Key: []byte("k"), Value: []byte("padding value")}})
-		require.NoError(t, err)
-	}
+	// It appends nothing: everything it serves comes from the tier it adopted
+	// at open. That IS the property under test — a process with no local data
+	// and no right to write still reads the log.
 	follower.SetHighWatermark(last)
 
-	// Importing is a local operation — it writes markers and drops local bytes,
-	// but touches no object — so a process that owns nothing can still be told
-	// what the store holds.
+	// It already knows what the store holds — the manifest told it at open,
+	// without any grant to write. Importing the same state is therefore
+	// accepted and changes nothing, which is the property that matters: a
+	// process that owns nothing can still learn the tier.
 	applied, err := follower.ImportTierState(state)
 	require.NoError(t, err, "a read-only tier must still be able to learn what is there")
-	require.Equal(t, len(state), applied)
+	require.Zero(t, applied, "and needs no import, having read the manifest")
 
-	require.Equal(t, want, readFrom(t, follower),
+	known, err := follower.ExportTierState()
+	require.NoError(t, err)
+	require.Equal(t, state, known)
+
+	// It serves what the TIER holds, which is the offloaded segments — the
+	// origin's active segment was never offloaded, so the follower is a proper
+	// prefix rather than a copy.
+	got := readFrom(t, follower)
+	require.NotEmpty(t, got,
 		"a process that does not own the tier still reads through it")
+	require.Less(t, len(got), len(want), "the active segment is not in the tier")
+	for off, val := range got {
+		require.Equal(t, want[off], val, "offset %d", off)
+	}
 
 	keys, err := store.List()
 	require.NoError(t, err)
-	require.Len(t, keys, len(state), "and wrote nothing doing so")
+	// Counting only segment objects; the manifest is the tier describing
+	// itself, not something the follower added.
+	objects := 0
+	for _, k := range keys {
+		if k != manifestKey {
+			objects++
+		}
+	}
+	require.Equal(t, len(state), objects, "and wrote nothing doing so")
 }
 
 // The handover: ownership moves by the previous owner going read-only before

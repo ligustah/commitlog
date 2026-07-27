@@ -62,6 +62,11 @@ func fzStoreBaseOffsets(t *testing.T, store *fzFaultStore) map[int64]bool {
 	require.NoError(t, err)
 	out := map[int64]bool{}
 	for _, k := range keys {
+		// The store holds the tier manifest alongside the segment objects; it
+		// describes them rather than being one.
+		if k == manifestKey {
+			continue
+		}
 		stem := k
 		if i := strings.IndexByte(stem, '.'); i >= 0 {
 			stem = stem[:i]

@@ -78,8 +78,15 @@ func TestOffload_ReadThroughAndRecovery(t *testing.T) {
 
 	// Store now holds objects; some local .log files are gone.
 	keys, err := store.List()
-	if err != nil || len(keys) != count {
-		t.Fatalf("store keys=%v (len %d) want %d", keys, len(keys), count)
+	objects := 0
+	for _, k := range keys {
+		if k != manifestKey {
+			objects++
+		}
+	}
+	if err != nil || objects != count {
+		// The manifest is the tier describing itself, not a segment.
+		t.Fatalf("store keys=%v (%d objects) want %d", keys, objects, count)
 	}
 	logFiles, _ := filepath.Glob(filepath.Join(dir, "log", "*.log"))
 	t.Logf("local .log files remaining: %d, offloaded: %d", len(logFiles), count)
