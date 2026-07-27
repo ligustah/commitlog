@@ -48,26 +48,6 @@ jobs:
       - name: Test
         run: go test -count=1 -timeout=30m ./...
 
-  # go.mod declares `go 1.22`; downstream modules are entitled to build on it.
-  # The matrix above runs current Go, so this job is what keeps the declared
-  # floor honest — it fails the moment something reaches for a newer stdlib.
-  minver:
-    name: min go (go.mod)
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Build
-        run: go build ./...
-      - name: Vet
-        run: go vet ./...
-      - name: Test
-        run: go test -count=1 -timeout=30m ./...
-
   # The race detector on Linux, where cgo + gcc are always available. Covers the
   # concurrent paths: the gommap map/unmap mutex, the process-wide RemoteIndexCache
   # LRU, and offload read-through under contention (offload_concurrency_test.go).

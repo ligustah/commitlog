@@ -5,6 +5,33 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Breaking**: the module's `go` directive moves from **1.22 to 1.26**, and
+  `klauspost/compress` from v1.18.0 to **v1.19.1**. These are one decision: every
+  compress release after v1.18.0 raises its own minimum, so the floor and the
+  compression dependency move together.
+
+  **This is a crash fix, not drift.** compress v1.18.6 fixes an `s2.Decode`
+  SIGSEGV on amd64 when the goroutine is async-preempted
+  ([klauspost/compress#1097](https://github.com/klauspost/compress/issues/1097)),
+  and `compress/codec.go` calls `s2.Decode` on every S2-compressed read — the
+  bug sits directly in the read path. Nothing below `go 1.24` carries that fix:
+  the v1.18.x patch line raises its directive at v1.18.2 and again at v1.18.5,
+  so there is no "take the fix, keep the floor" option. On the way it also picks
+  up CVE-2025-61728 and the retraction of v1.18.1's invalid flate encoding.
+
+  **The floor now tracks the Go version this library is developed on**, rather
+  than the minimum a dependency happens to force or the lowest known consumer.
+  That settles the next dependency to raise its own minimum too. Consumers bump
+  their directive when they next update; of the known ones, `sqlcdc` is already
+  past this and `durable_streams` needs a matching bump.
+
+- **Removed**: the `minver` CI job. It built with `go-version-file: go.mod` to
+  keep the declared floor honest while that floor sat well below current Go.
+  With the floor tracking the toolchain in use it installs the same Go as the
+  existing `stable` matrix and no longer tests anything the matrix does not.
+
 ## v0.22.4 — 2026-07-27
 
 - **Docs (contract)**: `TruncateBefore` promised `OldestOffset() >= minOffset`
