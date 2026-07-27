@@ -79,7 +79,7 @@ func TestCompactionRewritesOffloadedSegments(t *testing.T) {
 		if s.store != nil {
 			if before, ok := generationsBefore[s.BaseOffset]; ok && s.storeGen > before {
 				advanced++
-				require.Equal(t, segmentStoreKey(s.BaseOffset, s.storeGen), s.storeKey)
+				require.Equal(t, segmentStoreKey(s.BaseOffset, s.storeGen, ""), s.storeKey)
 			}
 		}
 		s.RUnlock()

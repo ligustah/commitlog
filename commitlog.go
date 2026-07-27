@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,6 +92,11 @@ type commitLog struct {
 	// already covered return without an fsync of their own, which is the whole
 	// point: N commits cost one fsync rather than N. Guarded by syncMu, which is
 	// held only around the bookkeeping, never across the fsync itself.
+	// tierWriterID is Options.TierWriter, replaceable at runtime by
+	// SetTierWriter when tier-write ownership moves. Guarded by its own mutex
+	// because a pass reads it while the owner may be updating it.
+	tierWriterMu sync.RWMutex
+	tierWriterID string
 	syncMu       sync.Mutex
 	syncDurable  int64
 	syncFlushing bool
@@ -126,13 +132,13 @@ type commitLog struct {
 
 // Options contains settings for configuring a commitLog.
 type Options struct {
-	Name                 string        // commitLog name
-	Path                 string        // Path to log directory
-	MaxSegmentBytes      int64         // Max bytes a Segment can contain before creating a new one
-	MaxSegmentAge        time.Duration // Max time before a new log segment is rolled out.
-	MaxLogBytes          int64         // Retention by bytes
-	MaxLogMessages       int64         // Retention by messages
-	MaxLogAge            time.Duration // Retention by age
+	Name            string        // commitLog name
+	Path            string        // Path to log directory
+	MaxSegmentBytes int64         // Max bytes a Segment can contain before creating a new one
+	MaxSegmentAge   time.Duration // Max time before a new log segment is rolled out.
+	MaxLogBytes     int64         // Retention by bytes
+	MaxLogMessages  int64         // Retention by messages
+	MaxLogAge       time.Duration // Retention by age
 	// MaxTier* bound the segments whose bytes have been offloaded to the
 	// SegmentStore, separately from the ones still on local disk. Retention is
 	// PER TIER: a segment over the local budget that also exists in a store has
@@ -145,11 +151,11 @@ type Options struct {
 	//
 	// Zero keeps everything in the tier, which is what makes this compatible: a
 	// log with no SegmentStore has no offloaded segments, so these never apply.
-	MaxTierBytes    int64
-	MaxTierMessages int64
-	MaxTierAge      time.Duration
-	Compact              bool          // Run compaction on log clean
-	CompactMaxGoroutines int           // Max number of goroutines to use in a log compaction
+	MaxTierBytes         int64
+	MaxTierMessages      int64
+	MaxTierAge           time.Duration
+	Compact              bool // Run compaction on log clean
+	CompactMaxGoroutines int  // Max number of goroutines to use in a log compaction
 	// CompactMinAge is a protected compaction horizon: a segment is not eligible
 	// for compaction until its most recent write is at least this old, so recent
 	// segments are kept intact (preserving their full per-record history). Zero
@@ -161,6 +167,24 @@ type Options struct {
 	// NON-transactional compacted logs (transactional layers pass their own
 	// CleanSpec instead, with transaction-aware bounds). Zero disables.
 	CompactTombstoneRetention time.Duration
+	// TierWriter is the identity stamped into this log's store object keys — a
+	// leader epoch or node id, supplied by whatever layer decides who owns tier
+	// writes. Change it with SetTierWriter when ownership moves.
+	//
+	// It exists because two processes that both believe they own writes compute
+	// the SAME key: the generation comes from each writer's own local marker, so
+	// both read N and both write N+1. Consensus does not prevent it either — a
+	// node is leader-at-decide-time, not leader-at-write-time. With the identity
+	// in the key a stale writer's objects land somewhere else, so they are
+	// orphans to reclaim rather than an overwrite nobody can detect.
+	//
+	// It also fences DELETES: an object whose key carries a different identity
+	// is refused, so a writer acting on a stale view cannot remove one the
+	// current owner is serving.
+	//
+	// Empty (the default) means a single writer, which is every log with no
+	// shared tier: keys keep their original form and nothing is fenced.
+	TierWriter string
 	// AdoptOptions records THESE options as the log's descriptor instead of
 	// checking against the one already on disk. It is the deliberate answer to
 	// the two cases New otherwise refuses: retuning an existing log's compaction
@@ -202,6 +226,12 @@ type Options struct {
 func New(opts Options) (CommitLog, error) {
 	if opts.Path == "" {
 		return nil, errors.New("path is empty")
+	}
+	if !validTierWriter(opts.TierWriter) {
+		return nil, errors.Errorf(
+			"commitlog: invalid TierWriter %q: use letters, digits, '-' or '_' "+
+				"(max %d); a '.' or '/' does not survive the object key",
+			opts.TierWriter, maxTierWriterLen)
 	}
 
 	if opts.MaxSegmentBytes == 0 {
@@ -251,7 +281,8 @@ func New(opts Options) (CommitLog, error) {
 		leaderEpochCache: epochCache,
 		// -1, not 0: offset 0 is a real record, so a zero value would report the
 		// log's very first append as already durable and skip its flush.
-		syncDurable: -1,
+		syncDurable:  -1,
+		tierWriterID: opts.TierWriter,
 	}
 
 	if err := l.init(); err != nil {
@@ -477,6 +508,96 @@ func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int
 		offsets[i] = entry.Offset
 	}
 	return offsets, nil
+}
+
+// tierWriter returns the identity to stamp into store object keys, and to fence
+// deletes against.
+func (l *commitLog) tierWriter() string {
+	l.tierWriterMu.RLock()
+	defer l.tierWriterMu.RUnlock()
+	return l.tierWriterID
+}
+
+// SetTierWriter updates the identity stamped into this log's store objects. See
+// the interface doc.
+func (l *commitLog) SetTierWriter(id string) error {
+	if !validTierWriter(id) {
+		return errors.Errorf(
+			"commitlog: invalid tier writer %q: use letters, digits, '-' or '_' "+
+				"(max %d); a '.' or '/' does not survive the object key",
+			id, maxTierWriterLen)
+	}
+	l.tierWriterMu.Lock()
+	l.tierWriterID = id
+	l.tierWriterMu.Unlock()
+	return nil
+}
+
+// DeleteStoreObjects removes store objects the current tier writer owns. See
+// the interface doc.
+func (l *commitLog) DeleteStoreObjects(keys []string) ([]string, error) {
+	if l.SegmentStore == nil || len(keys) == 0 {
+		return nil, nil
+	}
+	writer := l.tierWriter()
+	deleted := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if w := storeKeyWriter(key); w != "" && w != writer {
+			// Reported rather than skipped: a caller handing over a key it does
+			// not own has lost a race it does not know it lost, and silently
+			// leaving the object behind would look identical to success while
+			// the storage bill grows.
+			return deleted, errors.Errorf(
+				"commitlog: refusing to delete %s: written by %q, current writer is %q",
+				key, w, writer)
+		}
+		if err := l.SegmentStore.Delete(key); err != nil {
+			return deleted, errors.Wrapf(err, "delete %s", key)
+		}
+		deleted = append(deleted, key)
+	}
+	return deleted, nil
+}
+
+// UnreferencedObjects lists store objects no marker of this log names. See the
+// interface doc — in particular, that "unreferenced" is judged only from THIS
+// log's markers.
+func (l *commitLog) UnreferencedObjects() ([]string, error) {
+	if l.SegmentStore == nil {
+		return nil, nil
+	}
+	keys, err := l.SegmentStore.List()
+	if err != nil {
+		return nil, errors.Wrap(err, "list store")
+	}
+
+	// The live set is taken from the SEGMENTS rather than by re-reading the
+	// markers off disk, because a segment holds the key it actually opened. A
+	// marker rewritten by a rewrite that has not yet swapped its backing names
+	// the new object while a reader is still on the old one, and reading the
+	// marker would call that reader's object garbage.
+	referenced := make(map[string]bool, len(keys))
+	l.mu.RLock()
+	for _, s := range l.segments {
+		s.RLock()
+		if s.storeKey != "" {
+			referenced[s.storeKey] = true
+		}
+		if s.indexKey != "" {
+			referenced[s.indexKey] = true
+		}
+		s.RUnlock()
+	}
+	l.mu.RUnlock()
+
+	var orphans []string
+	for _, key := range keys {
+		if !referenced[key] {
+			orphans = append(orphans, key)
+		}
+	}
+	sort.Strings(orphans)
+	return orphans, nil
 }
 
 // ReadMessageSet returns the log's own framing verbatim, starting at offset.
@@ -1072,8 +1193,9 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 		// A first offload writes generation 0, which keeps the original
 		// un-suffixed key. Only a rewrite allocates a higher generation.
 		const gen = 0
-		if err := s.offloadTo(l.SegmentStore, segmentStoreKey(s.BaseOffset, gen),
-			gen, l.RemoteIndexCache); err != nil {
+		w := l.tierWriter()
+		if err := s.offloadTo(l.SegmentStore, segmentStoreKey(s.BaseOffset, gen, w),
+			gen, w, l.RemoteIndexCache); err != nil {
 			return n, err
 		}
 		n++
@@ -1403,6 +1525,10 @@ type CleanSpec struct {
 	// rewritten. Those removals wait for a pass that does own the tier. Skipping
 	// is otherwise free: local compaction proceeds exactly as usual.
 	SkipTiered bool
+	// TierWriter is the identity stamped into any store objects this pass
+	// writes. Set from the log's current value by CleanWithSpec; a caller
+	// setting it directly overrides that for the pass.
+	TierWriter string
 }
 
 // Clean applies retention and compaction rules against the log, if applicable.
@@ -1426,6 +1552,16 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, []string, error) {
 	l.mu.RLock()
 	oldSegments := l.segments
 	l.mu.RUnlock()
+	if spec.TierWriter == "" {
+		spec.TierWriter = l.tierWriter()
+	} else if !validTierWriter(spec.TierWriter) {
+		// Checked here too: a spec-level override skips both New and
+		// SetTierWriter, and an unusable stamp is worth refusing before it is
+		// written into a key rather than after.
+		return 0, nil, errors.Errorf(
+			"commitlog: invalid CleanSpec.TierWriter %q: use letters, digits, "+
+				"'-' or '_' (max %d)", spec.TierWriter, maxTierWriterLen)
+	}
 	// Drained per pass, under cleanMu, so the keys returned belong to this call.
 	l.compactCleaner.superseded = nil
 	cleaned, epochCache, verified, cleanErr := l.clean(spec, oldSegments)
@@ -1490,7 +1626,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 	// next generation of its store objects instead (see ReplaceOffloaded), and
 	// retention is per tier, so their bytes count toward the tier's budget
 	// rather than escaping every limit.
-	cleaned, err := l.deleteCleaner.Clean(segments, spec.SkipTiered)
+	cleaned, err := l.deleteCleaner.Clean(segments, spec.SkipTiered, spec.TierWriter)
 	if err != nil {
 		// A partial retention failure still hands back the surviving
 		// segments; propagate them so the caller swaps them in — the deleted

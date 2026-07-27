@@ -120,6 +120,68 @@ type CommitLog interface {
 	// work transparently; a restart reopens them from the store.
 	OffloadBefore(minOffset int64) (int, error)
 
+	// SetTierWriter updates the identity stamped into the object keys this log
+	// writes to its SegmentStore, and fenced against when it deletes them. Call
+	// it when ownership of tier writes moves — a new leader epoch, a new node.
+	//
+	// It exists because consensus cannot fence a write to an external store. A
+	// node is leader at the moment it DECIDES, not at the moment its PUT lands;
+	// its view of leadership lags, its in-flight requests cannot be observed or
+	// cancelled, and no amount of waiting makes the claim it needs ("I will
+	// still be the owner when this lands") a statement about the past. Stamping
+	// the identity into the key sidesteps that entirely: two owners cannot
+	// address the same object, so a stale one produces garbage to reclaim
+	// rather than a silent overwrite of live data. The generation alone does
+	// NOT achieve this — it is read from each writer's own local marker, so two
+	// writers both compute the same next generation.
+	//
+	// The id must be letters, digits, '-' or '_' (max 64). A '.' or '/' does
+	// not survive the key format and is refused rather than silently mangled.
+	// Empty means unstamped, which is the right setting for the single-writer
+	// case: keys keep their original form and no delete is fenced.
+	//
+	// Changing the id does NOT abandon existing objects: reads resolve keys
+	// from the offload marker verbatim, never by recomputing them, so objects
+	// written under a previous identity stay readable. They do, however, become
+	// undeletable through the fence — see UnreferencedObjects for reclaiming
+	// them.
+	SetTierWriter(id string) error
+
+	// DeleteStoreObjects removes objects from the SegmentStore, refusing any
+	// key stamped by a writer other than this log's current one.
+	//
+	// This is the fenced counterpart to the keys CleanWithSpec hands back: a
+	// rewrite cannot delete the object it supersedes (a reader that opened the
+	// segment first is still reading it), so the caller deletes them once no
+	// such reader can remain. That deletion is the dangerous half of the tier
+	// protocol — a clobbered upload leaves the old bytes recoverable somewhere,
+	// a delete leaves nothing — so it goes through the same fence as every
+	// other removal rather than a raw store call.
+	//
+	// Deleting is idempotent: a key that is already gone is not an error.
+	// Unstamped keys are NOT fenced, since they predate any identity and no
+	// writer can be shown not to own them.
+	DeleteStoreObjects(keys []string) ([]string, error)
+
+	// UnreferencedObjects lists objects in the SegmentStore that none of this
+	// log's offload markers point at — the garbage the tier protocol
+	// deliberately produces. Every one of these is a leak by design:
+	//
+	//   - a rewrite that superseded an object whose key was never deleted,
+	//   - an upload that succeeded before a crash lost the marker naming it,
+	//   - an object written under a previous identity, which the delete fence
+	//     now refuses to remove.
+	//
+	// Fencing without this would trade a corruption bug for an unbounded
+	// storage bill, which is a better failure but still a failure.
+	//
+	// IMPORTANT: unreferenced means unreferenced BY THIS LOG. If several
+	// processes write to one store, another one's markers may name an object
+	// this log has never heard of, and deleting it would break that reader.
+	// Only the caller knows whether the tier is shared, so this reports rather
+	// than deletes; feed the result to DeleteStoreObjects when it is safe.
+	UnreferencedObjects() ([]string, error)
+
 	// NewestOffset returns the offset of the last message in the log or -1 if
 	// empty.
 	NewestOffset() int64

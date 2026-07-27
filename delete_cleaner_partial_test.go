@@ -35,14 +35,19 @@ func TestDeleteCleanerPartialFailure(t *testing.T) {
 	// Fail the SECOND deletion.
 	boom := errors.New("injected delete failure")
 	calls := 0
-	deleteSegment = func(s *segment) error {
+	// Restore the REAL function, captured here — not a hand-written stand-in
+	// that happens to look like it. A replacement calling s.Delete() directly
+	// skips the writer fence, so every test running afterwards would exercise
+	// an unfenced delete path and a fence regression would go unnoticed.
+	restore := deleteSegment
+	deleteSegment = func(s *segment, w string) error {
 		calls++
 		if calls == 2 {
 			return boom
 		}
-		return s.Delete()
+		return restore(s, w)
 	}
-	defer func() { deleteSegment = func(s *segment) error { return s.Delete() } }()
+	defer func() { deleteSegment = restore }()
 
 	err := l.Clean()
 	require.ErrorIs(t, err, boom)
@@ -67,7 +72,7 @@ func TestDeleteCleanerPartialFailure(t *testing.T) {
 	require.Equal(t, l.OldestOffset(), off)
 
 	// With the fault cleared, the next Clean completes the retention.
-	deleteSegment = func(s *segment) error { return s.Delete() }
+	deleteSegment = restore
 	require.NoError(t, l.Clean())
 	final := cl.Segments()
 	require.Len(t, final, 2, "retention should keep the last two segments")

@@ -65,7 +65,7 @@ func TestReplaceOffloadedWritesNewGenerationAndKeepsTheOld(t *testing.T) {
 	oldBacking := seg.backing
 
 	fresh := freshLocalSegment(t, l, seg)
-	superseded, err := seg.ReplaceOffloaded(fresh, nil)
+	superseded, err := seg.ReplaceOffloaded(fresh, "", nil)
 	require.NoError(t, err)
 
 	seg.RLock()
@@ -74,7 +74,7 @@ func TestReplaceOffloadedWritesNewGenerationAndKeepsTheOld(t *testing.T) {
 
 	require.Equal(t, 1, newGen, "the rewrite must allocate the next generation")
 	require.NotEqual(t, oldKey, newKey, "it must not land on the key being read")
-	require.Equal(t, segmentStoreKey(seg.BaseOffset, 1), newKey)
+	require.Equal(t, segmentStoreKey(seg.BaseOffset, 1, ""), newKey)
 	require.Equal(t, []string{oldKey}, superseded,
 		"the old object must be reported, not silently dropped")
 
@@ -96,13 +96,13 @@ func TestReplaceOffloadedMarkerNamesTheNewGeneration(t *testing.T) {
 	l, _, seg := offloadedFixture(t, nil)
 
 	fresh := freshLocalSegment(t, l, seg)
-	_, err := seg.ReplaceOffloaded(fresh, nil)
+	_, err := seg.ReplaceOffloaded(fresh, "", nil)
 	require.NoError(t, err)
 
 	meta, err := readOffloadMarker(seg.offloadMarkerPath())
 	require.NoError(t, err)
 	require.Equal(t, 1, meta.Generation)
-	require.Equal(t, segmentStoreKey(seg.BaseOffset, 1), meta.LogKey,
+	require.Equal(t, segmentStoreKey(seg.BaseOffset, 1, ""), meta.LogKey,
 		"the marker must resolve to the rewritten object")
 }
 
@@ -124,7 +124,7 @@ func TestReplaceOffloadedClearsTheReadAheadWindow(t *testing.T) {
 	require.True(t, warmed, "the window should be populated at this point")
 
 	fresh := freshLocalSegment(t, l, seg)
-	_, err = seg.ReplaceOffloaded(fresh, nil)
+	_, err = seg.ReplaceOffloaded(fresh, "", nil)
 	require.NoError(t, err)
 
 	// The segment now reads through a different backing entirely, over the new
@@ -141,7 +141,7 @@ func TestReplaceOffloadedClearsTheReadAheadWindow(t *testing.T) {
 func TestReplaceOffloadedRefusesALocalSegment(t *testing.T) {
 	dir := tempDir(t)
 	seg := createSegment(t, dir, 0, 1024)
-	_, err := seg.ReplaceOffloaded(seg, nil)
+	_, err := seg.ReplaceOffloaded(seg, "", nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not offloaded")
 }
