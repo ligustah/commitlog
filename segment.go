@@ -122,10 +122,6 @@ type segment struct {
 // rather than a local file. Caller holds at least the read lock.
 func (s *segment) isOffloaded() bool { return s.store != nil }
 
-// indexOffloaded reports whether the segment's index (not just its log) lives in
-// the store (tiered storage, option 2), so seeks fetch it via indexCache.
-func (s *segment) indexOffloaded() bool { return s.Index == nil && s.indexCache != nil }
-
 // indexCacheKey uniquely identifies this segment's index across every log in the
 // process (the shared cache is keyed by it), so two logs' like-named index
 // objects never collide.
@@ -1007,24 +1003,20 @@ func (s *segment) findBlock(logical int64) *blockRef {
 	return &s.blocks[i]
 }
 
-// blockCopyInto copies the block's decompressed bytes from srcOff into dst,
-// decoding at most once per block visit via the segment's single-entry
-// cache. The cache OWNS its buffers and recycles them on displacement —
-// callers only ever receive copies, made under the cache lock, so a
-// displaced buffer is never observed mid-overwrite. Before recycling, every
-// displacement abandoned a fresh decode buffer to the GC; run 31's anomaly
-// heap capture showed ~276MB of those pending collection during one clean
-// pass over a ~1200-segment stream.
-func (s *segment) blockCopyInto(dst []byte, b blockRef, srcOff int64) (int, error) {
-	return s.blockCopyIntoCache(s.cache, dst, b, srcOff)
-}
-
-// blockCopyIntoCache is blockCopyInto against a caller-chosen cache: readers
-// use the segment's own (repeated reads of a hot segment), one-shot scans use
-// a per-PASS cache shared across every segment the scan visits — routing
-// scans through the segment cache left every scanned segment retaining a
-// decode buffer pair for its lifetime, O(segments) heap per clean pass
-// (run 32's ~500MB-1GB transients and creeping baseline).
+// blockCopyIntoCache copies the block's decompressed bytes from srcOff into
+// dst, decoding at most once per block visit via a single-entry cache. The
+// cache OWNS its buffers and recycles them on displacement — callers only ever
+// receive copies, made under the cache lock, so a displaced buffer is never
+// observed mid-overwrite. Before recycling, every displacement abandoned a
+// fresh decode buffer to the GC; run 31's anomaly heap capture showed ~276MB of
+// those pending collection during one clean pass over a ~1200-segment stream.
+//
+// The cache is the CALLER's choice: readers pass the segment's own (repeated
+// reads of a hot segment), one-shot scans pass a per-PASS cache shared across
+// every segment the scan visits — routing scans through the segment cache left
+// every scanned segment retaining a decode buffer pair for its lifetime,
+// O(segments) heap per clean pass (run 32's ~500MB-1GB transients and creeping
+// baseline).
 func (s *segment) blockCopyIntoCache(c *blockCache, dst []byte, b blockRef, srcOff int64) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1075,14 +1067,6 @@ func (s *segment) decodeBlock(b blockRef, rawBuf, dataBuf []byte) (raw, data []b
 		data = dataBuf
 	}
 	return raw, data, nil
-}
-
-// blockData returns a freshly allocated copy of the block's decompressed
-// bytes, bypassing the cache. For rare non-hot paths (open-time last-frame
-// recovery) where holding a slice across other reads is convenient.
-func (s *segment) blockData(b blockRef) ([]byte, error) {
-	_, data, err := s.decodeBlock(b, nil, nil)
-	return data, err
 }
 
 func (s *segment) notifyWaiters() {

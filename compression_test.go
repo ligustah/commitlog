@@ -436,7 +436,7 @@ func TestCompressionTruncateBefore(t *testing.T) {
 }
 
 func TestBlockCache(t *testing.T) {
-	// The cache's buffers are private (blockCopyInto hands out copies made
+	// The cache's buffers are private (blockCopyIntoCache hands out copies made
 	// under its lock); only the displacement/reset bookkeeping is visible.
 	c := newBlockCache()
 	require.EqualValues(t, -1, c.start)

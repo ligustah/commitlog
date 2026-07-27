@@ -94,7 +94,7 @@ type blockCache struct {
 	data  []byte
 	// raw is the recycled compressed-payload read buffer. Both raw and
 	// data are OWNED by the cache and overwritten on displacement; callers
-	// receive copies made under mu (segment.blockCopyInto), never these
+	// receive copies made under mu (segment.blockCopyIntoCache), never these
 	// slices.
 	raw []byte
 }
