@@ -1,4 +1,4 @@
-﻿package commitlog
+package commitlog
 
 import (
 	"testing"
@@ -192,4 +192,3 @@ func TestFailedSyncStaysDirty(t *testing.T) {
 	require.NoError(t, seg.Sync())
 	require.Equal(t, 2, failing.syncs, "the retry must reach the backing")
 }
-

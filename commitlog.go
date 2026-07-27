@@ -1095,6 +1095,22 @@ func (l *commitLog) IsConcurrencyControlEnabled() bool {
 // the first message was written to it. It then performs the split if eligible,
 // returning any error resulting from the split. The returned bool indicates if
 // a split was performed.
+// checkAndPerformSplitLocked is checkAndPerformSplit for callers that do NOT
+// already hold appendMu — currently the cleaner loop, which rolls on its own
+// ticker with no append involved.
+//
+// A roll redefines where appends go, so it must not land between an append
+// reading the tail and writing to it: split picks the new segment's base offset
+// from the log's current end, which is exactly the offset the in-flight append
+// is about to write at, so both segments end up claiming it.
+func (l *commitLog) checkAndPerformSplitLocked() (bool, error) {
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
+	return l.checkAndPerformSplit()
+}
+
+// checkAndPerformSplit requires appendMu, since rolling a segment changes which
+// segment the caller's append lands in.
 func (l *commitLog) checkAndPerformSplit() (bool, error) {
 	// Do this in a loop because segment splitting may fail due to a competing
 	// thread performing the split at the same time. If this happens, we just
@@ -1151,7 +1167,7 @@ func (l *commitLog) cleanerLoop() {
 		}
 
 		// Check to see if the active segment should be split.
-		split, err := l.checkAndPerformSplit()
+		split, err := l.checkAndPerformSplitLocked()
 		if err != nil {
 			slog.Error(
 				"Failed to split log",

@@ -5,6 +5,27 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed**: a segment roll could run concurrently with an append and leak the
+  segment it built. The cleaner loop rolls on its own ticker, independently of
+  any append, and `split` builds the new segment before swapping it in — but
+  "refuse if the file already exists" and "create the file" are two steps, so
+  two rollers could both end up holding a segment over the SAME files. The one
+  that lost the compare-and-swap was discarded with a best-effort `Delete`,
+  which closes and unlinks files the winner is actively using.
+
+  On Windows that unlink fails, the error is swallowed, and the log is left with
+  a handle and mapping nothing will ever close, so its directory can never be
+  removed. On POSIX it is worse and quieter: unlinking an open file succeeds, so
+  the live active segment's files are removed out from under it with no error
+  anywhere.
+
+  Rolls now take the same lock appends do, which is the honest relationship
+  between them — a roll redefines where an append lands. Found by auditing for
+  more instances of the read-then-write shape behind the concurrent-`Append`
+  bug in v0.21.1, rather than from a report.
+
 ## v0.21.1 — 2026-07-26
 
 - **Fixed (data loss)**: concurrent `Append` calls on one log could be handed
