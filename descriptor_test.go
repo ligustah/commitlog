@@ -142,6 +142,13 @@ func TestAdoptOptionsResolvesBothRefusals(t *testing.T) {
 		require.NoError(t, l.Close())
 		require.NoError(t, os.Remove(filepath.Join(dir, descriptorFileName)))
 
+		// Establish that it IS refused first. Without this the subtest passes in
+		// a world where nothing is enforced at all — it would only be showing
+		// that AdoptOptions opens a log, which proves nothing about the refusal
+		// it is named for.
+		_, err = New(compactedOpts(dir))
+		require.ErrorIs(t, err, ErrDescriptorMismatch)
+
 		opts := compactedOpts(dir)
 		opts.AdoptOptions = true
 		l2, err := New(opts)
