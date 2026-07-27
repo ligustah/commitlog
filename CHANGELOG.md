@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.22.2 — 2026-07-27
 
 - **Fixed (hang)**: `Sync(offset)` never returned for an offset the log no
   longer reaches. It waits until the durable watermark covers the offset, and
