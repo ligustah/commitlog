@@ -161,9 +161,21 @@ decision to the layer that cannot make it safely.
 
 The invariant above is written from a single process's point of view: it says a
 *reader* must never splice pre- and post-compaction bytes. That is not
-sufficient once replicas share a tier. Two nodes rewriting the same base offset
-into one store is a different and harder problem, and not one this mechanism
-should be asked to solve — ownership has to be granted above.
+sufficient once replicas share a tier. Two nodes writing the same base offset
+into one store is a different problem, and not one this mechanism should be
+asked to solve — that exclusivity has to be granted above.
+
+**The constraint is on tier WRITES, not on compaction.** Replicas may compact
+their own local copies freely; nothing here requires a single compactor per
+stream. Local compaction makes replicas diverge in *content* while still
+agreeing on every offset, and that divergence is in-contract for a log of this
+shape rather than a defect to design out. What is not tolerable is two processes
+uploading to the same key.
+
+The distinction matters because the stronger rule — one compactor per stream —
+would couple compaction to whatever grants leases, and stall it whenever that
+mechanism is unavailable. The weaker one does not: a replica that cannot write
+to the tier can still compact locally and reclaim its own disk.
 
 **What makes it urgent is that the violation is silent.** `SegmentStore.Put`
 overwrites any existing object and there is no conditional or compare-and-swap
@@ -173,12 +185,19 @@ same reason a rewrite is invisible to offsets: both nodes still agree on every
 offset and disagree only about which records remain readable at them.
 
 **Generation-stamped keys can make it loud instead.** They are already the
-direction for the reader invariant, and if a rewrite writes a *new* key rather
-than overwriting the live one, two competing compactors produce two distinct
+direction for the reader invariant, and if an upload writes a *new* key rather
+than overwriting the live one, two competing uploaders produce two distinct
 objects instead of one corrupted object. The conflict becomes detectable, and
-the loser's object is discardable. That does not move ownership into commitlog —
-it stays policy — but it turns a silent corruption into something a caller can
-notice, which is worth having even when ownership is working correctly.
+the loser's object is discardable. That does not move exclusivity into
+commitlog — it stays policy — but it turns a silent lost write into something a
+caller can notice, which is worth having even when exclusivity is working
+correctly.
+
+This is the whole of what forces exclusivity, incidentally. It is a property of
+`Put`'s contract — unconditional overwrite, no compare-and-swap — not of
+compaction being non-deterministic. Non-determinism makes replicas' local
+content differ, which is tolerable; the unconditional overwrite makes concurrent
+uploads lose data, which is not.
 
 One refinement to the tombstone-divergence concern, since it affects how much
 the retention window must be widened: the GC horizon is a comparison of a
