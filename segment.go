@@ -114,6 +114,11 @@ type segment struct {
 	// and Index is the resident local index.
 	indexKey   string
 	indexCache *RemoteIndexCache
+	// storeGen is the generation of the objects this segment currently reads,
+	// taken from its marker. A rewrite uploads storeGen+1 and rewrites the
+	// marker; the backing opened here keeps its own key, so a reader in flight
+	// finishes against the generation it started on.
+	storeGen int
 
 	sync.RWMutex
 }
@@ -152,17 +157,37 @@ func (s *segment) offloadMarkerPath() string {
 	return filepath.Join(s.path, fmt.Sprintf(fileFormat, s.BaseOffset, offloadedSuffix))
 }
 
-// segmentStoreKey is the store object key for a segment at baseOffset: the
-// zero-padded base offset, matching the local log filename stem so keys are
-// unique within a per-log store and stable across restarts.
-func segmentStoreKey(baseOffset int64) string {
-	return fmt.Sprintf("%020d%s", baseOffset, logSuffix)
+// segmentStoreKey is the store object key for generation gen of the segment at
+// baseOffset: the zero-padded base offset, matching the local log filename stem
+// so keys are unique within a per-log store and stable across restarts.
+//
+// The GENERATION is what makes a rewrite safe. SegmentStore.Put overwrites
+// unconditionally and has no compare-and-swap form, so rewriting in place would
+// change an object out from under a reader already reading it — and, where two
+// processes share a tier, would lose one of their writes with no error to
+// either. A rewrite therefore writes the NEXT generation to a NEW key and
+// deletes the old one once nothing needs it, which turns both hazards into
+// something observable: a reader holds a key that cannot change, and two
+// uploaders racing produce two distinct objects rather than one corrupted one.
+//
+// Generation 0 keeps the original un-suffixed form, so objects written before
+// generations existed keep their keys. That costs nothing, because the offload
+// marker records the key VERBATIM and is the only thing that resolves it —
+// nothing recomputes a key for an existing object.
+func segmentStoreKey(baseOffset int64, gen int) string {
+	if gen == 0 {
+		return fmt.Sprintf("%020d%s", baseOffset, logSuffix)
+	}
+	return fmt.Sprintf("%020d.g%d%s", baseOffset, gen, logSuffix)
 }
 
 // segmentIndexStoreKey is the store object key for an offloaded segment's index
 // (option 2), mirroring the log key with the index suffix.
-func segmentIndexStoreKey(baseOffset int64) string {
-	return fmt.Sprintf("%020d%s", baseOffset, indexSuffix)
+func segmentIndexStoreKey(baseOffset int64, gen int) string {
+	if gen == 0 {
+		return fmt.Sprintf("%020d%s", baseOffset, indexSuffix)
+	}
+	return fmt.Sprintf("%020d.g%d%s", baseOffset, gen, indexSuffix)
 }
 
 // offloadMeta is the JSON content of a v2 .offloaded marker. It carries enough to
@@ -180,6 +205,12 @@ type offloadMeta struct {
 	Position       int64  `json:"position"`
 	PhysPosition   int64  `json:"phys_position"`
 	BlockMode      bool   `json:"block_mode"`
+	// Generation of the objects this marker points at. Absent (0) in markers
+	// written before generations existed, which is exactly right: those objects
+	// carry generation-0 keys. A rewrite writes the next generation to new keys
+	// and rewrites this marker, so the marker is the single place a generation
+	// is resolved and no reader ever has to guess one.
+	Generation int `json:"generation,omitempty"`
 }
 
 // readOffloadMarker reads a .offloaded marker. A v2 marker is JSON; a v1 marker
@@ -216,7 +247,11 @@ func readOffloadMarker(path string) (offloadMeta, error) {
 // index. The marker is the commit point: it is written after both objects are
 // uploaded and before the local files are removed, so a crash mid-offload leaves
 // a recoverable state (objects present + marker => open through the store).
-func (s *segment) offloadTo(store SegmentStore, key string, cache *RemoteIndexCache) error {
+// gen is the generation the caller allocated for these objects; key must be
+// segmentStoreKey(s.BaseOffset, gen). Both are passed rather than derived here
+// so the caller — which knows whether this is a first offload or a rewrite
+// replacing an existing generation — decides which objects are being written.
+func (s *segment) offloadTo(store SegmentStore, key string, gen int, cache *RemoteIndexCache) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
@@ -240,7 +275,7 @@ func (s *segment) offloadTo(store SegmentStore, key string, cache *RemoteIndexCa
 	// presence implies both objects exist.
 	var indexKey string
 	if cache != nil {
-		indexKey = segmentIndexStoreKey(s.BaseOffset)
+		indexKey = segmentIndexStoreKey(s.BaseOffset, gen)
 		r, isize, err := s.Index.offloadReader()
 		if err != nil {
 			return errors.Wrap(err, "read index for offload")
@@ -276,6 +311,7 @@ func (s *segment) offloadTo(store SegmentStore, key string, cache *RemoteIndexCa
 		Position:       s.position,
 		PhysPosition:   size,
 		BlockMode:      s.blockMode,
+		Generation:     gen,
 	}
 	markerBytes, err := json.Marshal(meta)
 	if err != nil {
@@ -355,6 +391,10 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		sealed:      true,
 		store:       store,
 		storeKey:    meta.LogKey,
+		// The marker resolves the generation; nothing recomputes it from the
+		// base offset. A marker written before generations existed reports 0,
+		// which is the generation its un-suffixed keys already encode.
+		storeGen: meta.Generation,
 	}
 
 	if meta.IndexKey == "" {

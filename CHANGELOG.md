@@ -5,6 +5,29 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.24.0 — 2026-07-27
+
+- **Added**: offloaded store objects carry a **generation** in their key
+  (`<base>.g<N>.log`), recorded in the `.offloaded` marker. First of the changes
+  that let a tiered segment be rewritten; see `docs/tiered-compaction.md`.
+
+  `SegmentStore.Put` overwrites unconditionally and has no compare-and-swap
+  form, so rewriting an object in place would change it under a reader already
+  reading it — and, where two processes share a tier, would lose one of their
+  writes with no error to either. A rewrite therefore writes the NEXT generation
+  to a NEW key, which makes both hazards observable rather than silent: a reader
+  holds a key that cannot change, and two uploaders racing produce two distinct
+  objects instead of one corrupted one.
+
+  **Nothing bumps a generation yet** — this release only establishes the keying
+  and threads it through offload, the marker and reopen.
+
+  Compatible with objects already in a store: generation 0 keeps the original
+  un-suffixed key, and the marker — which records the key verbatim and is the
+  only thing that resolves it — reports 0 when the field is absent. Both the
+  JSON and the older raw-key marker forms are covered by tests, and a marker
+  written now omits the field at generation 0, so it stays byte-compatible.
+
 ## v0.23.0 — 2026-07-27
 
 - **Breaking**: the module's `go` directive moves from **1.22 to 1.26**, and
