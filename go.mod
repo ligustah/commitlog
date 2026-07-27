@@ -3,12 +3,12 @@ module github.com/ligustah/commitlog
 go 1.22
 
 require (
-	github.com/dustin/go-humanize v1.0.0
+	github.com/dustin/go-humanize v1.0.1
 	github.com/golang/snappy v1.0.0
 	github.com/klauspost/compress v1.18.0
 	github.com/natefinch/atomic v1.0.1
 	github.com/pkg/errors v0.9.1
-	github.com/stretchr/testify v1.7.1
+	github.com/stretchr/testify v1.11.1
 	github.com/tysonmote/gommap v0.0.2-0.20220314171410-078b7adc9d18
 )
 
