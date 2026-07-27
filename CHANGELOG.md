@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.22.1 — 2026-07-27
 
 - **Fixed (performance)**: `Sync`'s coalescing barely coalesced. It flushed the
   instant it took leadership, so a committer arriving a microsecond later was
