@@ -5,6 +5,79 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.32.0 — 2026-07-27
+
+- **Added**: `TierWriter` / `SetTierWriter` — an identity stamped into the
+  object keys a log writes to its `SegmentStore`, for logs whose tier may be
+  written by more than one process.
+
+  It exists because **consensus cannot fence a write to an external store**. A
+  node is leader at the moment it *decides*, not at the moment its PUT lands;
+  its view of leadership lags, its in-flight requests can be neither observed
+  nor cancelled, and the claim it would need — "I will still own writes when
+  this lands" — is about the future, so no amount of waiting for finality
+  establishes it. The generation does not close the window either: it is read
+  from each writer's own local marker, so two writers that both believe they
+  own the tier compute the same next generation and address the identical key.
+  `SegmentStore.Put` has no compare-and-swap form, so that overwrite is silent
+  and the loser may be the one holding current data.
+
+  With the identity in the key, two owners cannot address the same object. A
+  stale writer produces garbage to reclaim instead of corruption nobody can
+  detect.
+
+  Ids are restricted to letters, digits, `-` and `_` (max 64) and refused
+  where they are supplied. This is a real constraint — a dotted hostname is
+  **not** a valid id — but a `.` does not survive the key format, and a stamp
+  that parses back short would fence a writer out of its *own* objects.
+
+  Reads are unaffected. Keys are resolved from the offload marker verbatim and
+  never recomputed, so objects written under a previous identity stay readable.
+  That is what allows the identity to change at all.
+
+- **Added**: `DeleteStoreObjects` and `UnreferencedObjects` — fenced reclamation
+  of tier garbage.
+
+  Fencing trades a corruption bug for a storage leak, which is better but still
+  a failure, so the leak is made visible and bounded. `UnreferencedObjects`
+  reports objects no live segment reads: rewrites whose superseded key was
+  never deleted, uploads orphaned by a crash before the marker, and objects
+  from a previous identity. It **reports rather than deletes** — whether an
+  unreferenced object is safe to remove depends on whether the tier is shared,
+  which only the caller knows.
+
+- **Added**: `AdoptTierWriters` — declares identities whose objects this log may
+  also reclaim, for objects the fence would otherwise strand for good. It is
+  deliberately an assertion the caller makes: the claim is "that identity can no
+  longer write", and nothing observable at this layer establishes it.
+
+- **Fixed**: the writer fence is no longer applied to segments the log **holds**.
+  Applying it there looked like the same defence but was a different one, and it
+  was wrong in a way that only appears after a failover — when every object
+  already in the tier carries the *previous* identity's stamp. It refused the
+  superseded keys `CleanWithSpec` had just handed the caller, on every rewrite
+  from then on, and it refused retention's removal of any segment offloaded
+  before the change, so the oldest tier segment could never be dropped again and
+  the tier grew without bound. Both were reproduced before being changed.
+
+  What entitles a process to remove an object is not the stamp but its own
+  marker naming it, which is the stronger claim. It costs nothing even where
+  processes share a store: two of them holding markers for the *same* object
+  could not safely delete it whatever stamp it carried, so the fence would not
+  have saved that topology either. The fence now applies where it is meaningful
+  — keys a caller learned from a store listing, where nothing establishes the
+  object is theirs.
+
+- **Added**: `tla/MultiWriter.tla` — TLA+ model of the whole protocol under
+  contested ownership, including the rotating identity that produced the bug
+  above. Three deliberately broken configs, one per defence: an unstamped key
+  violates `NoClobber`, an unfenced delete violates `MarkerIntegrity`, and a
+  fence with no lineage rule violates `EveryOrphanReclaimable`.
+
+  The unfenced-delete counterexample is worth reading: the object is removed by
+  the *legitimate new owner*, not by a stale writer. Markers are local, so
+  "garbage by my own view" is not the same claim as "garbage".
+
 ## v0.31.0 — 2026-07-27
 
 - **Added**: `CleanSpec.SkipTiered` — a pass that leaves segments in a
