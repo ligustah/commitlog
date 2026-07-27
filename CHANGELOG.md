@@ -5,6 +5,34 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.29.0 — 2026-07-27
+
+- **Added**: `CommitLog.ReadMessageSet(offset, maxBytes)` — the read counterpart
+  to `AppendMessageSet`, returning the log's own framing verbatim so a follower
+  replicates bytes instead of reconstructing it. `AppendMessageSet` was
+  documented for replication, but nothing exported returned raw message-set
+  bytes: `messageSet` and `msgSetHeaderLen` are internal, so a follower had to
+  hand-roll the framing and would break silently when it changed.
+
+  Contract details, each of which is a way this could have been useless:
+
+  - **Whole frames only.** A `maxBytes` smaller than the first frame returns
+    that frame rather than a truncation — a partial message set is not something
+    a follower can append, so starving it is worse than overshooting the budget
+    once.
+  - **Records above the high watermark are included.** Replication is how the
+    watermark advances, so withholding them would deadlock it. A follower that
+    cares about the commit boundary applies its own.
+  - **An offset below the oldest surviving record clamps up to it**, as the
+    readers do, so a follower resuming from a position retention has passed
+    carries on rather than failing. `ErrSegmentNotFound` only when the log holds
+    no segment at or after the offset.
+  - A single call does not cross a segment boundary; the caller continues from
+    the last offset it appended.
+
+  Tested by round-tripping a log into a second one through `AppendMessageSet`,
+  in bounded chunks, and comparing the result.
+
 ## v0.28.0 — 2026-07-27
 
 - **Breaking / Fixed**: offloaded segments are no longer exempt from compaction

@@ -170,6 +170,29 @@ type CommitLog interface {
 	// replicating from another log.
 	AppendMessageSet(ms []byte) ([]int64, error)
 
+	// ReadMessageSet returns the log's own framing VERBATIM, starting at
+	// offset — the read counterpart to AppendMessageSet, so a follower can
+	// replicate bytes without reconstructing the framing itself. The frames
+	// this returns are exactly what AppendMessageSet accepts.
+	//
+	// It returns WHOLE frames only, up to roughly maxBytes. A partial message
+	// set is not something a follower can append, so a maxBytes smaller than
+	// the first frame yields that frame rather than a truncation the caller
+	// cannot use: starving a follower is worse than overshooting its budget
+	// once.
+	//
+	// Records ABOVE the high watermark are included. Replication is how the
+	// watermark advances in the first place, so withholding them would deadlock
+	// it; a follower that cares about the commit boundary applies its own.
+	//
+	// A single call does not cross a segment boundary — it returns what the
+	// segment holding offset can give, and the caller continues from the last
+	// offset it appended. An offset below the oldest surviving record clamps up
+	// to it, as the readers do, so a follower resuming from a position
+	// retention has passed carries on from what remains rather than failing.
+	// ErrSegmentNotFound if the log holds no segment at or after offset.
+	ReadMessageSet(offset int64, maxBytes int) ([]byte, error)
+
 	// Clean applies retention and compaction rules against the log, if
 	// applicable.
 	Clean() error

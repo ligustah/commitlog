@@ -479,6 +479,57 @@ func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int
 	return offsets, nil
 }
 
+// ReadMessageSet returns the log's own framing verbatim, starting at offset.
+// See the interface doc for the contract.
+func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, errors.New("commitlog: maxBytes must be positive")
+	}
+	l.mu.RLock()
+	segments := make([]*segment, len(l.segments))
+	copy(segments, l.segments)
+	l.mu.RUnlock()
+
+	seg, contains := findSegmentContains(segments, offset)
+	if seg == nil {
+		return nil, ErrSegmentNotFound
+	}
+	// Below the oldest surviving record, clamp up to it rather than erroring:
+	// a follower resuming from a position retention has since passed should
+	// carry on from what is left, exactly as the readers do.
+	start := int64(0)
+	if contains {
+		e, err := seg.findEntry(offset)
+		if err != nil {
+			return nil, err
+		}
+		start = e.Position
+	}
+
+	// Whole frames only. A partial message set is not something a follower can
+	// append, so a maxBytes smaller than the first frame yields that frame
+	// rather than a truncation the caller cannot use — starving a follower is
+	// worse than overshooting its budget once.
+	var (
+		out = make([]byte, 0, maxBytes)
+		ss  = &segmentScanner{s: seg, pos: start, cache: newBlockCache()}
+	)
+	for {
+		ms, _, err := ss.Scan()
+		if err != nil {
+			break // end of this segment's readable bytes
+		}
+		if len(out) > 0 && len(out)+len(ms) > maxBytes {
+			break
+		}
+		out = append(out, ms...)
+		if len(out) >= maxBytes {
+			break
+		}
+	}
+	return out, nil
+}
+
 // NewestOffset returns the offset of the last message in the log or -1 if
 // empty.
 func (l *commitLog) NewestOffset() int64 {
