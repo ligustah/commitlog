@@ -5,6 +5,34 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Docs (contract)**: `TruncateBefore` promised `OldestOffset() >= minOffset`
+  after the call. That is false, and the same comment said why two sentences
+  later: the active segment is never rewritten, so a log whose records all still
+  live in one active segment frees nothing and its oldest offset does not move.
+  A caller gating retention on the floor being reached would wait forever — and
+  one downstream already wrote that assertion and had it fail.
+
+  The documented guarantee is now the directional one that actually holds:
+  nothing at or above `minOffset` is ever discarded, reclamation is
+  segment-granular and best-effort, and retention is unpoliced. Two tests pin
+  both halves.
+
+- **Docs (contract)**: `SyncAll` described itself as `Sync` plus a high-watermark
+  checkpoint. Since `Sync` became log-bytes-only it does strictly more than
+  that — it flushes indexes too — so a reader comparing the two was told the gap
+  was smaller than it is.
+
+- **Docs (contract)**: `Sync` suggested passing `NewestOffset()` as an
+  alternative to the offset `Append` returned. Those are not equivalent: the
+  tail advances with every append, so it is never covered by a flush already in
+  flight and every caller ends up leading its own, silently defeating the
+  coalescing the same comment advertises. It now says to pass the offset you
+  were given, and why.
+
+  All three found by a scheduled contract-drift pass.
+
 ## v0.22.3 — 2026-07-27
 
 - **Fixed (corruption)**: `Truncate` could rebuild the boundary segment from a

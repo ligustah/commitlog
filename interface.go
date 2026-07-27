@@ -49,9 +49,13 @@ type CommitLog interface {
 	Truncate(offset int64) error
 
 	// Sync makes the log durable through offset: once it returns, a reopened log
-	// recovers every record up to and including offset. Pass an offset returned
-	// by Append — typically the last of a commit — or NewestOffset to cover
-	// everything written so far.
+	// recovers every record up to and including offset.
+	//
+	// Pass an offset RETURNED BY APPEND — typically the last of a commit. Do not
+	// reach for NewestOffset out of habit: the tail advances with every append,
+	// so it is never covered by a flush already in flight and every caller ends
+	// up leading one of its own. Asking for what you actually need is what lets
+	// the coalescing below work; asking for the tail quietly defeats it.
 	//
 	// This is the durability primitive; use it to make a commit durable.
 	// CONCURRENT CALLERS SHARE ONE FSYNC: a caller whose offset a flush already
@@ -76,19 +80,35 @@ type CommitLog interface {
 	// covered: those records are gone, so there is nothing left to make durable.
 	Sync(offset int64) error
 
-	// SyncAll makes everything appended so far durable (as Sync) and ALSO
+	// SyncAll is the wider fence: it fsyncs every segment's log AND index, then
 	// checkpoints the high watermark. Used before externally-visible filesystem
 	// operations on the log's directory (e.g. an atomic stream promote via
 	// rename) whose observers must never see the log roll back past this point.
-	// For plain durability prefer Sync, which skips the checkpoint's extra fsync
-	// and file rewrite.
+	//
+	// It does strictly more than Sync, not merely Sync plus a checkpoint: Sync
+	// leaves indexes to seal and to recovery, and SyncAll does not. For plain
+	// durability prefer Sync, which skips both the index flushes and the
+	// checkpoint's extra fsync and file rewrite, and which coalesces.
 	SyncAll() error
 
-	// TruncateBefore removes all messages from the log with offset strictly less
-	// than minOffset, freeing the disk space they occupied. After this call,
-	// OldestOffset() >= minOffset. Sealed segments entirely before minOffset are
-	// deleted; a boundary sealed segment is rewritten to keep only records at or
-	// after minOffset. The active (most-recent) segment is never rewritten.
+	// TruncateBefore frees the disk space held by messages below minOffset.
+	// Sealed segments entirely before it are deleted, and a boundary SEALED
+	// segment is rewritten to keep only records at or after it.
+	//
+	// Reclamation is segment-granular and best-effort, NOT record-exact, because
+	// the active segment is never rewritten. A log whose records all still live
+	// in one active segment therefore frees nothing and leaves OldestOffset
+	// unchanged — that is success, not failure. Budget disk against segment size
+	// rather than against the floor, and do NOT gate anything on OldestOffset
+	// reaching minOffset; it may never get there.
+	//
+	// The guarantee is directional: nothing at or above minOffset is ever
+	// discarded, and a floor below the oldest surviving record is a no-op rather
+	// than an error.
+	//
+	// Retention is unpoliced — the log does not check minOffset against any
+	// consumer's progress, since only the caller knows what it has finished
+	// with.
 	TruncateBefore(minOffset int64) error
 
 	// OffloadBefore moves the log bytes of every sealed segment entirely below
