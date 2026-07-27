@@ -69,7 +69,9 @@ func newDeleteCleaner(opts deleteCleanerOptions) *deleteCleaner {
 
 // Clean will enforce the log retention policy by deleting old segments.
 // Deletion only occurs at the segment granularity.
-func (c *deleteCleaner) Clean(segments []*segment) ([]*segment, error) {
+// skipTiered leaves the tier untouched: no tier retention, because deleting a
+// tier's copy is a write to storage that may be shared with other replicas.
+func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool) ([]*segment, error) {
 	var err error
 	if len(segments) == 0 || (c.noRetentionLimits() && c.noTierLimits()) {
 		return segments, nil
@@ -84,7 +86,7 @@ func (c *deleteCleaner) Clean(segments []*segment) ([]*segment, error) {
 	// so counting it would delete records to reclaim space that was already
 	// reclaimed — the budget it belongs to is the tier's.
 	tiered, local := splitOffloadedPrefix(segments)
-	if len(tiered) > 0 && !c.noTierLimits() {
+	if len(tiered) > 0 && !skipTiered && !c.noTierLimits() {
 		tiered, err = c.cleanTier(tiered)
 		if err != nil {
 			return joinTiers(tiered, local), errors.Wrap(err, "failed to apply tier retention limit")

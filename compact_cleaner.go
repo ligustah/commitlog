@@ -300,8 +300,18 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	skipped := false
 	for _, i := range order {
 		b := budget
-		if segments[i].isOffloaded() {
+		tiered := segments[i].isOffloaded()
+		if tiered {
 			b = tierBudget
+		}
+		// SkipTiered is not a budget: no rewrite of a tiered segment happens at
+		// all, because for a caller that does not own tier writes a single one
+		// is corruption of shared storage rather than wasted work. It still
+		// counts as skipped, so a governor of records left in the tier is not
+		// removed ahead of them.
+		if tiered && spec.SkipTiered {
+			skipped = true
+			continue
 		}
 		if late[i] && (skipped || !b.allow()) {
 			break // never remove a governor ahead of what it governs

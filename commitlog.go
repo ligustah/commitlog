@@ -1381,6 +1381,28 @@ type CleanSpec struct {
 	// Both budgets still guarantee at least one rewrite, so debt in either tier
 	// always drains rather than deadlocking under a small budget.
 	TierRewriteBudget time.Duration
+	// SkipTiered makes the pass leave segments whose bytes live in a
+	// SegmentStore ENTIRELY alone: no rewrite, and no tier retention. Local
+	// segments compact and retain normally.
+	//
+	// This exists because no budget can express it. Both rewrite budgets
+	// guarantee at least one rewrite so debt always drains, so
+	// TierRewriteBudget: 0 means "the shared budget", never "none". For a
+	// caller that merely wants to spend less on the tier that guarantee is
+	// right; for one that must not WRITE to the tier at all it is a hole.
+	//
+	// The case it is for: where replicas share a tier, writes to a stream's
+	// objects belong to whichever node holds tier-write ownership. A non-owner
+	// still wants to compact its own local log — it just must not touch shared
+	// storage, and a rewrite there is corruption rather than duplicated work.
+	// Retention is included because deleting a tier's copy is a tier write too.
+	//
+	// Consequence worth knowing: a pass that skips the tier cannot remove a
+	// record that GOVERNS one still in it — an expired tombstone, or a control
+	// marker below StripBelow — because the records it governs were not
+	// rewritten. Those removals wait for a pass that does own the tier. Skipping
+	// is otherwise free: local compaction proceeds exactly as usual.
+	SkipTiered bool
 }
 
 // Clean applies retention and compaction rules against the log, if applicable.
@@ -1468,7 +1490,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 	// next generation of its store objects instead (see ReplaceOffloaded), and
 	// retention is per tier, so their bytes count toward the tier's budget
 	// rather than escaping every limit.
-	cleaned, err := l.deleteCleaner.Clean(segments)
+	cleaned, err := l.deleteCleaner.Clean(segments, spec.SkipTiered)
 	if err != nil {
 		// A partial retention failure still hands back the surviving
 		// segments; propagate them so the caller swaps them in — the deleted

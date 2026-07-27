@@ -5,6 +5,28 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.31.0 — 2026-07-27
+
+- **Added**: `CleanSpec.SkipTiered` — a pass that leaves segments in a
+  `SegmentStore` entirely alone: no rewrite, and no tier retention. Local
+  segments compact and retain normally.
+
+  **No budget can express this**, which is why it is a flag and not a number.
+  Both rewrite budgets guarantee at least one rewrite so debt always drains, so
+  `TierRewriteBudget: 0` means "the shared budget", never "none". For a caller
+  that wants to spend less on the tier that guarantee is right; for one that
+  must not WRITE to the tier at all it is a hole — and a single rewrite into
+  storage shared with other replicas is corruption, not duplicated work.
+
+  Tier retention is suppressed too, because deleting a tier's copy is a tier
+  write as much as uploading one is. The test asserts **zero** store puts and
+  deletes rather than a reduced count, since "fewer" is not the guarantee.
+
+  Consequence worth knowing: a pass that skips the tier cannot remove a record
+  that GOVERNS one still in it — an expired tombstone, or a control marker
+  below `StripBelow` — because the records it governs were not rewritten. Those
+  removals wait for a pass that does own the tier.
+
 ## v0.30.0 — 2026-07-27
 
 - **Added**: `CleanSpec.TierRewriteBudget` — a separate wall-clock budget for
