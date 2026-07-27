@@ -404,16 +404,29 @@ func fzAssertNoOrphanedRecords(t *testing.T, l *commitLog, markerOffs, txnOffs [
 	}
 	got := fzReadAll(t, l)
 
-	survivingAbove := func(off int64) bool {
+	// A record is stranded only if it HAD a governor and compaction took every
+	// one away. Both halves matter, and each was got wrong in turn:
+	//
+	//   - ignoring "above" reported records whose own marker was untouched,
+	//     because some unrelated marker at a lower offset had been removed;
+	//   - ignoring "had one at all" reported records the GENERATOR never gave a
+	//     marker, since it appends markers and transactional records
+	//     independently and a record can simply be the last thing written.
+	//
+	// The second cost a full investigation into a compaction bug that did not
+	// exist: every marker was alive, and the record merely sat above all of
+	// them.
+	governors := func(off int64) (had, alive int) {
 		for _, mo := range markerOffs {
 			if mo <= off {
 				continue
 			}
-			if _, alive := got[mo]; alive {
-				return true
+			had++
+			if _, ok := got[mo]; ok {
+				alive++
 			}
 		}
-		return false
+		return had, alive
 	}
 
 	for _, off := range txnOffs {
@@ -421,14 +434,16 @@ func fzAssertNoOrphanedRecords(t *testing.T, l *commitLog, markerOffs, txnOffs [
 		if !ok {
 			continue
 		}
-		if survivingAbove(off) {
-			continue // a marker that could govern it is still there
+		had, alive := governors(off)
+		if had == 0 || alive > 0 {
+			continue // never had a governor, or still has one
 		}
 		for _, h := range []string{"pid", "epoch", "seq"} {
 			_, has := m.Headers()[h]
 			require.False(t, has,
-				"record at %d still carries %q and every marker above it has been "+
-					"removed, so nothing is left to release it", off, h)
+				"record at %d still carries %q; it had %d marker(s) above it and "+
+					"compaction removed every one, so nothing is left to release it",
+				off, h, had)
 		}
 	}
 }
