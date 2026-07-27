@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.25.0 — 2026-07-27
+
+- **Added**: invalidation for both of the caches that outlive the objects they
+  describe (C2 and C3 of the tiered-compaction work).
+
+  `storeBacking.Invalidate()` drops the 1 MiB read-ahead window, which was
+  previously held for the backing's lifetime with no way to clear it — so an
+  object that changed under a live key kept being served from bytes cached
+  before the change, indefinitely. Generation-stamped keys mean a rewrite
+  normally writes a *new* object and the backing keeps reading the one it
+  opened; this covers the cases where an object genuinely can change under a
+  live key, such as a generation-0 object or a store managed from outside
+  commitlog.
+
+  `RemoteIndexCache.Invalidate(cacheKey)` drops a cached index so the next seek
+  refetches. Eviction was LRU-only, so without this a cached index outlives the
+  object it describes with no size pressure that would reliably remove it, and
+  seeks keep resolving against a pre-rewrite layout.
+
+  An entry a live seek is holding is **detached rather than closed** — it stops
+  being findable at once, and the last release closes it — so invalidation never
+  pulls an index out from under a reader. That required `release` to take the
+  entry rather than its key, since a detached entry is no longer in the map and
+  its pin still has to be dropped.
+
 ## v0.24.0 — 2026-07-27
 
 - **Added**: offloaded store objects carry a **generation** in their key

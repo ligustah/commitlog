@@ -292,6 +292,26 @@ func (b *storeBacking) refill(off int64) error {
 	return nil
 }
 
+// Invalidate drops the read-ahead window, so the next read refetches from the
+// store instead of serving bytes cached before now.
+//
+// Generation-stamped keys mean a rewrite normally writes a NEW object and this
+// backing keeps reading the one it opened — which is the point, and why no
+// invalidation is needed on that path. This exists for the cases where an
+// object CAN change under a live key: a generation-0 object written before
+// generations existed, and any store whose contents are managed from outside
+// commitlog. Without it the window is held for the backing's lifetime with no
+// way to drop it, so a stale extent stays servable indefinitely.
+//
+// Safe to call concurrently with reads: a read in flight has already copied out
+// of the buffer under the same mutex.
+func (b *storeBacking) Invalidate() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.bufOff = -1
+	b.buf = b.buf[:0]
+}
+
 func (b *storeBacking) Write(p []byte) (int, error) {
 	return 0, errors.New("commitlog: offloaded segment is read-only")
 }

@@ -44,6 +44,11 @@ type cachedIndex struct {
 	path     string
 	bytes    int64
 	refs     int
+	// stale marks an entry Invalidate has detached from the cache while a seek
+	// still held it. It is no longer findable or evictable; the last release
+	// closes it. Without this an invalidated-but-pinned entry would either be
+	// closed under a live reader or leak its file forever.
+	stale bool
 }
 
 func (ci *cachedIndex) close() {
@@ -100,7 +105,7 @@ func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey, cacheKey strin
 		ci.refs++
 		c.lru.MoveToFront(el)
 		c.mu.Unlock()
-		return ci.idx, func() { c.release(cacheKey) }, nil
+		return ci.idx, func() { c.release(ci) }, nil
 	}
 	c.mu.Unlock()
 
@@ -119,7 +124,7 @@ func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey, cacheKey strin
 		c.lru.MoveToFront(el)
 		c.mu.Unlock()
 		ci.close() // discard the duplicate we raced to fetch
-		return existing.idx, func() { c.release(cacheKey) }, nil
+		return existing.idx, func() { c.release(existing) }, nil
 	}
 	ci.refs = 1
 	el := c.lru.PushFront(ci)
@@ -127,7 +132,7 @@ func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey, cacheKey strin
 	c.total += ci.bytes
 	c.evictLocked()
 	c.mu.Unlock()
-	return ci.idx, func() { c.release(cacheKey) }, nil
+	return ci.idx, func() { c.release(ci) }, nil
 }
 
 // fetch downloads the index object to the cache dir and opens it.
@@ -180,13 +185,46 @@ func (c *RemoteIndexCache) fetch(store SegmentStore, objectKey, cacheKey string,
 
 // release drops one pin on a cached entry. The entry stays cached (evictable
 // once unpinned) until LRU eviction reclaims it.
-func (c *RemoteIndexCache) release(cacheKey string) {
+// release drops one pin. It takes the entry rather than its key because an
+// invalidated entry is no longer in the map, and the pin still has to be
+// dropped — and the last one is what closes it.
+func (c *RemoteIndexCache) release(ci *cachedIndex) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if el, ok := c.entries[cacheKey]; ok {
-		if ci := el.Value.(*cachedIndex); ci.refs > 0 {
-			ci.refs--
-		}
+	if ci.refs > 0 {
+		ci.refs--
+	}
+	if ci.refs == 0 && ci.stale {
+		ci.close()
+	}
+}
+
+// Invalidate drops the cached index for cacheKey, so the next seek refetches it
+// from the store rather than reading an index that describes an object which no
+// longer exists.
+//
+// Needed because eviction is LRU-only: without this a cached index outlives the
+// object it describes, and there is no size pressure that would reliably remove
+// it. A rewrite that replaces a segment's index object must call this, or seeks
+// keep resolving against the pre-rewrite layout.
+//
+// An entry a live seek is holding is detached rather than closed — it stops
+// being findable immediately, and the last release closes it — so this never
+// pulls an index out from under a reader.
+func (c *RemoteIndexCache) Invalidate(cacheKey string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.entries[cacheKey]
+	if !ok {
+		return
+	}
+	ci := el.Value.(*cachedIndex)
+	c.lru.Remove(el)
+	delete(c.entries, cacheKey)
+	c.total -= ci.bytes
+	ci.stale = true
+	if ci.refs == 0 {
+		ci.close()
 	}
 }
 
