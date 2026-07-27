@@ -124,6 +124,14 @@ than assumed:
 
 | # | Mechanism | Why it breaks under rewrite |
 |---|---|---|
+> **Superseded (v0.34.0).** The hazard table below is kept as the reasoning that
+> led here, not as a description of current behaviour. Generation-numbered keys
+> were the answer at the time; they were replaced by a key allocated per UPLOAD,
+> which fixes the same three hazards and additionally the one a generation could
+> not: an ambiguously-failed upload retried to the same key races the attempt it
+> is retrying. See `CHANGELOG.md` for v0.34.0 and the `CommitLog` interface for
+> the single-writer contract that replaced the writer-identity scheme.
+
 | 1 | `segmentStoreKey` is `%020d` of the base offset plus the log suffix — **no generation** | A rewrite re-`Put`s over the live key. There is no version a reader can pin, so the object can change underneath an in-flight read. |
 | 2 | `storeBacking` holds a 1 MiB read-ahead buffer (`buf`, `bufOff`) for the backing's lifetime, refilled only on a miss | There is **no invalidation path at all** — the type has `ReadAt`, `readOne`, `refill`, `Write`, `Size`, `Sync`, `Close`, `Name`, and nothing else. A backing opened before a rewrite keeps serving pre-rewrite bytes from its buffer. |
 | 3 | `RemoteIndexCache` evicts by LRU only | `acquire`, `fetch`, `release`, `evictLocked`, `Close` — there is no invalidate-by-key. A cached index outlives the object it describes. |

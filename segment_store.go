@@ -370,11 +370,11 @@ func (b *storeBacking) refill(off int64) error {
 // Invalidate drops the read-ahead window, so the next read refetches from the
 // store instead of serving bytes cached before now.
 //
-// Generation-stamped keys mean a rewrite normally writes a NEW object and this
+// Unique keys per upload mean a rewrite always writes a NEW object and this
 // backing keeps reading the one it opened — which is the point, and why no
 // invalidation is needed on that path. This exists for the cases where an
-// object CAN change under a live key: a generation-0 object written before
-// generations existed, and any store whose contents are managed from outside
+// object CAN change under a live key: any store whose contents are managed
+// from outside
 // commitlog. Without it the window is held for the backing's lifetime with no
 // way to drop it, so a stale extent stays servable indefinitely.
 //

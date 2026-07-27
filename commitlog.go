@@ -1598,7 +1598,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 	// never took effect, and every value it shadowed was kept with it.
 	//
 	// They are no longer excluded. A rewrite of an offloaded segment becomes the
-	// next generation of its store objects instead (see ReplaceOffloaded), and
+	// fresh store objects instead (see ReplaceOffloaded), and
 	// retention is per tier, so their bytes count toward the tier's budget
 	// rather than escaping every limit.
 	cleaned, err := l.deleteCleaner.Clean(segments, spec.SkipTiered)

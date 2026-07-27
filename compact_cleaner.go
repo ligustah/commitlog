@@ -857,7 +857,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	}
 	// Install the rewrite. An offloaded segment cannot take the local path:
 	// Replace renames over the source's local files, and an offloaded segment
-	// has none. It instead becomes the next generation of its store objects,
+	// has none. It instead becomes the current objects of that segment,
 	// and the segment object itself carries on — so the caller keeps the SAME
 	// segment rather than the working copy, which is only the vehicle.
 	if seg.isOffloaded() {

@@ -252,10 +252,10 @@ func readOffloadMarker(path string) (offloadMeta, error) {
 // index. The marker is the commit point: it is written after both objects are
 // uploaded and before the local files are removed, so a crash mid-offload leaves
 // a recoverable state (objects present + marker => open through the store).
-// gen is the generation the caller allocated for these objects; key must be
-// segmentStoreKey(s.BaseOffset, gen). Both are passed rather than derived here
-// so the caller — which knows whether this is a first offload or a rewrite
-// replacing an existing generation — decides which objects are being written.
+// key and idxKey are the object keys the caller allocated for this upload (see
+// newStoreKeys). They are passed rather than derived here because they cannot be
+// derived: every upload gets its own, so only the caller that allocated them
+// knows which objects are being written.
 func (s *segment) offloadTo(store SegmentStore, key, idxKey string, cache *RemoteIndexCache) error {
 	s.Lock()
 	defer s.Unlock()
@@ -413,9 +413,6 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 	s.store = store
 	s.storeKey = meta.LogKey
 	// Set explicitly rather than left to the zero value. A first offload is
-	// always generation 0 with no predecessor, so the zero value happened to be
-	// right — but a reopen fills both from the marker, so a segment offloaded in
-	// this process otherwise disagreed with the same segment after a restart.
 	s.firstOffset = meta.FirstOffset
 	s.lastOffset = meta.LastOffset
 	s.firstWriteTime = meta.FirstWriteTime
@@ -480,10 +477,10 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		waiters:     make(map[interface{}]chan struct{}),
 		sealed:      true,
 		store:       store,
-		storeKey:    meta.LogKey,
-		// The marker resolves the generation; nothing recomputes it from the
-		// base offset. A marker written before generations existed reports 0,
-		// which is the generation its un-suffixed keys already encode.
+		// Taken from the marker VERBATIM. Nothing recomputes a key from the
+		// base offset — it could not, since each upload allocated its own — so
+		// objects written by any earlier version stay resolvable.
+		storeKey: meta.LogKey,
 	}
 
 	if meta.IndexKey == "" {
@@ -1484,15 +1481,15 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 }
 
 // ReplaceOffloaded installs fresh — a fully-written LOCAL working segment — as
-// the next generation of this offloaded segment, and returns the object keys the
+// the current objects of this offloaded segment, and returns the object keys the
 // rewrite superseded.
 //
 // This is what lets a tiered segment be compacted at all. A local rewrite gets
 // its atomicity from Replace's rename over the same path; a store has no
 // equivalent, because Put overwrites unconditionally and cannot be made
-// conditional. The generation is the substitute: the new bytes go to a key
+// conditional. A fresh key is the substitute: the new bytes go to a key
 // nothing is reading, and the MARKER is the commit point that decides which
-// generation the segment is, exactly as it does for a first offload.
+// object the segment reads, exactly as it does for a first offload.
 //
 // Ordering, and what a crash at each step leaves:
 //
@@ -1500,7 +1497,7 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 //     A crash here leaves objects nothing points at — orphans, reclaimable by
 //     comparing the store's keys against the markers.
 //  2. rewrite the marker. THIS IS THE COMMIT POINT. Before it the segment is
-//     the old generation; after it, the new one.
+//     the old object; after it, the new one.
 //  3. invalidate the caches that would otherwise keep serving the old bytes:
 //     the backing's read-ahead window and, for an offloaded index, its cache
 //     entry. Skipping this is how a rewrite would appear to succeed and still
@@ -1565,7 +1562,7 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]s
 		return nil, errors.Wrap(err, "write offload marker")
 	}
 
-	// Committed. From here the segment IS the new generation, so anything still
+	// Committed. From here the segment IS the new object, so anything still
 	// able to serve the old one has to be cleared before the swap.
 	if sb, ok := s.backing.(*storeBacking); ok {
 		sb.Invalidate()

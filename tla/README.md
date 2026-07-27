@@ -206,12 +206,22 @@ close the window either, and the spec shows why mechanically: a generation is
 read from each writer's **own local marker**, so two writers that both believe
 they own the tier compute the same next generation and address the same key.
 
-**The contract's cost** (`MultiWriter_ContractBroken.cfg`, `Stamped = FALSE`):
-deterministic keys, which is what the shipped code writes. TLC reports
+**Why keys are unique** (`MultiWriter_ContractBroken.cfg`, `Stamped = FALSE`):
+deterministic keys, which the log wrote until `v0.34.0`. TLC reports
 **NoClobber** violated in four states — elect the new owner, the old one (not
 yet knowing) offloads, the new one offloads, and the second PUT silently
-replaces the first at the identical key. This is not a defect to fix in the
-log; it is precisely what the caller is promising cannot happen.
+replaces the first at the identical key. Keys are now allocated per upload
+precisely so this trace cannot occur; the config is kept because it is the
+argument for that shape, not a description of current behaviour.
+
+**Which config matches the shipped code:** `Stamped = TRUE` (unique keys per
+upload) with `FencedDelete = FALSE` (deletes are not fenced) — that is
+`MultiWriter_BuggyDelete.cfg`. Its **MarkerIntegrity** violation is therefore
+not hypothetical but the log's real residual hazard on a shared store, and the
+counterexample says exactly where it comes from: not a race, but a legitimate
+owner deleting an object it had no way to know another process still names.
+`MultiWriter.cfg` shows what fencing would buy; the log deliberately does not
+fence, because ownership is the caller's question to answer.
 
 **Teeth** (`MultiWriter_BuggyLeak.cfg`, `LineageReclaim = FALSE`): stamped keys
 and fenced deletes, but without the rule that a writer may reclaim keys its own

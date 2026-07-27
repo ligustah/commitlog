@@ -18,11 +18,10 @@ import (
 //
 // Handing it over explicitly is what makes a change of owner work. The
 // alternative — the new owner scanning the store and inferring what is current
-// — is not sound in general: a generation is derived from the writer's own
-// local marker, so a store that has been through a bad handover can hold two
-// objects for one base offset with nothing to order them, and a crash between
-// an upload and its marker leaves an object that was never committed. Both are
-// invisible to a scan.
+// — is not sound in general: every upload allocates its own key, so a store can
+// hold several objects claiming one base offset (a rewrite's predecessor, an
+// upload orphaned by a crash before its marker) with nothing in the store
+// saying which is current. Both cases are invisible to a scan.
 //
 // So the state travels with the ownership decision, from whatever makes that
 // decision. It is the same division as CleanSpec's Ceiling: the log honours a

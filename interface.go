@@ -10,33 +10,39 @@ package commitlog
 // deliberate boundary: who owns a store is a question about cluster
 // membership, and nothing the log can observe answers it.
 //
-// The obligation that falls on the caller is exactly this: AT MOST ONE process
-// may have a store writable at a time. Express it with SetTierReadOnly — every
-// process that does not own the tier runs read-only, and ownership moves by the
-// previous owner going read-only BEFORE the next one comes out of it.
+// Express ownership with SetTierReadOnly — a process that does not own the tier
+// runs read-only, and ownership moves by the previous owner going read-only
+// before the next one comes out of it.
 //
-// That ordering is the part worth getting right, because it is not automatic
-// and its failure is silent. A demoted leader reads its own lagging view of
-// membership and briefly still believes it owns the tier; consensus does not
-// help, since a node is leader at the moment it DECIDES, not at the moment its
-// write lands. So a handover has to wait out two things, not one:
+// # What actually goes wrong if two processes write at once
 //
-//   - how long a former owner can still BELIEVE it owns the tier, and
-//   - how long a write it already issued can still be IN FLIGHT — including
-//     retries, since a retrying client can stretch one logical write well past
-//     a single timeout.
+// Worth being precise about, because it is NOT silent data loss and a caller
+// that believes otherwise will build machinery it does not need.
 //
-// Only the second is easy to overlook, and it is the one no amount of
-// signalling can shorten: once a request is with the storage client, it will
-// land whether or not the sender still believes anything.
+// Every upload goes to its own key (see newStoreKeys), so two writers cannot
+// address the same object. There is no lost update to worry about: they produce
+// two objects, each described by its own writer's markers. What that costs is
+// storage, not data — the segment is uploaded twice, and the copy nobody's
+// markers name is garbage until something reclaims it.
 //
-// If two processes do write concurrently, they compute the SAME next generation
-// from their own local markers, address the same key, and one silently
-// overwrites the other. Object stores offer no compare-and-swap to break the
-// tie, so there is no error for either party and the loser may be the one whose
-// data was current. tla/MultiWriter.tla models that failure precisely; it is
-// the evidence for this contract rather than a description of a defence, since
-// the log has none.
+// This is also why an overlapping handover is survivable rather than
+// catastrophic. A demoted leader acts on a lagging view of membership and may
+// still upload, and a request already with the storage client will land
+// whichever way its sender's beliefs have since gone. That produces a duplicate
+// object. It does not destroy the current one.
+//
+// The hazard that IS destructive is deletion, and it does not arise from
+// racing: it arrives by permission. DeleteStoreObjects is unfenced — it removes
+// exactly the keys it is given. UnreferencedObjects on a SHARED store lists
+// every object this log's markers do not name, which includes everything
+// another live process uploaded. Feeding one to the other on a shared store
+// deletes data that process is serving. See both methods for the detail; the
+// short version is that "unreferenced by me" is not "unreferenced".
+//
+// tla/MultiWriter.tla models these outcomes. It is evidence for the contract
+// rather than a description of a defence, since the log has none — including
+// the deterministic-key overwrite that keys used to permit and no longer do,
+// kept because it is why they are shaped as they are.
 //
 // A log with no SegmentStore is unaffected by any of this.
 type CommitLog interface {
@@ -200,9 +206,11 @@ type CommitLog interface {
 	// reclaim them.
 	//
 	// Recovering it from the store instead does not work, which is worth
-	// stating because it looks like it should. Generations are per-writer, so
-	// one base offset may have objects from two writers and NOTHING in the
-	// store orders them — not the keys, not the sizes, not the timestamps.
+	// stating because it looks like it should. Every upload allocates its own
+	// key, so a store may hold several objects claiming one base offset — a
+	// rewrite's predecessor, an upload orphaned by a crash — and NOTHING in
+	// the store says which is current: not the keys, not the sizes, not the
+	// timestamps.
 	//
 	// Replicate this through whatever gives the cluster a total order, and hand
 	// it to the next owner via ImportTierState.
@@ -341,7 +349,7 @@ type CommitLog interface {
 	//
 	// It also returns the SUPERSEDED STORE OBJECTS: when the pass rewrote a
 	// segment whose bytes live in a SegmentStore, the rewrite became a new
-	// generation of that segment's objects and the previous generation's keys
+	// objects of that segment, and the keys it stops referencing
 	// are returned here. They are deliberately NOT deleted:
 	//   - a reader that opened the segment before the rewrite holds a backing
 	//     over the old key and is entitled to finish; deleting underneath it
