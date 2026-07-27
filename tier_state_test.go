@@ -50,9 +50,6 @@ func TestExportTierStateDescribesEveryOffloadedSegment(t *testing.T) {
 
 	for _, o := range state {
 		require.NotEmpty(t, o.LogKey)
-		require.Equal(t, 0, o.Generation)
-		require.Equal(t, o.LogKey, segmentStoreKey(o.BaseOffset, o.Generation),
-			"the key must be the one its base offset and generation name")
 		require.Positive(t, o.PhysPosition)
 		require.LessOrEqual(t, o.FirstOffset, o.LastOffset)
 	}
@@ -112,10 +109,6 @@ func TestImportTierStateAdoptsObjectsWrittenByAnotherProcess(t *testing.T) {
 	// Checked against the KEY as well, not only against the other side of the
 	// round trip: export and import share the code that carries this, so a round
 	// trip that lost it on both sides would still compare equal.
-	for _, o := range after {
-		require.Equal(t, segmentStoreKey(o.BaseOffset, o.Generation), o.LogKey,
-			"the exported state must agree with the key it names")
-	}
 
 	// And it did not upload a second copy of anything: the store still holds
 	// exactly the objects the first log put there.
@@ -242,7 +235,7 @@ func TestImportTierStateRefusesStateItCannotApply(t *testing.T) {
 		match string
 	}{
 		{"missing object", bend(func(o *TierObject) {
-			o.LogKey = segmentStoreKey(o.BaseOffset, 9)
+			o.LogKey, _ = newStoreKeys(o.BaseOffset)
 		}), "missing object"},
 		{"no log key", bend(func(o *TierObject) { o.LogKey = "" }), "no log key"},
 		// The size bounds every read of the object, so a state that disagrees

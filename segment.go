@@ -1,6 +1,8 @@
 package commitlog
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -114,11 +116,6 @@ type segment struct {
 	// and Index is the resident local index.
 	indexKey   string
 	indexCache *RemoteIndexCache
-	// storeGen is the generation of the objects this segment currently reads,
-	// taken from its marker. A rewrite uploads storeGen+1 and rewrites the
-	// marker; the backing opened here keeps its own key, so a reader in flight
-	// finishes against the generation it started on.
-	storeGen int
 
 	sync.RWMutex
 }
@@ -157,41 +154,51 @@ func (s *segment) offloadMarkerPath() string {
 	return filepath.Join(s.path, fmt.Sprintf(fileFormat, s.BaseOffset, offloadedSuffix))
 }
 
-// segmentStoreKey is the store object key for generation gen of the segment at
-// baseOffset: the zero-padded base offset, matching the local log filename stem
-// so keys are unique within a per-log store and stable across restarts.
+// newStoreKeys returns the object keys for one UPLOAD of the segment at
+// baseOffset: the zero-padded base offset, so keys sort and group the way the
+// local log filenames do, followed by a value unique to this attempt.
 //
-// The GENERATION is what makes a rewrite safe. SegmentStore.Put overwrites
-// unconditionally and has no compare-and-swap form, so rewriting in place would
-// change an object out from under a reader already reading it. A rewrite
-// therefore writes the NEXT generation to a NEW key and deletes the old one once
-// nothing needs it, which leaves a reader holding a key that cannot change.
+// Every upload gets a fresh key, and that is the whole design. Two properties
+// come out of it, and neither is available from a deterministic key:
 //
-// It does NOT defend against a second writer, and is not meant to: the
-// generation is read from this log's own marker, so two processes writing one
-// store would compute the same next key. commitlog assumes it is the only
-// writer — see the CommitLog interface docs for that contract and what it
-// costs to break.
+//   - A rewrite cannot disturb a reader. SegmentStore.Put overwrites
+//     unconditionally and has no compare-and-swap form, so rewriting in place
+//     would change an object out from under whoever is reading it. Writing
+//     somewhere new instead leaves that reader on a key that cannot change.
+//   - A RETRY cannot destroy anything. An upload that failed ambiguously — a
+//     timeout, a dropped connection — may still be in flight; retrying to the
+//     same key races the original, and a deterministic key makes that race
+//     invisible. A fresh key turns it into a spare object instead.
 //
-// Generation 0 keeps the original un-suffixed form, so objects written before
-// generations existed keep their keys. That costs nothing, because the offload
-// marker records the key VERBATIM and is the only thing that resolves it —
-// nothing recomputes a key for an existing object.
-func segmentStoreKey(baseOffset int64, gen int) string {
-	return baseOffset0Key(baseOffset, gen, logSuffix)
+// It also means two processes writing one store cannot collide, though
+// commitlog does not rely on that: it assumes it is the only writer (see the
+// CommitLog interface for that contract). This is the same reasoning Kafka's
+// tiered storage uses in requiring a unique id per copy attempt "even when it
+// retries ... for the same log segment data" — uniqueness is cheaper than
+// coordination, and unlike coordination it cannot be got subtly wrong.
+//
+// The cost is that a key cannot be recomputed, only remembered. That is already
+// true: the offload marker records keys VERBATIM and is the only thing that
+// resolves them, so nothing anywhere derives a key for an existing object.
+func newStoreKeys(baseOffset int64) (logKey, indexKey string) {
+	u := newUploadID()
+	return fmt.Sprintf("%020d.%s%s", baseOffset, u, logSuffix),
+		fmt.Sprintf("%020d.%s%s", baseOffset, u, indexSuffix)
 }
 
-func baseOffset0Key(baseOffset int64, gen int, suffix string) string {
-	if gen == 0 {
-		return fmt.Sprintf("%020d%s", baseOffset, suffix)
+// newUploadID returns a value no other upload will use. It is random rather
+// than a counter because a counter has to be read from somewhere, and every
+// place it could be read from is state that a crash, a restart or a second
+// process can leave stale — which is exactly how a "unique" key stops being
+// unique.
+func newUploadID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand failing is not a condition a log can sensibly continue
+		// through: every key from here would risk colliding with a live object.
+		panic("commitlog: cannot generate an upload id: " + err.Error())
 	}
-	return fmt.Sprintf("%020d.g%d%s", baseOffset, gen, suffix)
-}
-
-// segmentIndexStoreKey is the store object key for an offloaded segment's index
-// (option 2), mirroring the log key with the index suffix.
-func segmentIndexStoreKey(baseOffset int64, gen int) string {
-	return baseOffset0Key(baseOffset, gen, indexSuffix)
+	return hex.EncodeToString(b[:])
 }
 
 // offloadMeta is the JSON content of a v2 .offloaded marker. It carries enough to
@@ -209,12 +216,6 @@ type offloadMeta struct {
 	Position       int64  `json:"position"`
 	PhysPosition   int64  `json:"phys_position"`
 	BlockMode      bool   `json:"block_mode"`
-	// Generation of the objects this marker points at. Absent (0) in markers
-	// written before generations existed, which is exactly right: those objects
-	// carry generation-0 keys. A rewrite writes the next generation to new keys
-	// and rewrites this marker, so the marker is the single place a generation
-	// is resolved and no reader ever has to guess one.
-	Generation int `json:"generation,omitempty"`
 }
 
 // readOffloadMarker reads a .offloaded marker. A v2 marker is JSON; a v1 marker
@@ -255,7 +256,7 @@ func readOffloadMarker(path string) (offloadMeta, error) {
 // segmentStoreKey(s.BaseOffset, gen). Both are passed rather than derived here
 // so the caller — which knows whether this is a first offload or a rewrite
 // replacing an existing generation — decides which objects are being written.
-func (s *segment) offloadTo(store SegmentStore, key string, gen int, cache *RemoteIndexCache) error {
+func (s *segment) offloadTo(store SegmentStore, key, idxKey string, cache *RemoteIndexCache) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
@@ -279,7 +280,7 @@ func (s *segment) offloadTo(store SegmentStore, key string, gen int, cache *Remo
 	// presence implies both objects exist.
 	var indexKey string
 	if cache != nil {
-		indexKey = segmentIndexStoreKey(s.BaseOffset, gen)
+		indexKey = idxKey
 		r, isize, err := s.Index.offloadReader()
 		if err != nil {
 			return errors.Wrap(err, "read index for offload")
@@ -299,7 +300,6 @@ func (s *segment) offloadTo(store SegmentStore, key string, gen int, cache *Remo
 		Position:       s.position,
 		PhysPosition:   size,
 		BlockMode:      s.blockMode,
-		Generation:     gen,
 	}
 	return s.attachOffloadedLocked(store, meta, cache)
 }
@@ -350,7 +350,6 @@ func (s *segment) replaceOffloadedTargetLocked(meta offloadMeta, cache *RemoteIn
 	s.backing = sb
 	s.storeKey = meta.LogKey
 	s.indexKey = meta.IndexKey
-	s.storeGen = meta.Generation
 	s.firstOffset = meta.FirstOffset
 	s.lastOffset = meta.LastOffset
 	s.firstWriteTime = meta.FirstWriteTime
@@ -417,7 +416,6 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 	// always generation 0 with no predecessor, so the zero value happened to be
 	// right — but a reopen fills both from the marker, so a segment offloaded in
 	// this process otherwise disagreed with the same segment after a restart.
-	s.storeGen = meta.Generation
 	s.firstOffset = meta.FirstOffset
 	s.lastOffset = meta.LastOffset
 	s.firstWriteTime = meta.FirstWriteTime
@@ -486,7 +484,6 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		// The marker resolves the generation; nothing recomputes it from the
 		// base offset. A marker written before generations existed reports 0,
 		// which is the generation its un-suffixed keys already encode.
-		storeGen: meta.Generation,
 	}
 
 	if meta.IndexKey == "" {
@@ -1444,10 +1441,9 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]s
 	}
 
 	var (
-		gen         = s.storeGen + 1
-		newKey      = segmentStoreKey(s.BaseOffset, gen)
-		newIndexKey string
-		superseded  = []string{s.storeKey}
+		newKey, freshIndexKey = newStoreKeys(s.BaseOffset)
+		newIndexKey           string
+		superseded            = []string{s.storeKey}
 	)
 
 	size, err := fresh.backing.Size()
@@ -1458,7 +1454,7 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]s
 		return nil, errors.Wrap(err, "put rewritten segment")
 	}
 	if s.indexKey != "" {
-		newIndexKey = segmentIndexStoreKey(s.BaseOffset, gen)
+		newIndexKey = freshIndexKey
 		r, isize, err := fresh.Index.offloadReader()
 		if err != nil {
 			return nil, errors.Wrap(err, "read rewritten index")
@@ -1479,7 +1475,6 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]s
 		Position:       fresh.position,
 		PhysPosition:   size,
 		BlockMode:      fresh.blockMode,
-		Generation:     gen,
 	}
 	markerBytes, err := json.Marshal(meta)
 	if err != nil {
@@ -1511,7 +1506,6 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]s
 	}
 	s.backing = sb
 	s.storeKey = newKey
-	s.storeGen = gen
 	s.indexKey = newIndexKey
 	s.firstOffset = fresh.firstOffset
 	s.lastOffset = fresh.lastOffset

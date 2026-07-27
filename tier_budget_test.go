@@ -55,20 +55,20 @@ func TestTierBudgetDoesNotStarveLocalCompaction(t *testing.T) {
 	}
 	l.SetHighWatermark(last)
 
-	gensBefore := map[int64]int{}
+	keysBefore := map[int64]string{}
 	locals := map[int64]bool{}
 	l.mu.RLock()
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			gensBefore[s.BaseOffset] = s.storeGen
+			keysBefore[s.BaseOffset] = s.storeKey
 		} else {
 			locals[s.BaseOffset] = true
 		}
 		s.RUnlock()
 	}
 	l.mu.RUnlock()
-	require.NotEmpty(t, gensBefore, "the fixture needs offloaded segments")
+	require.NotEmpty(t, keysBefore, "the fixture needs offloaded segments")
 	require.NotEmpty(t, locals, "and local ones")
 
 	// A tier budget already spent, with local rewrites still affordable.
@@ -88,7 +88,7 @@ func TestTierBudgetDoesNotStarveLocalCompaction(t *testing.T) {
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			if before, ok := gensBefore[s.BaseOffset]; ok && s.storeGen > before {
+			if before, ok := keysBefore[s.BaseOffset]; ok && s.storeKey != before {
 				advanced++
 			}
 		}
@@ -135,12 +135,12 @@ func TestTierBudgetDefaultsToTheRewriteBudget(t *testing.T) {
 	_, err = l.OffloadBefore(last)
 	require.NoError(t, err)
 
-	gensBefore := map[int64]int{}
+	keysBefore := map[int64]string{}
 	l.mu.RLock()
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			gensBefore[s.BaseOffset] = s.storeGen
+			keysBefore[s.BaseOffset] = s.storeKey
 		}
 		s.RUnlock()
 	}
@@ -160,7 +160,7 @@ func TestTierBudgetDefaultsToTheRewriteBudget(t *testing.T) {
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			if before, ok := gensBefore[s.BaseOffset]; ok && s.storeGen > before {
+			if before, ok := keysBefore[s.BaseOffset]; ok && s.storeKey != before {
 				advanced++
 			}
 		}

@@ -73,17 +73,17 @@ func TestSkipTieredMakesNoTierWrites(t *testing.T) {
 	}
 	l.SetHighWatermark(last)
 
-	gensBefore := map[int64]int{}
+	keysBefore := map[int64]string{}
 	l.mu.RLock()
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			gensBefore[s.BaseOffset] = s.storeGen
+			keysBefore[s.BaseOffset] = s.storeKey
 		}
 		s.RUnlock()
 	}
 	l.mu.RUnlock()
-	require.NotEmpty(t, gensBefore, "the fixture needs offloaded segments")
+	require.NotEmpty(t, keysBefore, "the fixture needs offloaded segments")
 
 	store.puts, store.deletes = 0, 0
 
@@ -106,8 +106,8 @@ func TestSkipTieredMakesNoTierWrites(t *testing.T) {
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			if before, ok := gensBefore[s.BaseOffset]; ok {
-				require.Equal(t, before, s.storeGen,
+			if before, ok := keysBefore[s.BaseOffset]; ok {
+				require.Equal(t, before, s.storeKey,
 					"segment %d was rewritten despite SkipTiered", s.BaseOffset)
 			}
 		}

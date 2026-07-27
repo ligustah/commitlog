@@ -51,17 +51,17 @@ func TestCompactionRewritesOffloadedSegments(t *testing.T) {
 	require.NoError(t, err)
 	require.Positive(t, n, "sealed segments must have offloaded")
 
-	generationsBefore := map[int64]int{}
+	keysBefore := map[int64]string{}
 	l.mu.RLock()
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			generationsBefore[s.BaseOffset] = s.storeGen
+			keysBefore[s.BaseOffset] = s.storeKey
 		}
 		s.RUnlock()
 	}
 	l.mu.RUnlock()
-	require.NotEmpty(t, generationsBefore, "the fixture needs offloaded segments")
+	require.NotEmpty(t, keysBefore, "the fixture needs offloaded segments")
 
 	hw := l.HighWatermark()
 	_, superseded, err := l.CleanWithSpec(CleanSpec{
@@ -77,9 +77,8 @@ func TestCompactionRewritesOffloadedSegments(t *testing.T) {
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			if before, ok := generationsBefore[s.BaseOffset]; ok && s.storeGen > before {
+			if before, ok := keysBefore[s.BaseOffset]; ok && s.storeKey != before {
 				advanced++
-				require.Equal(t, segmentStoreKey(s.BaseOffset, s.storeGen), s.storeKey)
 			}
 		}
 		s.RUnlock()

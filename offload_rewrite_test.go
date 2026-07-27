@@ -57,9 +57,8 @@ func TestReplaceOffloadedWritesNewGenerationAndKeepsTheOld(t *testing.T) {
 	l, store, seg := offloadedFixture(t, nil)
 
 	seg.RLock()
-	oldKey, oldGen := seg.storeKey, seg.storeGen
+	oldKey := seg.storeKey
 	seg.RUnlock()
-	require.Equal(t, 0, oldGen)
 
 	// A reader holding the pre-rewrite backing.
 	oldBacking := seg.backing
@@ -69,12 +68,9 @@ func TestReplaceOffloadedWritesNewGenerationAndKeepsTheOld(t *testing.T) {
 	require.NoError(t, err)
 
 	seg.RLock()
-	newKey, newGen := seg.storeKey, seg.storeGen
+	newKey := seg.storeKey
 	seg.RUnlock()
-
-	require.Equal(t, 1, newGen, "the rewrite must allocate the next generation")
 	require.NotEqual(t, oldKey, newKey, "it must not land on the key being read")
-	require.Equal(t, segmentStoreKey(seg.BaseOffset, 1), newKey)
 	require.Equal(t, []string{oldKey}, superseded,
 		"the old object must be reported, not silently dropped")
 
@@ -101,8 +97,11 @@ func TestReplaceOffloadedMarkerNamesTheNewGeneration(t *testing.T) {
 
 	meta, err := readOffloadMarker(seg.offloadMarkerPath())
 	require.NoError(t, err)
-	require.Equal(t, 1, meta.Generation)
-	require.Equal(t, segmentStoreKey(seg.BaseOffset, 1), meta.LogKey,
+
+	seg.RLock()
+	live := seg.storeKey
+	seg.RUnlock()
+	require.Equal(t, live, meta.LogKey,
 		"the marker must resolve to the rewritten object")
 }
 

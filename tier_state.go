@@ -50,11 +50,6 @@ type TierObject struct {
 	// BlockMode records whether the object is block-compressed, since it
 	// cannot be read correctly without knowing.
 	BlockMode bool
-	// Generation is which generation these objects are. Carried so the state
-	// survives a handover intact: the receiving log needs it to allocate the
-	// NEXT generation on a rewrite, rather than starting again at zero and
-	// addressing a key that already exists.
-	Generation int
 }
 
 func tierObjectFromMeta(baseOffset int64, m offloadMeta) TierObject {
@@ -69,7 +64,6 @@ func tierObjectFromMeta(baseOffset int64, m offloadMeta) TierObject {
 		Position:       m.Position,
 		PhysPosition:   m.PhysPosition,
 		BlockMode:      m.BlockMode,
-		Generation:     m.Generation,
 	}
 }
 
@@ -84,7 +78,6 @@ func (o TierObject) meta() offloadMeta {
 		Position:       o.Position,
 		PhysPosition:   o.PhysPosition,
 		BlockMode:      o.BlockMode,
-		Generation:     o.Generation,
 	}
 }
 
@@ -108,7 +101,6 @@ func (l *commitLog) ExportTierState() ([]TierObject, error) {
 				Position:       s.position,
 				PhysPosition:   s.physPosition,
 				BlockMode:      s.blockMode,
-				Generation:     s.storeGen,
 			})
 		}
 		s.RUnlock()

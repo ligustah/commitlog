@@ -1170,11 +1170,9 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 		if s.needsBlockConsolidation() {
 			continue
 		}
-		// A first offload writes generation 0, which keeps the original
-		// un-suffixed key. Only a rewrite allocates a higher generation.
-		const gen = 0
-		if err := s.offloadTo(l.SegmentStore, segmentStoreKey(s.BaseOffset, gen),
-			gen, l.RemoteIndexCache); err != nil {
+		logKey, idxKey := newStoreKeys(s.BaseOffset)
+		if err := s.offloadTo(l.SegmentStore, logKey, idxKey,
+			l.RemoteIndexCache); err != nil {
 			return n, err
 		}
 		n++
