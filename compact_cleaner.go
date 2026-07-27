@@ -272,21 +272,49 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// Rewrite phase, density order, one shared budget and block accumulator.
 	// Epoch assignments are only COLLECTED here (the cache requires
 	// ascending-offset feeding, which the offset-order assembly below does).
+	// Two budgets, drawn on by tier. A tiered rewrite downloads the object,
+	// rewrites it and uploads the result, where a local one touches local disk
+	// only — so a single shared wall-clock budget lets one slow remote rewrite
+	// consume the pass and starve local compaction while local debt grows.
+	// TierRewriteBudget defaults to RewriteBudget, so a caller that sets
+	// nothing sees exactly the previous behaviour.
+	tierDur := spec.TierRewriteBudget
+	if tierDur == 0 {
+		tierDur = spec.RewriteBudget
+	}
 	budget := newRewriteBudget(spec.maxRewrites, spec.RewriteBudget)
+	tierBudget := newRewriteBudget(spec.maxRewrites, tierDur)
 	bw := &blockWriter{}
 	sc := newBlockCache() // one decode-buffer pair for the whole pass
 	rewritten := make([]*segment, n)
 	didRewrite := make([]bool, n)
 	assigns := make([][]epochAssign, n)
+	// Skipping for budget is only safe in the order-INSENSITIVE phase. A late
+	// segment removes a record that governs older ones, and may only do so if
+	// everything it governs was rewritten in this same pass — so once any
+	// earlier segment has been skipped, no governor may be rewritten at all.
+	// Without this, giving the two tiers independent budgets would quietly
+	// reintroduce the orphaning the ordering rule exists to prevent: a governed
+	// segment skipped for want of tier budget, its governor rewritten anyway
+	// because the local budget still had room.
+	skipped := false
 	for _, i := range order {
-		if !budget.allow() {
-			break
+		b := budget
+		if segments[i].isOffloaded() {
+			b = tierBudget
+		}
+		if late[i] && (skipped || !b.allow()) {
+			break // never remove a governor ahead of what it governs
+		}
+		if !b.allow() {
+			skipped = true
+			continue // this tier is spent; the other may still have room
 		}
 		cleaned, msgsRemoved, ea, err := c.cleanSegment(spec, segments[i], merged.drops[i], bw, sc)
 		if err != nil {
 			return nil, nil, 0, -1, err
 		}
-		budget.note()
+		b.note()
 		rewritten[i], didRewrite[i], assigns[i] = cleaned, true, ea
 		removed += msgsRemoved
 	}

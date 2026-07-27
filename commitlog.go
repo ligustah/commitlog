@@ -1366,6 +1366,21 @@ type CleanSpec struct {
 	// spent in drop-density order. 0 = unbounded. At least one rewrite
 	// always proceeds.
 	RewriteBudget time.Duration
+	// TierRewriteBudget bounds, separately, how long one pass may spend
+	// rewriting segments whose bytes live in a SegmentStore. Zero falls back to
+	// RewriteBudget, so a caller that sets nothing sees no change.
+	//
+	// It is separate because the two rewrites cost wildly different things. A
+	// local rewrite reads and writes local disk; a tiered one downloads the
+	// object, rewrites, and uploads the result — orders of magnitude slower
+	// against remote storage, and metered. Sharing one wall-clock budget lets a
+	// single slow tiered rewrite consume the whole pass and starve local
+	// compaction indefinitely, which is the case this exists to prevent: local
+	// debt would grow while the pass spends its seconds on one remote object.
+	//
+	// Both budgets still guarantee at least one rewrite, so debt in either tier
+	// always drains rather than deadlocking under a small budget.
+	TierRewriteBudget time.Duration
 }
 
 // Clean applies retention and compaction rules against the log, if applicable.

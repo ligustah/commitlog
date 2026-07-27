@@ -5,6 +5,28 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.30.0 — 2026-07-27
+
+- **Added**: `CleanSpec.TierRewriteBudget` — a separate wall-clock budget for
+  rewriting segments whose bytes live in a `SegmentStore`. Zero falls back to
+  `RewriteBudget`, so a caller that sets nothing sees no change.
+
+  The two rewrites cost wildly different things: a local one reads and writes
+  local disk, a tiered one downloads the object, rewrites it and uploads the
+  result — orders of magnitude slower against remote storage, and metered.
+  Under one shared budget a single slow tiered rewrite could consume the pass
+  and starve local compaction while local debt grew.
+
+  **The subtlety this exposed**, recorded because getting it wrong reintroduces
+  a bug this log has already had: skipping a segment for want of budget is only
+  safe in the order-INSENSITIVE phase. A late segment removes a record that
+  governs older ones and may only do so if everything it governs was rewritten
+  in the same pass. Two independent budgets make it possible to skip a governed
+  segment for want of TIER budget and then rewrite its governor anyway because
+  the LOCAL budget still had room — which is exactly the orphaning the ordering
+  rule exists to prevent. Once any segment has been skipped, no governor is
+  rewritten at all.
+
 ## v0.29.0 — 2026-07-27
 
 - **Added**: `CommitLog.ReadMessageSet(offset, maxBytes)` — the read counterpart
