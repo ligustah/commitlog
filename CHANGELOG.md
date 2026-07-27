@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.22.3 — 2026-07-27
 
 - **Fixed (corruption)**: `Truncate` could rebuild the boundary segment from a
   torn read, leaving a log that could not be read end to end. Before replacing
