@@ -39,6 +39,18 @@ type deleteCleanerOptions struct {
 		Bytes    int64
 		Messages int64
 		Age      time.Duration
+		// Tier* bound the segments whose bytes live in a SegmentStore,
+		// separately from the ones on local disk. Retention becomes PER TIER: a
+		// segment over the local budget is not deleted if it also exists in a
+		// store — it has simply left the tier the budget governs — and the
+		// record is gone only when the last tier's limit is reached.
+		//
+		// Zero means a tier keeps everything, which is what makes this
+		// backwards-compatible: a log with no store has no offloaded segments,
+		// so these never apply and the limits above behave exactly as before.
+		TierBytes    int64
+		TierMessages int64
+		TierAge      time.Duration
 	}
 	Name string
 }
@@ -59,9 +71,36 @@ func newDeleteCleaner(opts deleteCleanerOptions) *deleteCleaner {
 // Deletion only occurs at the segment granularity.
 func (c *deleteCleaner) Clean(segments []*segment) ([]*segment, error) {
 	var err error
-	if len(segments) == 0 || c.noRetentionLimits() {
+	if len(segments) == 0 || (c.noRetentionLimits() && c.noTierLimits()) {
 		return segments, nil
 	}
+
+	// Split the tiers before applying anything. Offloaded segments are always
+	// the oldest contiguous prefix, so this is a cut rather than a filter, and
+	// the two halves keep their order.
+	//
+	// The local limits deliberately do NOT see the offloaded prefix. A segment
+	// whose bytes are in a store is not occupying the disk those limits govern,
+	// so counting it would delete records to reclaim space that was already
+	// reclaimed — the budget it belongs to is the tier's.
+	tiered, local := splitOffloadedPrefix(segments)
+	if len(tiered) > 0 && !c.noTierLimits() {
+		tiered, err = c.cleanTier(tiered)
+		if err != nil {
+			return joinTiers(tiered, local), errors.Wrap(err, "failed to apply tier retention limit")
+		}
+	}
+	if c.noRetentionLimits() {
+		return joinTiers(tiered, local), nil
+	}
+	local, err = c.cleanLocal(local)
+	return joinTiers(tiered, local), err
+}
+
+// cleanLocal applies the local-disk retention limits, which is what Clean did
+// in full before retention became per-tier.
+func (c *deleteCleaner) cleanLocal(segments []*segment) ([]*segment, error) {
+	var err error
 
 	slog.Debug(
 		"Cleaning log based on retention policy",
@@ -104,6 +143,89 @@ func (c *deleteCleaner) Clean(segments []*segment) ([]*segment, error) {
 
 func (c *deleteCleaner) noRetentionLimits() bool {
 	return c.Retention.Bytes == 0 && c.Retention.Messages == 0 && c.Retention.Age == 0
+}
+
+func (c *deleteCleaner) noTierLimits() bool {
+	return c.Retention.TierBytes == 0 && c.Retention.TierMessages == 0 &&
+		c.Retention.TierAge == 0
+}
+
+// splitOffloadedPrefix cuts segments into the offloaded prefix and the rest.
+// Offloaded segments are always the oldest, contiguous prefix — OffloadBefore
+// works oldest-first and never touches the active segment — so this is a cut at
+// the first local segment, and both halves stay in offset order.
+func splitOffloadedPrefix(segments []*segment) (tiered, local []*segment) {
+	for i, s := range segments {
+		s.RLock()
+		off := s.isOffloaded()
+		s.RUnlock()
+		if !off {
+			return segments[:i], segments[i:]
+		}
+	}
+	return segments, nil
+}
+
+// joinTiers reassembles the two halves without aliasing either: appending onto
+// the tiered slice would write into the caller's backing array, which still
+// holds the segments the local half is about to be read from.
+func joinTiers(tiered, local []*segment) []*segment {
+	out := make([]*segment, 0, len(tiered)+len(local))
+	out = append(out, tiered...)
+	return append(out, local...)
+}
+
+// cleanTier applies the tier limits to the offloaded segments. It is separate
+// from the local pass for one reason beyond the different budgets: there is no
+// active segment in a tier, so every one of them is eligible. The local pass
+// must always retain the last segment because it is the one being appended to;
+// a tier has no such thing, and forcing it to keep one would mean the oldest
+// object could never be reclaimed.
+func (c *deleteCleaner) cleanTier(segments []*segment) ([]*segment, error) {
+	var err error
+	if c.Retention.TierAge > 0 {
+		ttl := computeTTL(c.Retention.TierAge)
+		idx := len(segments)
+		for i, seg := range segments {
+			seg.RLock()
+			live := seg.lastWriteTime >= ttl
+			seg.RUnlock()
+			if live {
+				idx = i
+				break
+			}
+		}
+		if segments, err = dropOldestPrefix(segments[:idx], segments[idx:]); err != nil {
+			return segments, err
+		}
+	}
+	if c.Retention.TierMessages > 0 {
+		segments, err = c.applyTierLimit(segments, c.Retention.TierMessages,
+			(*segment).MessageCount)
+		if err != nil {
+			return segments, err
+		}
+	}
+	if c.Retention.TierBytes > 0 {
+		segments, err = c.applyTierLimit(segments, c.Retention.TierBytes,
+			(*segment).Position)
+	}
+	return segments, err
+}
+
+// applyTierLimit keeps the newest segments whose total, by the given measure,
+// fits the limit, and drops the older prefix.
+func (c *deleteCleaner) applyTierLimit(segments []*segment, limit int64,
+	measure func(*segment) int64) ([]*segment, error) {
+
+	total := int64(0)
+	for i := len(segments) - 1; i >= 0; i-- {
+		total += measure(segments[i])
+		if total > limit {
+			return dropOldestPrefix(segments[:i+1], segments[i+1:])
+		}
+	}
+	return segments, nil
 }
 
 func (c *deleteCleaner) applyMessagesLimit(segments []*segment) ([]*segment, error) {

@@ -133,6 +133,21 @@ type Options struct {
 	MaxLogBytes          int64         // Retention by bytes
 	MaxLogMessages       int64         // Retention by messages
 	MaxLogAge            time.Duration // Retention by age
+	// MaxTier* bound the segments whose bytes have been offloaded to the
+	// SegmentStore, separately from the ones still on local disk. Retention is
+	// PER TIER: a segment over the local budget that also exists in a store has
+	// left the tier those limits govern rather than being deleted, and the
+	// record is gone only when the last tier's limit is reached.
+	//
+	// The limits above therefore bound LOCAL disk alone and no longer count
+	// offloaded segments — counting them would delete records to reclaim space
+	// that offloading already reclaimed.
+	//
+	// Zero keeps everything in the tier, which is what makes this compatible: a
+	// log with no SegmentStore has no offloaded segments, so these never apply.
+	MaxTierBytes    int64
+	MaxTierMessages int64
+	MaxTierAge      time.Duration
 	Compact              bool          // Run compaction on log clean
 	CompactMaxGoroutines int           // Max number of goroutines to use in a log compaction
 	// CompactMinAge is a protected compaction horizon: a segment is not eligible
@@ -205,6 +220,9 @@ func New(opts Options) (CommitLog, error) {
 	cleanerOpts.Retention.Bytes = opts.MaxLogBytes
 	cleanerOpts.Retention.Messages = opts.MaxLogMessages
 	cleanerOpts.Retention.Age = opts.MaxLogAge
+	cleanerOpts.Retention.TierBytes = opts.MaxTierBytes
+	cleanerOpts.Retention.TierMessages = opts.MaxTierMessages
+	cleanerOpts.Retention.TierAge = opts.MaxTierAge
 	cleaner := newDeleteCleaner(cleanerOpts)
 
 	compactCleanerOpts := compactCleanerOptions{

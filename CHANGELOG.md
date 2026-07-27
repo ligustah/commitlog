@@ -5,6 +5,30 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.27.0 — 2026-07-27
+
+- **Added**: `MaxTierBytes`, `MaxTierMessages` and `MaxTierAge` — retention
+  becomes **per tier** (C5). A segment over the local budget that also exists in
+  a `SegmentStore` has left the tier those limits govern rather than being
+  deleted; the record is gone only when the last tier's limit is reached.
+
+- **Changed**: `MaxLogBytes`, `MaxLogMessages` and `MaxLogAge` now bound LOCAL
+  disk alone and no longer count offloaded segments. Counting them deleted
+  records to reclaim space that offloading had already reclaimed — the budget an
+  offloaded segment belongs to is its tier's.
+
+  In practice this changes nothing yet, because the cleaners still never see
+  offloaded segments; C6 removes that exclusion. It is the behaviour that will
+  apply once they do.
+
+  A log with no `SegmentStore` has no offloaded segments, so the split is a
+  no-op and retention behaves exactly as before.
+
+  One asymmetry worth knowing: the local pass always retains the last segment,
+  because it is the one being appended to. A tier has no such segment, so tier
+  retention may reclaim every object in it — otherwise the oldest could never be
+  collected.
+
 ## v0.26.0 — 2026-07-27
 
 - **Added**: `segment.ReplaceOffloaded` — installs a freshly-written local
