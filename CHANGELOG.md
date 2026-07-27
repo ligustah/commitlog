@@ -5,6 +5,54 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.34.0 — 2026-07-27
+
+**Breaking.** Tier ownership moves out of the log. `v0.32.0`'s writer identity
+was the wrong layer, and this replaces it.
+
+- **Removed**: `TierWriter`, `SetTierWriter`, `AdoptTierWriters`, the writer
+  stamp in object keys, and the delete fence. Who owns a store is a question
+  about cluster membership, and nothing the log can observe answers it — so it
+  no longer pretends to.
+
+- **Added**: `Options.TierReadOnly` and `SetTierReadOnly`. A log whose tier is
+  read-only does not offload, does not rewrite a tiered segment, does not apply
+  tier retention, and refuses `DeleteStoreObjects`. Reads stay entirely
+  transparent, so a process that owns nothing still serves its log. Ownership
+  moves by the previous owner going read-only **before** the next comes out of
+  it.
+
+- **Added**: a **single-writer contract**, stated on the `CommitLog` interface
+  rather than left implicit, since it is now load-bearing. At most one process
+  may have a store writable at a time. The part that is easy to get wrong: an
+  ordered handover has to wait out both how long a former owner can still
+  *believe* it owns the tier **and** how long a write it already issued can
+  still be in flight, retries included. No amount of signalling shortens the
+  second — once a request is with the storage client it will land regardless of
+  what the sender has since learned.
+
+- **Changed**: every upload now gets its **own object key** rather than a
+  generation-numbered one. A deterministic key is wrong even for a single
+  writer: an upload that failed ambiguously may still be in flight, so retrying
+  to the same key races the attempt being retried and nothing can tell who won.
+  A fresh key makes that a spare object instead. The id is random rather than
+  counted, because a counter must be read from somewhere and every such place
+  is state a crash, a restart or a second process can leave stale.
+
+  This follows Kafka's tiered storage, which requires a unique id per copy
+  attempt *"even when it retries ... for the same log segment data."*
+
+  Generations are gone with it. Nothing ever recomputed a key from one — the
+  offload marker records keys verbatim and is the only thing that resolves them
+  — so existing objects stay readable and existing markers stay valid.
+
+- **Changed**: `tla/MultiWriter.tla` is reframed. It no longer describes the
+  log's defences, because there are none; it is the **evidence for the
+  contract**. The config renamed `MultiWriter_ContractBroken.cfg` shows what
+  the shipped code does when single ownership is violated — not a defect to fix
+  here, but the caller's obligation backed by a counterexample instead of a
+  warning.
+
 ## v0.33.0 — 2026-07-27
 
 - **Added**: `ExportTierState` / `ImportTierState` and the `TierObject` type —
