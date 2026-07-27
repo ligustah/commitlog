@@ -5,6 +5,46 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.35.0 — 2026-07-27
+
+**Breaking.** `SegmentStore` and the internal `segmentBacking` gain streaming
+reads. An out-of-tree store implementation needs two new methods.
+
+- **Added**: `SegmentStore.Stream(key, off) (io.ReadCloser, error)`. A sweep —
+  compaction, recovery, digest build, replay — reads a segment front to back,
+  but `ReadAt` alone cannot express "I want the rest of this object". Against
+  object storage that distinction is the bill: cost is per **request**, not per
+  byte, so scanning a 1 GiB object through a 1 MiB window was ~1024 GETs for
+  bytes one GET would have delivered.
+
+  Pull-shaped rather than a `WriteTo`, so a caller can stop early, and because
+  every backend already has a reader to hand back (gocloud's `NewRangeReader`,
+  `os.Open`). `Put` already takes an `io.Reader`, so the two directions stay
+  symmetric.
+
+- **Added**: `StreamPays()`, which says whether streaming beats ranged reads for
+  a given backing — true for a store, false for a local file.
+
+  This is where measurement changed the design. The intent was one streaming
+  path for local and remote alike; local turned out to be **measurably worse**.
+  A store charges per request, but a local read costs a syscall against an OS
+  already reading ahead, and opening a second handle to stream from costs a
+  syscall of its own. Routing local scans through a stream made this repo's
+  test suite take five times as long, all of it in file opens. So local scans
+  read exactly as they did before, and the choice is an explicit method rather
+  than a type switch.
+
+- A scan releases its stream when the **scan ends**, not when the caller
+  returns. A caller typically rewrites the segment straight after draining it,
+  and a deferred close has not run by then — on Windows an open read handle
+  blocks the rename that installs the rewrite, so this was 49 failing tests
+  rather than a slow leak.
+
+- Non-sequential reads fall back to a ranged read without disturbing the
+  stream's position, so a sweep that steps aside once carries on streaming.
+  Block-compressed segments use the same path, since a scan visits block
+  payloads in ascending physical order.
+
 ## v0.34.0 — 2026-07-27
 
 **Breaking.** Tier ownership moves out of the log. `v0.32.0`'s writer identity
