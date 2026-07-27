@@ -178,17 +178,67 @@ type CommitLog interface {
 	// deletion of what it replaced, or an offload whose marker was lost.
 	//
 	// This is deliberately an assertion the CALLER makes, not something the log
-	// infers. The claim being made is "that identity can no longer write", and
-	// nothing observable at this layer establishes it: an identity that looks
-	// idle may be a process about to come back from a pause with a PUT already
-	// in flight. Whatever fences the previous epoch — a consensus term that has
-	// moved on, a lease that has expired, an operator who confirmed the node is
-	// gone — lives above the log, so the claim has to come from there.
+	// infers. Nothing observable at this layer establishes it: an identity that
+	// looks idle may be a process about to come back from a pause with a PUT
+	// already in flight. Whatever retires the previous epoch — a consensus term
+	// that has moved on, a lease that has expired, an operator who confirmed
+	// the node is gone — lives above the log, so the claim comes from there.
 	//
-	// Adopting an identity that CAN still write reintroduces exactly the hazard
-	// the stamp removes, with the added twist that the damage is now a delete
-	// rather than an overwrite.
+	// The claim required is that the identity is no longer SERVING those
+	// objects, which is stronger than "no longer writing" and is the condition
+	// that actually matters. Where several processes share a store, each keeps
+	// its offload markers locally: a process that lost ownership still holds
+	// markers naming its objects and still reads through them, and nothing
+	// tells it to stop. Adopting a demoted-but-live peer's identity therefore
+	// lets this log delete objects that peer is actively reading — the failure
+	// the delete fence exists to prevent, arrived at by permission instead of
+	// by race.
+	//
+	// Adopting an identity that can still write is worse again: it reintroduces
+	// the hazard the stamp removes, with the damage now a delete rather than an
+	// overwrite, and a delete leaves nothing to recover.
 	AdoptTierWriters(ids ...string) error
+
+	// ExportTierState returns this log's tier bookkeeping — which store object
+	// currently holds each offloaded segment, and everything needed to place
+	// that segment without reading it.
+	//
+	// The bookkeeping is otherwise LOCAL to this process (one marker file per
+	// offloaded segment), which is fine while a store has one writer and fatal
+	// when ownership moves: the next owner holds no markers for anything its
+	// predecessor uploaded, so it cannot read those objects through the log,
+	// cannot avoid uploading a second copy of the same bytes, and can never
+	// reclaim them.
+	//
+	// Recovering it from the store instead does not work, which is worth
+	// stating because it looks like it should. Generations are per-writer, so
+	// one base offset may have objects from two writers and NOTHING in the
+	// store orders them — not the keys, not the sizes, not the timestamps.
+	//
+	// Replicate this through whatever gives the cluster a total order, and hand
+	// it to the next owner via ImportTierState.
+	ExportTierState() ([]TierObject, error)
+
+	// ImportTierState installs tier bookkeeping the caller says is current,
+	// returning how many segments changed. The caller's state is authoritative:
+	// this log cannot tell which of two objects is current, and does not try.
+	//
+	// For each entry the log must already hold the segment at that base offset.
+	// A segment whose bytes are local becomes offloaded, pointing at the object
+	// instead of uploading a duplicate; one already offloaded is repointed, and
+	// the objects it stops referencing join this log's lineage so they can be
+	// reclaimed later. The offsets must match what the segment holds — dropping
+	// local bytes for an object covering something else would swap a reader's
+	// data underneath it.
+	//
+	// The whole batch is validated before any of it is applied, including that
+	// the objects exist. A half-applied import would leave the log in a state
+	// the caller never described and cannot name in order to correct.
+	//
+	// Naming the active segment is an error, as is naming a segment this log
+	// does not have: extending the log's offset range with records it has never
+	// held is not something an import can do safely.
+	ImportTierState(objs []TierObject) (int, error)
 
 	// UnreferencedObjects lists objects in the SegmentStore that none of this
 	// log's offload markers point at — the garbage the tier protocol
@@ -202,11 +252,16 @@ type CommitLog interface {
 	// Fencing without this would trade a corruption bug for an unbounded
 	// storage bill, which is a better failure but still a failure.
 	//
-	// IMPORTANT: unreferenced means unreferenced BY THIS LOG. If several
-	// processes write to one store, another one's markers may name an object
-	// this log has never heard of, and deleting it would break that reader.
-	// Only the caller knows whether the tier is shared, so this reports rather
-	// than deletes; feed the result to DeleteStoreObjects when it is safe.
+	// IMPORTANT: unreferenced means unreferenced BY THIS LOG, and that
+	// distinction is load-bearing rather than cautionary. Offload markers are
+	// LOCAL to each process, so where a store is shared, another process's
+	// markers routinely name objects this log has never heard of — everything
+	// uploaded before this one took ownership, for a start. Deleting those
+	// would break a reader that is still serving them.
+	//
+	// Only the caller knows whether the store is shared and who else is live,
+	// so this reports rather than deletes; feed the result to
+	// DeleteStoreObjects once it is known to be safe.
 	UnreferencedObjects() ([]string, error)
 
 	// NewestOffset returns the offset of the last message in the log or -1 if
