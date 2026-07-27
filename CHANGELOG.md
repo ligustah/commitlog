@@ -5,6 +5,39 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.28.0 — 2026-07-27
+
+- **Breaking / Fixed**: offloaded segments are no longer exempt from compaction
+  and retention (C6). This is the change the previous four releases were
+  building toward, and the reason it matters is correctness, not disk use:
+  whatever garbage a segment held when it offloaded was frozen there
+  **permanently** — a tombstone that offloaded before it could be collected
+  never took effect, and every value it shadowed was kept with it.
+
+  `clean` no longer holds the offloaded prefix aside. A rewrite of an offloaded
+  segment becomes the next generation of its store objects
+  (`ReplaceOffloaded`), and per-tier retention means those bytes count toward
+  the tier's budget rather than escaping every limit.
+
+- **Breaking**: `CleanWithSpec` now returns the **superseded store objects**
+  alongside the verified floor: `(verified int64, superseded []string, err
+  error)`. They are deliberately not deleted — a reader that opened the segment
+  before the rewrite holds a backing over the old key and is entitled to finish,
+  and where replicas share a tier those writes belong to whoever holds
+  tier-write ownership. **A caller that ignores them leaks one object per
+  rewrite.** Empty for a log with no `SegmentStore`.
+
+  Two bugs found by fuzzing this, both worth recording:
+
+  - An **option-1** offloaded segment keeps its index on local disk, and the
+    rewrite replaced the index only for option 2. The stale index pointed seeks
+    at positions in the superseded object, so the log read back short and lost a
+    key outright. The rewrite's index is now installed over it — last, because
+    reopening it re-derives the segment's boundaries and needs the new block
+    mode, blocks and position.
+  - The fuzz harness itself discarded the superseded keys, which is exactly the
+    leak the contract warns about; its own no-orphans assertion caught it.
+
 ## v0.27.0 — 2026-07-27
 
 - **Added**: `MaxTierBytes`, `MaxTierMessages` and `MaxTierAge` — retention

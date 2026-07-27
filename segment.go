@@ -1406,6 +1406,13 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]s
 		s.indexCache.Invalidate(s.indexCacheKey())
 	}
 
+	// An option-1 offloaded segment keeps its index on LOCAL disk, and that
+	// index describes the bytes it was built from. Leaving it in place after a
+	// rewrite points every seek at positions in the superseded object — the
+	// records are still in the store, and the log reads back short. Install the
+	// rewrite's index over it, the same way a local Replace does.
+	localIndex := s.indexKey == "" && s.Index != nil && fresh.Index != nil
+
 	sb, err := newStoreBackingSize(s.store, newKey, size)
 	if err != nil {
 		return nil, err
@@ -1422,6 +1429,24 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]s
 	s.physPosition = size
 	s.blocks = fresh.blocks
 	s.blockMode = fresh.blockMode
+
+	// Installed LAST, because setupIndex re-derives the segment's boundaries
+	// from the index and needs the new blockMode, blocks and position to read it
+	// the way the rewrite wrote it.
+	if localIndex {
+		if err := s.Index.Close(); err != nil {
+			return nil, errors.Wrap(err, "close stale local index")
+		}
+		if err := fresh.Index.Close(); err != nil {
+			return nil, errors.Wrap(err, "close rewritten index")
+		}
+		if err := os.Rename(fresh.indexPath(), s.indexPath()); err != nil {
+			return nil, errors.Wrap(err, "install rewritten index")
+		}
+		if err := s.setupIndex(); err != nil {
+			return nil, errors.Wrap(err, "reopen rewritten index")
+		}
+	}
 	return superseded, nil
 }
 

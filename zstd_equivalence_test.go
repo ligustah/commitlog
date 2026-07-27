@@ -229,6 +229,6 @@ func readAllVisible(t *testing.T, l CommitLog) map[int64]string {
 // requireCleanOK runs CleanWithSpec discarding the verified floor.
 func requireCleanOK(t *testing.T, l CommitLog, spec CleanSpec) {
 	t.Helper()
-	_, err := l.CleanWithSpec(spec)
+	_, _, err := l.CleanWithSpec(spec)
 	require.NoError(t, err)
 }

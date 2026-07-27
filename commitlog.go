@@ -232,6 +232,7 @@ func New(opts Options) (CommitLog, error) {
 		TombstoneRetention: opts.CompactTombstoneRetention,
 	}
 	compactCleaner := newCompactCleaner(compactCleanerOpts)
+	compactCleaner.cache = opts.RemoteIndexCache
 
 	path, _ := filepath.Abs(opts.Path)
 	epochCache, err := newLeaderEpochCache(opts.Name, path)
@@ -1325,21 +1326,25 @@ func (l *commitLog) Clean() error {
 		spec.TombstoneGCBelow = l.HighWatermark()
 		spec.TombstoneRetention = l.Options.CompactTombstoneRetention
 	}
-	_, err := l.CleanWithSpec(spec)
+	_, _, err := l.CleanWithSpec(spec)
 	return err
 }
 
 // CleanWithSpec applies retention and a transaction-aware compaction pass.
 // See the interface doc for the returned verified floor.
-func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
+func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, []string, error) {
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.mu.RLock()
 	oldSegments := l.segments
 	l.mu.RUnlock()
+	// Drained per pass, under cleanMu, so the keys returned belong to this call.
+	l.compactCleaner.superseded = nil
 	cleaned, epochCache, verified, cleanErr := l.clean(spec, oldSegments)
+	superseded := l.compactCleaner.superseded
+	l.compactCleaner.superseded = nil
 	if cleaned == nil {
-		return -1, cleanErr
+		return -1, superseded, cleanErr
 	}
 	l.mu.Lock()
 	newSegments := l.segments
@@ -1363,9 +1368,9 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 	// A partial retention failure (cleanErr) still swapped in the surviving
 	// segments above; report it once the read path is consistent.
 	if cleanErr != nil {
-		return -1, cleanErr
+		return -1, superseded, cleanErr
 	}
-	return verified, err
+	return verified, superseded, err
 }
 
 // rebaseSegments adds the segments in from to the end of the slice of segments
@@ -1386,32 +1391,17 @@ func (l *commitLog) rebaseSegments(from, to []*segment, epochCache *leaderEpochC
 // CleanWithSpec; -1 when compaction did not run) and, if compaction ran, a
 // *leaderEpochCache maintaining the start offset for each new leader epoch.
 func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *leaderEpochCache, int64, error) {
-	// Offloaded segments are cold, sealed, and immutable in place — their bytes
-	// live in the store and their local .log is gone, so the retention/compaction
-	// rewriters (which create local working segments and rewrite in place) must
-	// not touch them. They are always the oldest, contiguous prefix; hold them
-	// aside, clean the rest, and prepend them back. Their eventual removal is
-	// driven explicitly by the caller (TruncateBefore, whose Delete cleans the
-	// store), not by the internal cleaners. Guarded so a store-less log takes the
-	// exact original path.
-	var offloadedPrefix []*segment
-	if l.SegmentStore != nil {
-		i := 0
-		for i < len(segments) && segments[i].isOffloaded() {
-			i++
-		}
-		if i > 0 {
-			offloadedPrefix = segments[:i:i]
-			segments = segments[i:]
-		}
-	}
-	if len(offloadedPrefix) > 0 {
-		cleaned, epochCache, verified, err := l.clean(spec, segments)
-		if cleaned != nil {
-			cleaned = append(append([]*segment{}, offloadedPrefix...), cleaned...)
-		}
-		return cleaned, epochCache, verified, err
-	}
+	// Offloaded segments used to be held aside here as an immutable prefix,
+	// because the rewriters build a local working segment and rewrite in place
+	// and an offloaded segment has no local file to rewrite. That exclusion is
+	// why whatever garbage a segment held when it offloaded was frozen there
+	// permanently — a tombstone that offloaded before it could be collected
+	// never took effect, and every value it shadowed was kept with it.
+	//
+	// They are no longer excluded. A rewrite of an offloaded segment becomes the
+	// next generation of its store objects instead (see ReplaceOffloaded), and
+	// retention is per tier, so their bytes count toward the tier's budget
+	// rather than escaping every limit.
 	cleaned, err := l.deleteCleaner.Clean(segments)
 	if err != nil {
 		// A partial retention failure still hands back the surviving

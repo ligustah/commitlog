@@ -30,6 +30,15 @@ type compactCleanerOptions struct {
 // compacted ones, i.e. retaining only the last message for a given key.
 type compactCleaner struct {
 	compactCleanerOptions
+	// cache is needed to invalidate an offloaded segment's index entry when a
+	// rewrite supersedes the object it describes.
+	cache *RemoteIndexCache
+	// superseded collects the store objects this pass replaced. They are NOT
+	// deleted here: a reader that opened a segment before its rewrite holds a
+	// backing over the old key and is entitled to finish, and in a shared tier
+	// the layer above owns writes to those objects. Handed to the Clean caller
+	// to delete when it knows both are safe.
+	superseded []string
 }
 
 // NewCompactCleaner returns a new cleaner which performs log compaction by
@@ -39,7 +48,7 @@ func newCompactCleaner(opts compactCleanerOptions) *compactCleaner {
 	if opts.MaxGoroutines == 0 {
 		opts.MaxGoroutines = defaultCompactMaxGoroutines
 	}
-	return &compactCleaner{opts}
+	return &compactCleaner{compactCleanerOptions: opts}
 }
 
 // CompactSpec performs log compaction under a CleanSpec: segments up to but
@@ -807,7 +816,23 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	if err := cleaned.Sync(); err != nil {
 		return nil, removed, nil, err
 	}
-	// Otherwise replace the old segment with the compacted one.
+	// Install the rewrite. An offloaded segment cannot take the local path:
+	// Replace renames over the source's local files, and an offloaded segment
+	// has none. It instead becomes the next generation of its store objects,
+	// and the segment object itself carries on — so the caller keeps the SAME
+	// segment rather than the working copy, which is only the vehicle.
+	if seg.isOffloaded() {
+		superseded, err := seg.ReplaceOffloaded(cleaned, c.cache)
+		if err != nil {
+			return nil, removed, nil, err
+		}
+		c.superseded = append(c.superseded, superseded...)
+		if err := cleaned.Delete(); err != nil { // the local vehicle is done
+			return nil, removed, nil, err
+		}
+		c.refreshDigest(seg, stamp, stampHdrs, sc)
+		return seg, removed, assigns, nil
+	}
 	if err = cleaned.Replace(seg); err != nil {
 		return nil, removed, nil, err
 	}

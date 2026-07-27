@@ -195,7 +195,7 @@ func FuzzCompactionRecovery(f *testing.F) {
 		for p := s.intn(4); p > 0; p-- {
 			bs := spec
 			bs.maxRewrites = 1 + s.intn(2) // 1..2 segment rewrites this pass
-			_, berr := l.CleanWithSpec(bs)
+			_, _, berr := l.CleanWithSpec(bs)
 			require.NoError(t, berr)
 		}
 
@@ -208,13 +208,13 @@ func FuzzCompactionRecovery(f *testing.F) {
 		fzAssertNoOrphanedRecords(t, l, markerOffs, txnOffs)
 
 		// A final unbounded pass fully compacts, then the oracle must hold.
-		_, err := l.CleanWithSpec(spec)
+		_, _, err := l.CleanWithSpec(spec)
 		require.NoError(t, err)
 		got := fzReadAll(t, l)
 		fzAssertOracle(t, got, expect, aborted)
 
 		// Convergence: a second pass must not change the observable state.
-		_, err = l.CleanWithSpec(spec)
+		_, _, err = l.CleanWithSpec(spec)
 		require.NoError(t, err)
 		got2 := fzReadAll(t, l)
 		require.Equal(t, got, got2, "compaction did not converge: second pass changed the log")

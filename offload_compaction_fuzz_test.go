@@ -11,18 +11,23 @@ package commitlog
 // halve the workload each of them drives. Separate targets also keep each
 // corpus meaningful.
 //
-// Verified against the code before writing it, per the interactions worth
-// covering:
-//   - compaction never rewrites an offloaded segment: clean holds the offloaded
-//     prefix aside and prepends it back (commitlog.go), so latest-per-key must
-//     hold across a partially-offloaded log without the store bytes moving.
+// Verified against the code, per the interactions worth covering. Two of these
+// premises were TRUE WHEN WRITTEN and are no longer, which is worth recording
+// rather than quietly deleting — the assertions still hold, but for different
+// reasons:
+//   - compaction used to skip offloaded segments entirely, so latest-per-key
+//     held across a partially-offloaded log because the store bytes never
+//     moved. It now rewrites them as a new generation of their objects, so the
+//     same assertion is testing something strictly harder: that the survivors
+//     are right ACROSS a rewrite, not merely preserved by not doing one.
+//   - RemoteIndexCache used to have no invalidate-by-key, which was safe only
+//     because an offloaded segment was never rewritten in place: a dead entry
+//     could occupy budget but never be served. It now has one, and a rewrite
+//     calls it — so this target also exercises that path.
 //   - segment.Delete removes BOTH store objects (log + index), so retention
 //     over offloaded segments must not orphan objects — asserted here against
-//     store.List() rather than assumed.
-//   - RemoteIndexCache has no invalidate-by-key, but base offsets are monotonic
-//     and offloaded segments are never rewritten in place, so a dead entry can
-//     never be SERVED, only occupy budget until eviction. Reads after truncation
-//     therefore still have to be correct, which is what the oracle checks.
+//     store.List() rather than assumed. Still true, and now load-bearing for
+//     superseded generations too.
 
 import (
 	"fmt"
@@ -151,12 +156,21 @@ func FuzzOffloadCompactionRetention(f *testing.F) {
 				}
 			case 1: // compact
 				hw := cl.HighWatermark()
-				_, err := cl.CleanWithSpec(CleanSpec{
+				_, superseded, err := cl.CleanWithSpec(CleanSpec{
 					Ceiling:            hw + 1,
 					TombstoneGCBelow:   hw + 1,
 					TombstoneRetention: time.Hour,
 				})
 				require.NoError(t, err)
+				// Deleting the superseded generations is the CALLER's job — a
+				// rewrite hands them back rather than removing them, so a reader
+				// holding the old generation can finish. Ignoring them leaks an
+				// object per rewrite, which the no-orphans assertion below
+				// catches; doing it here is what a real caller does. Safe
+				// immediately in a single-threaded harness with no live reader.
+				for _, k := range superseded {
+					require.NoError(t, store.Delete(k))
+				}
 			case 2: // retain (drop a prefix)
 				if newest > 1 {
 					require.NoError(t, cl.TruncateBefore(int64(1+s.intn(int(newest)))))

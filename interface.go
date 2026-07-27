@@ -185,7 +185,22 @@ type CommitLog interface {
 	// capped at StripBelow-1 — never the active segment or an age-protected
 	// one, whose records keep their headers and abort markers even below
 	// the LSO.
-	CleanWithSpec(spec CleanSpec) (int64, error)
+	//
+	// It also returns the SUPERSEDED STORE OBJECTS: when the pass rewrote a
+	// segment whose bytes live in a SegmentStore, the rewrite became a new
+	// generation of that segment's objects and the previous generation's keys
+	// are returned here. They are deliberately NOT deleted:
+	//   - a reader that opened the segment before the rewrite holds a backing
+	//     over the old key and is entitled to finish; deleting underneath it
+	//     would turn a rewrite into a read error, and only the caller knows
+	//     when no such reader remains;
+	//   - where replicas share a tier, writes to those objects belong to
+	//     whichever node holds tier-write ownership, which this layer does not
+	//     know about.
+	// Deleting them is therefore the caller's call, and must be explicit — a
+	// rewrite that empties a segment leaves objects with nothing to overwrite
+	// them. Empty for a log with no SegmentStore.
+	CleanWithSpec(spec CleanSpec) (verified int64, superseded []string, err error)
 
 	// NotifyLEO registers and returns a channel which is closed when messages
 	// past the given log end offset are added to the log. If the given offset
