@@ -5,6 +5,50 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.33.0 — 2026-07-27
+
+- **Added**: `ExportTierState` / `ImportTierState` and the `TierObject` type —
+  moving a log's tier bookkeeping between processes.
+
+  That bookkeeping (which store object currently holds each offloaded segment)
+  lives in local marker files. Fine while one process owns a store; fatal when
+  ownership moves. The next owner holds no markers for anything its predecessor
+  uploaded, so it cannot read those objects through the log, cannot avoid
+  uploading a **second copy of the same bytes**, and can never reclaim them.
+
+  **Recovering it by scanning the store does not work.** Generations are
+  per-writer — each writer derives the next from its own local marker — so one
+  base offset may carry objects from two writers with nothing in the store to
+  order them: not the keys, not the sizes, not the timestamps. Adoption by
+  discovery would be guessing at which object is current.
+
+  So the total order comes from whatever gives the cluster one. The caller's
+  state is authoritative; the log honours a decision it cannot itself make,
+  exactly as it does for `CleanSpec.Ceiling`.
+
+  Importing a segment whose bytes are local attaches it to the existing object
+  instead of uploading a duplicate, and brings those objects into the log's
+  lineage so retention can reclaim them later. Guards worth knowing: the
+  offsets must match what the segment holds (adoption **drops** the local
+  bytes, so an object covering other records would swap a reader's data
+  underneath it, silently); the whole batch is validated — objects' existence
+  included — before any of it is applied; and the active segment cannot be
+  named.
+
+- **Changed**: `AdoptTierWriters`' documented condition was too weak. It said
+  the identity must be one that "can no longer write". The condition that
+  actually matters is that it is **no longer serving** those objects, which is
+  stronger: markers are local, so a process that lost ownership still holds
+  markers naming its objects and still reads through them, and nothing tells it
+  to stop. Adopting a demoted-but-live peer's identity would let this log
+  delete objects that peer is actively reading.
+
+- **Fixed**: `offloadTo` left `storeGen` and `storeWriter` unset, right only by
+  accident (a first offload is always generation 0), while reopening a log
+  filled both from the marker — so a segment offloaded in this process
+  disagreed with the same segment after a restart. The offload and adopt paths
+  now share one attach step, so they cannot drift.
+
 ## v0.32.0 — 2026-07-27
 
 - **Added**: `TierWriter` / `SetTierWriter` — an identity stamped into the
