@@ -16,8 +16,8 @@ var computeTTL = func(age time.Duration) int64 {
 
 // deleteSegment removes a segment's backing files. This function exists for
 // mocking purposes (fault injection in partial-failure tests).
-var deleteSegment = func(s *segment, currentWriter string) error {
-	return s.deleteFenced(currentWriter)
+var deleteSegment = func(s *segment) error {
+	return s.Delete()
 }
 
 // dropOldestPrefix deletes the drop segments OLDEST FIRST and returns the
@@ -26,9 +26,9 @@ var deleteSegment = func(s *segment, currentWriter string) error {
 // order means a partial failure removes a pure prefix of the log: the
 // surviving slice is always contiguous (no holes for readers to fall into),
 // and every deleted segment is gone from the returned read path.
-func dropOldestPrefix(drop, keep []*segment, currentWriter string) ([]*segment, error) {
+func dropOldestPrefix(drop, keep []*segment) ([]*segment, error) {
 	for j, s := range drop {
-		if err := deleteSegment(s, currentWriter); err != nil {
+		if err := deleteSegment(s); err != nil {
 			return append(drop[j:], keep...), err
 		}
 	}
@@ -61,10 +61,6 @@ type deleteCleanerOptions struct {
 // segments based on the retention policy.
 type deleteCleaner struct {
 	deleteCleanerOptions
-	// writer is the log's current tier-write identity for the pass in flight,
-	// set by Clean. Deletes of store objects are fenced against it. Safe as
-	// per-cleaner state because passes are serialized by the log's clean mutex.
-	writer string
 }
 
 // newDeleteCleaner returns a new cleaner which enforces log retention
@@ -77,9 +73,8 @@ func newDeleteCleaner(opts deleteCleanerOptions) *deleteCleaner {
 // Deletion only occurs at the segment granularity.
 // skipTiered leaves the tier untouched: no tier retention, because deleting a
 // tier's copy is a write to storage that may be shared with other replicas.
-func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool, writer string) ([]*segment, error) {
+func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool) ([]*segment, error) {
 	var err error
-	c.writer = writer
 	if len(segments) == 0 || (c.noRetentionLimits() && c.noTierLimits()) {
 		return segments, nil
 	}
@@ -204,7 +199,7 @@ func (c *deleteCleaner) cleanTier(segments []*segment) ([]*segment, error) {
 				break
 			}
 		}
-		if segments, err = dropOldestPrefix(segments[:idx], segments[idx:], c.writer); err != nil {
+		if segments, err = dropOldestPrefix(segments[:idx], segments[idx:]); err != nil {
 			return segments, err
 		}
 	}
@@ -231,7 +226,7 @@ func (c *deleteCleaner) applyTierLimit(segments []*segment, limit int64,
 	for i := len(segments) - 1; i >= 0; i-- {
 		total += measure(segments[i])
 		if total > limit {
-			return dropOldestPrefix(segments[:i+1], segments[i+1:], c.writer)
+			return dropOldestPrefix(segments[:i+1], segments[i+1:])
 		}
 	}
 	return segments, nil
@@ -260,7 +255,7 @@ func (c *deleteCleaner) applyMessagesLimit(segments []*segment) ([]*segment, err
 		}
 		cleanedSegments = append([]*segment{s}, cleanedSegments...)
 	}
-	return dropOldestPrefix(segments[:i+1], cleanedSegments, c.writer)
+	return dropOldestPrefix(segments[:i+1], cleanedSegments)
 }
 
 func (c *deleteCleaner) applyBytesLimit(segments []*segment) ([]*segment, error) {
@@ -286,7 +281,7 @@ func (c *deleteCleaner) applyBytesLimit(segments []*segment) ([]*segment, error)
 		}
 		cleanedSegments = append([]*segment{s}, cleanedSegments...)
 	}
-	return dropOldestPrefix(segments[:i+1], cleanedSegments, c.writer)
+	return dropOldestPrefix(segments[:i+1], cleanedSegments)
 }
 
 func (c *deleteCleaner) applyAgeLimit(segments []*segment) ([]*segment, error) {
@@ -308,5 +303,5 @@ func (c *deleteCleaner) applyAgeLimit(segments []*segment) ([]*segment, error) {
 			break
 		}
 	}
-	return dropOldestPrefix(segments[:idx], segments[idx:], c.writer)
+	return dropOldestPrefix(segments[:idx], segments[idx:])
 }

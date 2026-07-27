@@ -97,6 +97,17 @@ type commitLog struct {
 	// because a pass reads it while the owner may be updating it.
 	tierWriterMu sync.RWMutex
 	tierWriterID string
+	// reclaimable holds keys THIS log superseded: objects its own markers named
+	// until a rewrite replaced them. Their lineage is not in question, so the
+	// delete fence does not apply — fencing them would refuse the caller the
+	// very keys CleanWithSpec just told it to delete, which after an identity
+	// change is every rewrite, forever.
+	//
+	// adopted holds identities the caller has asserted this log may also
+	// reclaim; see AdoptTierWriters. Both are guarded by tierWriterMu, which
+	// already serialises the identity they are relative to.
+	reclaimable  map[string]bool
+	adopted      map[string]bool
 	syncMu       sync.Mutex
 	syncDurable  int64
 	syncFlushing bool
@@ -533,22 +544,81 @@ func (l *commitLog) SetTierWriter(id string) error {
 	return nil
 }
 
+// AdoptTierWriters declares identities whose store objects this log may also
+// reclaim. See the interface doc.
+func (l *commitLog) AdoptTierWriters(ids ...string) error {
+	for _, id := range ids {
+		if id == "" || !validTierWriter(id) {
+			return errors.Errorf(
+				"commitlog: cannot adopt %q: use letters, digits, '-' or '_' (max %d)",
+				id, maxTierWriterLen)
+		}
+	}
+	l.tierWriterMu.Lock()
+	defer l.tierWriterMu.Unlock()
+	if l.adopted == nil {
+		l.adopted = make(map[string]bool, len(ids))
+	}
+	for _, id := range ids {
+		l.adopted[id] = true
+	}
+	return nil
+}
+
+// noteSuperseded records keys this log replaced, so reclaiming them is not
+// fenced against an identity that has since moved on.
+func (l *commitLog) noteSuperseded(keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	l.tierWriterMu.Lock()
+	defer l.tierWriterMu.Unlock()
+	if l.reclaimable == nil {
+		l.reclaimable = make(map[string]bool, len(keys))
+	}
+	for _, k := range keys {
+		l.reclaimable[k] = true
+	}
+}
+
+// mayReclaim reports whether this log is entitled to delete key, and is the one
+// place the fence is decided.
+func (l *commitLog) mayReclaim(key string) (bool, string, string) {
+	l.tierWriterMu.RLock()
+	defer l.tierWriterMu.RUnlock()
+	w := storeKeyWriter(key)
+	switch {
+	case w == "":
+		// Predates any identity; nobody can be shown not to own it.
+		return true, w, l.tierWriterID
+	case w == l.tierWriterID:
+		return true, w, l.tierWriterID
+	case l.reclaimable[key]:
+		// This log's own marker named it until a rewrite replaced it, so its
+		// lineage is this log's regardless of which identity wrote the bytes.
+		return true, w, l.tierWriterID
+	case l.adopted[w]:
+		return true, w, l.tierWriterID
+	}
+	return false, w, l.tierWriterID
+}
+
 // DeleteStoreObjects removes store objects the current tier writer owns. See
 // the interface doc.
 func (l *commitLog) DeleteStoreObjects(keys []string) ([]string, error) {
 	if l.SegmentStore == nil || len(keys) == 0 {
 		return nil, nil
 	}
-	writer := l.tierWriter()
 	deleted := make([]string, 0, len(keys))
 	for _, key := range keys {
-		if w := storeKeyWriter(key); w != "" && w != writer {
+		if ok, w, writer := l.mayReclaim(key); !ok {
 			// Reported rather than skipped: a caller handing over a key it does
 			// not own has lost a race it does not know it lost, and silently
 			// leaving the object behind would look identical to success while
 			// the storage bill grows.
 			return deleted, errors.Errorf(
-				"commitlog: refusing to delete %s: written by %q, current writer is %q",
+				"commitlog: refusing to delete %s: written by %q, current writer is %q "+
+					"(adopt it if that identity can no longer write)",
 				key, w, writer)
 		}
 		if err := l.SegmentStore.Delete(key); err != nil {
@@ -556,6 +626,11 @@ func (l *commitLog) DeleteStoreObjects(keys []string) ([]string, error) {
 		}
 		deleted = append(deleted, key)
 	}
+	l.tierWriterMu.Lock()
+	for _, key := range deleted {
+		delete(l.reclaimable, key)
+	}
+	l.tierWriterMu.Unlock()
 	return deleted, nil
 }
 
@@ -1567,6 +1642,10 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, []string, error) {
 	cleaned, epochCache, verified, cleanErr := l.clean(spec, oldSegments)
 	superseded := l.compactCleaner.superseded
 	l.compactCleaner.superseded = nil
+	// Recorded even on a failed pass: an object is superseded the moment its
+	// replacement is committed, and a pass that failed afterwards must not turn
+	// the objects it already replaced into garbage nobody may remove.
+	l.noteSuperseded(superseded)
 	if cleaned == nil {
 		return -1, superseded, cleanErr
 	}
@@ -1626,7 +1705,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 	// next generation of its store objects instead (see ReplaceOffloaded), and
 	// retention is per tier, so their bytes count toward the tier's budget
 	// rather than escaping every limit.
-	cleaned, err := l.deleteCleaner.Clean(segments, spec.SkipTiered, spec.TierWriter)
+	cleaned, err := l.deleteCleaner.Clean(segments, spec.SkipTiered)
 	if err != nil {
 		// A partial retention failure still hands back the surviving
 		// segments; propagate them so the caller swaps them in — the deleted

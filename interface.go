@@ -160,8 +160,35 @@ type CommitLog interface {
 	//
 	// Deleting is idempotent: a key that is already gone is not an error.
 	// Unstamped keys are NOT fenced, since they predate any identity and no
-	// writer can be shown not to own them.
+	// writer can be shown not to own them. Neither are keys THIS log
+	// superseded: a superseded object is one this log's own marker named until
+	// a rewrite replaced it, so its lineage is not in doubt whatever identity
+	// wrote the bytes. Fencing those would refuse the caller the very keys
+	// CleanWithSpec just handed it — which, after an identity change, is every
+	// rewrite from then on.
+	//
+	// Anything else stamped by another identity is refused, and needs an
+	// explicit AdoptTierWriters claim.
 	DeleteStoreObjects(keys []string) ([]string, error)
+
+	// AdoptTierWriters declares identities whose store objects this log may
+	// also reclaim, for the objects the fence would otherwise strand: those
+	// written under an identity this process no longer holds and did not
+	// supersede in its current lifetime — a crash between a rewrite and the
+	// deletion of what it replaced, or an offload whose marker was lost.
+	//
+	// This is deliberately an assertion the CALLER makes, not something the log
+	// infers. The claim being made is "that identity can no longer write", and
+	// nothing observable at this layer establishes it: an identity that looks
+	// idle may be a process about to come back from a pause with a PUT already
+	// in flight. Whatever fences the previous epoch — a consensus term that has
+	// moved on, a lease that has expired, an operator who confirmed the node is
+	// gone — lives above the log, so the claim has to come from there.
+	//
+	// Adopting an identity that CAN still write reintroduces exactly the hazard
+	// the stamp removes, with the added twist that the damage is now a delete
+	// rather than an overwrite.
+	AdoptTierWriters(ids ...string) error
 
 	// UnreferencedObjects lists objects in the SegmentStore that none of this
 	// log's offload markers point at — the garbage the tier protocol

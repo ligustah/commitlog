@@ -203,31 +203,37 @@ func TestUnreferencedObjectsFindsSupersededOnes(t *testing.T) {
 	require.NotEmpty(t, readFrom(t, l), "and the log still reads")
 }
 
-// Retention is the path that actually deletes tier objects in production, so
-// the fence has to hold there and not just on an explicit delete call. A stale
-// writer running its own retention pass must not drop a segment whose object
-// belongs to the current writer.
-func TestRetentionRefusesAnotherWritersSegment(t *testing.T) {
-	l, _, seg := offloadedFixture(t, nil)
+// Retention must keep working across an identity change, and this is the test
+// that says so, because the obvious design does not.
+//
+// Fencing a HELD segment against the current identity looks like the same
+// defence as fencing a key from a listing, but it is not. After ownership
+// moves, every segment already in the tier carries the previous identity's
+// stamp — so a fenced retention pass can never drop its oldest segment again
+// and the tier grows without bound. That is strictly worse than the orphaned
+// object the fence was protecting against.
+//
+// What entitles the log here is not the stamp but the marker: the segment's own
+// offload marker names the object.
+func TestRetentionDropsASegmentStampedByAPreviousIdentity(t *testing.T) {
+	_, store, seg := offloadedFixture(t, nil)
 
-	// The segment's object was written by someone else.
+	seg.RLock()
+	key := seg.storeKey
+	seg.RUnlock()
+	require.NotEmpty(t, key)
+
+	// The object in the tier was written before ownership moved.
 	seg.Lock()
-	seg.storeKey = segmentStoreKey(seg.BaseOffset, 0, "nodeB")
-	seg.storeWriter = "nodeB"
+	seg.storeWriter = "nodeA"
 	seg.Unlock()
 
-	err := deleteSegment(seg, "nodeA")
-	require.Error(t, err, "a writer must not delete another's object")
-	require.Contains(t, err.Error(), "current writer is \"nodeA\"")
+	require.NoError(t, deleteSegment(seg),
+		"retention must still drop a segment the log holds")
 
-	// And the retention machinery propagates that rather than swallowing it and
-	// reporting the segment gone.
-	survivors, err := dropOldestPrefix([]*segment{seg}, nil, "nodeA")
-	require.Error(t, err)
-	require.Equal(t, []*segment{seg}, survivors,
-		"a refused delete must leave the segment in the read path")
-
-	_ = l
+	keys, err := store.List()
+	require.NoError(t, err)
+	require.NotContains(t, keys, key, "its object must go with it")
 }
 
 // An object written under an identity this log no longer holds cannot be
@@ -257,4 +263,117 @@ func TestObjectsFromAPreviousIdentityNeedReclaiming(t *testing.T) {
 	orphans, err := l.UnreferencedObjects()
 	require.NoError(t, err)
 	require.Contains(t, orphans, old)
+}
+
+// The two reclamation calls have to compose ACROSS an identity change, which is
+// the case that actually happens in production. A rewrite supersedes the object
+// the PREVIOUS identity wrote, so a fence applied to superseded keys refuses the
+// caller the very keys the pass just handed it — not once, but on every rewrite
+// from the failover onwards.
+//
+// A superseded object is one this log's own marker named until the rewrite
+// replaced it, so its lineage is not in doubt and the fence must not apply.
+func TestReclamationComposesAfterAWriterChange(t *testing.T) {
+	dir := tempDir(t)
+	store, err := NewFileSegmentStore(filepath.Join(dir, "store"))
+	require.NoError(t, err)
+
+	l, cleanup := setupWithOptions(t, Options{
+		Path:             dir,
+		MaxSegmentBytes:  128,
+		Compact:          true,
+		SegmentStore:     store,
+		TierWriter:       "nodeA",
+		DisableAutoClean: true,
+	})
+	defer cleanup()
+
+	// One key many times, so the sealed segments are full of superseded copies
+	// and a later pass has something to rewrite.
+	var last int64
+	for i := 0; i < 30; i++ {
+		offs, err := l.Append([]*Message{{Key: []byte("k"), Value: []byte("value padding")}})
+		require.NoError(t, err)
+		last = offs[0]
+	}
+	for _, k := range []string{"pad0", "pad1"} {
+		offs, err := l.Append([]*Message{{Key: []byte(k), Value: []byte("p")}})
+		require.NoError(t, err)
+		last = offs[0]
+	}
+	l.SetHighWatermark(last)
+
+	n, err := l.OffloadBefore(last)
+	require.NoError(t, err)
+	require.Positive(t, n, "the tier must hold objects stamped by the first identity")
+
+	// Ownership moves to this process under a new identity BEFORE anything is
+	// compacted, so everything the next pass supersedes was written by the
+	// previous identity — which is the situation after any real failover.
+	require.NoError(t, l.SetTierWriter("nodeB"))
+
+	hw := l.HighWatermark()
+	_, superseded, err := l.CleanWithSpec(CleanSpec{
+		Ceiling: hw + 1, TombstoneGCBelow: hw + 1,
+	})
+	require.NoError(t, err)
+
+	var stale []string
+	for _, k := range superseded {
+		if storeKeyWriter(k) == "nodeA" {
+			stale = append(stale, k)
+		}
+	}
+	require.NotEmpty(t, stale,
+		"the fixture must supersede at least one object the previous identity wrote")
+
+	deleted, err := l.DeleteStoreObjects(superseded)
+	require.NoError(t, err,
+		"what a pass supersedes, the caller must be able to delete — otherwise "+
+			"every rewrite after a failover leaks an object permanently")
+	require.ElementsMatch(t, superseded, deleted)
+
+	keys, err := store.List()
+	require.NoError(t, err)
+	for _, k := range stale {
+		require.NotContains(t, keys, k)
+	}
+	require.NotEmpty(t, readFrom(t, l), "and the log still reads")
+}
+
+// The escape hatch for objects the fence would otherwise strand for good: ones
+// written under an identity this process no longer holds and did not supersede
+// in its current lifetime — a crash between a rewrite and the delete of what it
+// replaced. Only the caller can assert the old identity is finished, so it has
+// to say so explicitly.
+func TestAdoptTierWritersAllowsReclaimingAPreviousIdentity(t *testing.T) {
+	dir := tempDir(t)
+	store, err := NewFileSegmentStore(filepath.Join(dir, "store"))
+	require.NoError(t, err)
+
+	l, cleanup := setupWithOptions(t, Options{
+		Path: dir, SegmentStore: store, TierWriter: "epoch2",
+	})
+	defer cleanup()
+
+	stranded := segmentStoreKey(9, 0, "epoch1")
+	require.NoError(t, store.Put(stranded, strings.NewReader("x"), 1))
+
+	_, err = l.DeleteStoreObjects([]string{stranded})
+	require.Error(t, err, "an unadopted identity stays fenced")
+	require.Contains(t, err.Error(), "adopt it")
+
+	require.Error(t, l.AdoptTierWriters("bad.id"), "adoption validates like any id")
+	require.Error(t, l.AdoptTierWriters(""), "the unstamped case is not an identity")
+
+	require.NoError(t, l.AdoptTierWriters("epoch1"))
+	deleted, err := l.DeleteStoreObjects([]string{stranded})
+	require.NoError(t, err)
+	require.Equal(t, []string{stranded}, deleted)
+
+	// Adoption is specific: it does not open the fence generally.
+	other := segmentStoreKey(10, 0, "epoch3")
+	require.NoError(t, store.Put(other, strings.NewReader("x"), 1))
+	_, err = l.DeleteStoreObjects([]string{other})
+	require.Error(t, err, "adopting one identity must not adopt every identity")
 }

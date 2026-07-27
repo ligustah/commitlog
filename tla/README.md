@@ -21,13 +21,14 @@ transparency), not the byte-level file format. They are grounded in the code —
 | `CommitLog.tla` | append / commit / checkpoint / crash + tail recovery / truncation | `commitlog.go` (`SetHighWatermark`, `checkpointHW`, `RecoverTail`, `Truncate`, `TruncateBefore`) |
 | `Compaction.tla` | transaction-aware compaction: latest-per-key, aborted-shadowing, tombstone GC, stripping, convergence | `compact_cleaner.go` |
 | `Offload.tla` | tiered storage: read-through + LRU index cache with pinning | `segment_store.go`, `index_cache.go` |
-| `MultiWriter.tla` | tier writes when two processes may each believe they own them: writer-stamped keys, fenced deletes, reclaimable garbage | `segment.go` (`segmentStoreKey`, `deleteFenced`), `commitlog.go` (`SetTierWriter`, `DeleteStoreObjects`, `UnreferencedObjects`) |
+| `MultiWriter.tla` | tier writes when two processes may each believe they own them: writer-stamped keys, fenced deletes, reclaimable garbage | `segment.go` (`segmentStoreKey`, `Delete`), `commitlog.go` (`SetTierWriter`, `DeleteStoreObjects`, `UnreferencedObjects`) |
 
 Each spec has a `.cfg` (the verified configuration) plus at least one
 `*_Buggy*.cfg` that swaps in a deliberately broken variant to show the
-invariants have teeth (TLC produces a counterexample). `MultiWriter` has two,
-one per defence it models — an unstamped key and an unfenced delete fail in
-different ways, and a single config could only demonstrate one of them.
+invariants have teeth (TLC produces a counterexample). `MultiWriter` has three,
+one per defence it models — an unstamped key, an unfenced delete, and a fence
+with no lineage rule fail in three different ways, and a single config could
+only demonstrate one of them.
 
 ## Running
 
@@ -61,6 +62,7 @@ java -cp tla2tools.jar tlc2.TLC -workers auto -config Compaction_Buggy.cfg Compa
 java -cp tla2tools.jar tlc2.TLC -workers auto -config Offload_Buggy.cfg     Offload.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_Buggy.cfg       MultiWriter.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_BuggyDelete.cfg MultiWriter.tla
+java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_BuggyLeak.cfg   MultiWriter.tla
 ```
 
 ## Results
@@ -70,7 +72,7 @@ java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_BuggyDelete.cf
 | `CommitLog` | 9,984 | all invariants hold |
 | `Compaction` | 813,616 | all invariants hold |
 | `Offload` | 5,441 | all invariants hold |
-| `MultiWriter` | 1,344 | all invariants hold |
+| `MultiWriter` | 25,212 | all invariants hold |
 
 Each `*_Buggy.cfg` produces the expected counterexample (see below).
 
@@ -185,6 +187,13 @@ Invariants:
 - **ReclaimAttributable** — every object is either live (some marker names it)
   or carries a stamp saying who may reclaim it. Fencing converts corruption
   into garbage, so the garbage has to stay accountable or the leak is unbounded.
+- **EveryOrphanReclaimable** — an object that is no longer live can still be
+  *removed* by the process whose lineage produced it. This is the one that
+  bounds the cost of fencing, and the model earns its keep here: a process
+  writes under a succession of identities (`SetTierWriter` moves it on at every
+  leadership change), so after a failover every object already in the tier
+  carries the **previous** stamp. A fence applied on the stamp alone therefore
+  strands all of them permanently.
 
 The model exists because the hazard is easy to argue about incorrectly. It is
 *not* that consensus is unreliable. It is that consensus establishes who leads
@@ -199,6 +208,14 @@ they own the tier compute the same next generation and address the same key.
 generation only. TLC reports **NoClobber** violated in four states — elect the
 new owner, the old one (not yet knowing) offloads, the new one offloads, and the
 second PUT silently replaces the first at the identical key.
+
+**Teeth** (`MultiWriter_BuggyLeak.cfg`, `LineageReclaim = FALSE`): stamped keys
+and fenced deletes, but without the rule that a writer may reclaim keys its own
+marker named. TLC reports **EveryOrphanReclaimable** violated. Unlike the
+corruption the fence prevents, this failure is permanent and grows — which is
+why a held segment's object is never fenced against the current identity
+(`segment.Delete`) and why superseded keys are exempt in `DeleteStoreObjects`:
+the marker naming an object is a stronger claim of ownership than the stamp.
 
 **Teeth** (`MultiWriter_BuggyDelete.cfg`, `FencedDelete = FALSE`): stamped keys,
 unfenced deletes. TLC reports **MarkerIntegrity** violated. The counterexample is

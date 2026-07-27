@@ -67,3 +67,4 @@ jobs:
           check Offload_Buggy           Offload     "PinnedStaysCached"
           check MultiWriter_Buggy       MultiWriter "NoClobber"
           check MultiWriter_BuggyDelete MultiWriter "MarkerIntegrity"
+          check MultiWriter_BuggyLeak   MultiWriter "EveryOrphanReclaimable"

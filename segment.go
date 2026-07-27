@@ -1829,33 +1829,26 @@ func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entr
 // offloaded segment it removes the store object and the .offloaded marker
 // instead of a local .log (the log file is already gone); the local index is
 // still removed.
-// Delete removes the segment's files, and its store objects when offloaded.
-// Equivalent to deleteFenced with the segment's own writer identity: no fence,
-// for the paths where the caller is by construction the owner.
+//
+// The store object is NOT fenced against the log's current writer identity, and
+// that is deliberate. The writer fence exists for keys a caller learned from a
+// store LISTING, where nothing establishes that the object is theirs (see
+// CommitLog.DeleteStoreObjects). A segment the log HOLDS is a different claim
+// entirely: its own offload marker names the object, which is stronger evidence
+// of ownership than the stamp and is what the log has always acted on.
+//
+// Fencing here instead breaks retention outright. After ownership moves, every
+// segment already in the tier carries the PREVIOUS identity's stamp, so a fenced
+// retention pass could never drop its oldest segment again and the tier would
+// grow without bound — strictly worse than the orphaned object the fence was
+// protecting against.
+//
+// The rule this rests on — that a log owns what its own markers name — is the
+// same one that lets a caller reclaim superseded keys, and it costs nothing
+// even where several processes share a store: if two of them held markers
+// naming the SAME object, neither could safely delete it whatever stamp it
+// carried, so the fence would not have saved that topology either.
 func (s *segment) Delete() error {
-	return s.deleteFenced(s.storeWriter)
-}
-
-// deleteFenced is Delete, refusing to remove a store object whose key carries a
-// writer identity other than currentWriter.
-//
-// The delete is the dangerous half of shared-tier ownership. A stale writer
-// uploading collides on a key, which the writer stamp turns into a harmless
-// orphan; a stale writer DELETING removes an object the current owner may still
-// be serving, and there is nothing left to recover. Consensus cannot prevent it
-// — the decision to delete is made on a lagging local view — so the fence has
-// to be at the point of the call.
-//
-// An unstamped key (single-writer log) is never fenced: there is no second
-// writer to be stale relative to.
-func (s *segment) deleteFenced(currentWriter string) error {
-	if s.store != nil {
-		if w := storeKeyWriter(s.storeKey); w != "" && w != currentWriter {
-			return errors.Errorf(
-				"commitlog: refusing to delete %s: written by %q, current writer is %q",
-				s.storeKey, w, currentWriter)
-		}
-	}
 	if err := s.Close(); err != nil {
 		return err
 	}

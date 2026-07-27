@@ -35,17 +35,17 @@ func TestDeleteCleanerPartialFailure(t *testing.T) {
 	// Fail the SECOND deletion.
 	boom := errors.New("injected delete failure")
 	calls := 0
-	// Restore the REAL function, captured here — not a hand-written stand-in
-	// that happens to look like it. A replacement calling s.Delete() directly
-	// skips the writer fence, so every test running afterwards would exercise
-	// an unfenced delete path and a fence regression would go unnoticed.
+	// Restore the REAL function, captured here, rather than a hand-written
+	// stand-in that happens to look like it: a replacement that drifts from the
+	// real delete path leaves every test running afterwards exercising the
+	// stand-in, and a regression in the real one goes unnoticed.
 	restore := deleteSegment
-	deleteSegment = func(s *segment, w string) error {
+	deleteSegment = func(s *segment) error {
 		calls++
 		if calls == 2 {
 			return boom
 		}
-		return restore(s, w)
+		return restore(s)
 	}
 	defer func() { deleteSegment = restore }()
 
