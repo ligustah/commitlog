@@ -304,65 +304,6 @@ func (s *segment) offloadTo(store SegmentStore, key, idxKey string, cache *Remot
 	return s.attachOffloadedLocked(store, meta, cache)
 }
 
-// replaceOffloadedTargetLocked repoints an ALREADY offloaded segment at a
-// different object, without uploading anything: the caller has established that
-// this object is the current one. The marker is the commit point, as everywhere
-// else, and anything able to serve the previous object is cleared before the
-// backing is swapped.
-//
-// It refuses a segment whose index is local. That index describes the bytes of
-// the object being replaced, and there is nothing here to rebuild it from — the
-// records are in the store, and a stale index silently reads the segment short.
-// The rewrite path installs a freshly built index instead, which is why it can
-// do this and adoption cannot.
-//
-// Caller holds the segment lock.
-func (s *segment) replaceOffloadedTargetLocked(meta offloadMeta, cache *RemoteIndexCache) error {
-	if s.store == nil {
-		return errors.New("commitlog: segment is not offloaded")
-	}
-	if s.indexKey == "" {
-		return errors.New(
-			"commitlog: cannot repoint a segment whose index is local — its index " +
-				"describes the object being replaced and cannot be rebuilt here")
-	}
-
-	markerBytes, err := json.Marshal(meta)
-	if err != nil {
-		return errors.Wrap(err, "encode offload marker")
-	}
-	if err := os.WriteFile(s.offloadMarkerPath(), markerBytes, 0o644); err != nil {
-		return errors.Wrap(err, "write offload marker")
-	}
-
-	// Committed. From here the segment IS the new object.
-	if sb, ok := s.backing.(*storeBacking); ok {
-		sb.Invalidate()
-	}
-	if s.indexCache != nil {
-		s.indexCache.Invalidate(s.indexCacheKey())
-	}
-
-	sb, err := newStoreBackingSize(s.store, meta.LogKey, meta.PhysPosition)
-	if err != nil {
-		return err
-	}
-	s.backing = sb
-	s.storeKey = meta.LogKey
-	s.indexKey = meta.IndexKey
-	s.firstOffset = meta.FirstOffset
-	s.lastOffset = meta.LastOffset
-	s.firstWriteTime = meta.FirstWriteTime
-	s.lastWriteTime = meta.LastWriteTime
-	s.position = meta.Position
-	s.physPosition = meta.PhysPosition
-	s.blockMode = meta.BlockMode
-	if cache != nil {
-		s.indexCache = cache
-	}
-	return nil
-}
-
 // attachOffloadedLocked turns a LOCAL segment into an offloaded one pointing at
 // objects that already exist in the store: it writes the marker (the commit
 // point), drops the local files, and swaps in a backing over the object.

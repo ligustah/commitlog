@@ -52,7 +52,7 @@ func (l *commitLog) writeTierManifest() error {
 	if l.SegmentStore == nil || !l.tierWritable() {
 		return nil
 	}
-	objs, err := l.ExportTierState()
+	objs, err := l.tierState()
 	if err != nil {
 		return err
 	}

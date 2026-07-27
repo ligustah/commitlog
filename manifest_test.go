@@ -19,7 +19,7 @@ func TestTierManifestDescribesTheStore(t *testing.T) {
 	require.NotEmpty(t, manifest, "an offloaded tier must describe itself")
 
 	// It agrees with the log's own view, and covers every offloaded segment.
-	state, err := l.ExportTierState()
+	state, err := l.tierState()
 	require.NoError(t, err)
 	require.Equal(t, state, manifest)
 
@@ -142,7 +142,7 @@ func TestTierManifestFollowsTheTier(t *testing.T) {
 	}
 
 	// And it still agrees with what the log is actually reading.
-	state, err := l.ExportTierState()
+	state, err := l.tierState()
 	require.NoError(t, err)
 	require.Equal(t, state, after)
 }
@@ -216,13 +216,13 @@ func TestUnreferencedObjectsSparesAPeersObjects(t *testing.T) {
 	require.NoError(t, err)
 	require.Positive(t, n, "the origin must have offloaded something new")
 
-	live, err := origin.ExportTierState()
+	live, err := origin.tierState()
 	require.NoError(t, err)
 	require.NotEmpty(t, live)
 
 	// The peer's own view is stale — it holds fewer segments than the tier now
 	// has, which is precisely the situation that used to be dangerous.
-	peerState, err := peer.ExportTierState()
+	peerState, err := peer.tierState()
 	require.NoError(t, err)
 	require.Less(t, len(peerState), len(live), "the peer's view must be behind")
 

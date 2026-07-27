@@ -90,7 +90,7 @@ func TestReadOnlyTierStillReadsThroughTheStore(t *testing.T) {
 	want := readFrom(t, owner)
 	require.NotEmpty(t, want)
 
-	state, err := owner.ExportTierState()
+	state, err := owner.TierManifest()
 	require.NoError(t, err)
 	require.NotEmpty(t, state)
 
@@ -110,14 +110,9 @@ func TestReadOnlyTierStillReadsThroughTheStore(t *testing.T) {
 	follower.SetHighWatermark(last)
 
 	// It already knows what the store holds — the manifest told it at open,
-	// without any grant to write. Importing the same state is therefore
-	// accepted and changes nothing, which is the property that matters: a
-	// process that owns nothing can still learn the tier.
-	applied, err := follower.ImportTierState(state)
-	require.NoError(t, err, "a read-only tier must still be able to learn what is there")
-	require.Zero(t, applied, "and needs no import, having read the manifest")
-
-	known, err := follower.ExportTierState()
+	// without any grant to write. That is the property that matters: a process
+	// owning nothing can still learn the tier.
+	known, err := follower.TierManifest()
 	require.NoError(t, err)
 	require.Equal(t, state, known)
 
