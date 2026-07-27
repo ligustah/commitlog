@@ -5,6 +5,46 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.36.0 — 2026-07-27
+
+- **Added**: a **tier manifest** — the store now describes itself, and
+  `TierManifest()` reads it.
+
+  A tier previously held bytes it could not explain. The mapping from offset
+  range to object lived only in local marker files beside the log, so the
+  objects were readable but uninterpretable on their own: a process holding the
+  store and not the directory could not say what it was looking at, and the
+  bookkeeping had to be carried out of band by whoever had consensus. That is
+  commitlog's own segment index, and it belongs with the segments.
+
+  The manifest is written **after** the objects it names, making it the tier's
+  commit point exactly as the local marker is the log directory's. An object no
+  manifest names was never committed — a crash between an upload and its
+  manifest — so it is a recognisable orphan rather than an ambiguity.
+
+- **Changed**: opening a log over a store it has no local markers for now picks
+  up the offloaded segments automatically. Where the index was offloaded too the
+  segment is complete in the store; where it stayed local it is **rebuilt from
+  the object**, because otherwise the segment would open with an empty index and
+  read back as though it held no records — present, described, and silently
+  empty. That rebuild costs one pass, which is one request now that a sweep
+  streams.
+
+  `ExportTierState`/`ImportTierState` remain, but are no longer the mechanism —
+  they are an optimisation for a caller that would rather not re-read the
+  manifest.
+
+- **Fixed**: `UnreferencedObjects` would have reported the manifest itself as
+  garbage, so feeding it to `DeleteStoreObjects` would have deleted the tier's
+  own index.
+
+- **Fixed**: a log adopting only offloaded segments had no writable active
+  segment, since every offloaded segment is sealed. It now gets one starting
+  where the tier ends.
+
+- **Fixed**: `CleanSpec.SkipTiered` promises zero store writes, and a manifest
+  Put is a store write. A skipped pass leaves the manifest alone.
+
 ## v0.35.0 — 2026-07-27
 
 **Breaking.** `SegmentStore` and the internal `segmentBacking` gain streaming
