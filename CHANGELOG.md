@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.22.0 — 2026-07-27
 
 - **Breaking / Changed**: `Sync()` becomes `Sync(offset)` — "make the log
   durable through this offset" — and now coalesces. Pass an offset returned by
