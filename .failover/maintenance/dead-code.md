@@ -1,7 +1,7 @@
 ---
 name: Dead code detection
-interval: 30d
-after: 8
+interval: 5d
+after: 3
 paths: *.go, compress/*.go
 ---
 Find and remove unreachable or unused code — exported symbols nothing imports, unexported members never

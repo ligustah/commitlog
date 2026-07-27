@@ -1,7 +1,7 @@
 ---
 name: Concurrency invariant sweep
-interval: 14d
-after: 4
+interval: 4d
+after: 2
 paths: commitlog.go, segment.go, index.go, compact_cleaner.go, delete_cleaner.go, reader.go
 ---
 Pick ONE path that reads shared state and then mutates based on what it read, and either prove the two

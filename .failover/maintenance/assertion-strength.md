@@ -1,7 +1,7 @@
 ---
 name: Assertion strength audit
-interval: 14d
-after: 4
+interval: 3d
+after: 2
 paths: *_test.go, compress/*_test.go
 ---
 Take the tests added or materially changed since this task last ran. For each, break the behaviour it

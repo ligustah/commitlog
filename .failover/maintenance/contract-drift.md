@@ -1,7 +1,7 @@
 ---
 name: Contract drift
-interval: 14d
-after: 4
+interval: 3d
+after: 2
 paths: interface.go, commitlog.go, CHANGELOG.md, README.md
 ---
 Check that the documented contract still matches the code. `interface.go` is the published API surface —

@@ -1,7 +1,7 @@
 ---
 name: Dependency drift
-interval: 30d
-after: 8
+interval: 5d
+after: 3
 paths: go.mod, go.sum
 ---
 Review dependencies for updates that matter: security advisories first, then versions far enough behind
