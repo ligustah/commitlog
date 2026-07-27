@@ -35,7 +35,7 @@ func (b *blockingBacking) Sync() error {
 
 // An fsync must not stall appends to the same segment. The append path and the
 // sync path both need the segment lock, so a sync that holds it across the
-// fsync blocks every concurrent append for the fsync's whole duration — which
+// fsync blocks every concurrent append for the fsync's whole duration Ã¢â‚¬â€ which
 // silently defeats a caller's group commit, because the appends that would form
 // its next batch are exactly the ones arriving during the in-flight sync.
 func TestSyncDoesNotBlockAppends(t *testing.T) {
@@ -49,7 +49,7 @@ func TestSyncDoesNotBlockAppends(t *testing.T) {
 	}
 	seg.Lock()
 	seg.backing = blocking
-	seg.dirty = true
+	seg.dirtyData = true
 	seg.Unlock()
 
 	syncDone := make(chan error, 1)
@@ -82,8 +82,8 @@ func TestSyncDoesNotBlockAppends(t *testing.T) {
 	require.NoError(t, <-syncDone)
 }
 
-// An append landing mid-fsync is not covered by that fsync — the group-commit
-// contract — so the segment must stay dirty and the NEXT sync must flush it.
+// An append landing mid-fsync is not covered by that fsync Ã¢â‚¬â€ the group-commit
+// contract Ã¢â‚¬â€ so the segment must stay dirty and the NEXT sync must flush it.
 // Clearing the dirty mark after the fsync instead of before would drop it.
 func TestAppendDuringSyncStaysDirty(t *testing.T) {
 	dir := tempDir(t)
@@ -96,7 +96,7 @@ func TestAppendDuringSyncStaysDirty(t *testing.T) {
 	}
 	seg.Lock()
 	seg.backing = blocking
-	seg.dirty = true
+	seg.dirtyData = true
 	seg.Unlock()
 
 	syncDone := make(chan error, 1)
@@ -110,7 +110,7 @@ func TestAppendDuringSyncStaysDirty(t *testing.T) {
 	require.NoError(t, <-syncDone)
 
 	seg.RLock()
-	dirty := seg.dirty
+	dirty := seg.dirtyData
 	seg.RUnlock()
 	require.True(t, dirty,
 		"a record appended during a sync is not covered by it and must be flushed by the next one")
@@ -166,7 +166,7 @@ func (b *failingBacking) Sync() error {
 }
 
 // A failed fsync must leave the segment marked dirty. The mark is cleared
-// before the fsync so an append landing mid-flush is not lost — but if the
+// before the fsync so an append landing mid-flush is not lost Ã¢â‚¬â€ but if the
 // flush then fails, leaving it clear would mean the retry, and every later
 // sync, reports success without flushing anything. A durability primitive
 // silently doing nothing after a reported failure is the worst possible
@@ -184,7 +184,7 @@ func TestFailedSyncStaysDirty(t *testing.T) {
 	require.Error(t, seg.Sync(), "the failing fsync must be reported")
 
 	seg.RLock()
-	dirty := seg.dirty
+	dirty := seg.dirtyData
 	seg.RUnlock()
 	require.True(t, dirty, "a segment whose fsync failed is NOT durable")
 

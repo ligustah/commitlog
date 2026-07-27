@@ -7,6 +7,40 @@ library from that fork onward.
 
 ## Unreleased
 
+- **Breaking / Changed**: `Sync()` becomes `Sync(offset)` — "make the log
+  durable through this offset" — and now coalesces. Pass an offset returned by
+  `Append`, typically the last of a commit, or `NewestOffset()` for everything
+  so far.
+
+  **Concurrent callers share one fsync.** A caller whose offset a completed
+  flush already covers returns without issuing another; one whose offset a flush
+  in flight will cover waits for it. So N commits landing together cost one
+  fsync rather than N, which is what makes per-commit durability affordable.
+  Callers should NOT batch above this — the log is the only layer that knows
+  what a given fsync actually covered.
+
+  An offset is the right shape because callers already hold one from `Append`,
+  and it gives a coverage predicate a segment-shaped call cannot express.
+
+  Measured, 24 concurrent committers on one log: **0.75 fsyncs per commit** when
+  each syncs the offset it was given, against 0.91 when each asks for the log's
+  current tail (never covered by a flush in flight, so every caller leads one).
+  The saving grows with fsync latency — on a fast NVMe the batches are small,
+  and a consumer measured ~20 callers per fsync on a slower disk.
+
+- **Changed**: `Sync` now flushes log bytes ONLY — not the index. An index
+  behind its log is a state recovery already repairs, since the append path
+  writes the log frame before the index entry and open rebuilds the missing
+  tail. `SyncAll` still flushes both.
+
+- **Fixed**: a segment's index is now flushed when it SEALS. Open rebuilds a
+  short index tail for the active segment only, so a segment that rolled between
+  syncs could keep a permanently short index that nothing would ever repair.
+  Sealing is the last moment anything can fix it: one extra fsync per roll, off
+  the hot path, which confines the unflushed index to the active segment that
+  open already handles and makes an offset in a sealed segment durable by
+  construction.
+
 - **Fixed**: a segment roll could run concurrently with an append and leak the
   segment it built. The cleaner loop rolls on its own ticker, independently of
   any append, and `split` builds the new segment before swapping it in — but

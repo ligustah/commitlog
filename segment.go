@@ -77,12 +77,17 @@ type segment struct {
 	sealed         bool
 	closed         bool
 	replaced       bool
-	// dirty reports whether anything has been appended since the last fsync, so
-	// a durability pass can skip segments already on stable storage instead of
-	// paying an fsync per segment per call. Starts true: a segment opened from
-	// disk was written by a process whose flush state we cannot know, so the
-	// first sync always flushes. Guarded by the segment lock.
-	dirty bool
+	// dirtyData and dirtyIndex report whether the log file and the index have
+	// been written since each was last fsynced, so a durability pass can skip
+	// what is already on stable storage instead of paying an fsync per segment
+	// per call. They are SEPARATE because the durability hot path flushes log
+	// bytes only: a shared mark would be cleared by a data-only sync and the
+	// index would then be silently skipped by the next full one.
+	//
+	// Both start true: a segment opened from disk was written by a process whose
+	// flush state we cannot know. Guarded by the segment lock.
+	dirtyData  bool
+	dirtyIndex bool
 
 	// Block compression. When blockMode is set, each WriteMessageSet is stored
 	// as a compressed block and the log's logical byte space (position, index
@@ -314,7 +319,8 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 		suffix:      suffix,
 		codec:       codec,
 		waiters:     make(map[interface{}]chan struct{}),
-		dirty:       true,
+		dirtyData:   true,
+		dirtyIndex:  true,
 	}
 	// If this is a new segment, ensure the file doesn't already exist.
 	if isNew && exists(s.logPath()) {
@@ -703,6 +709,19 @@ func (s *segment) seal() {
 	s.notifyWaiters()
 	if s.Index != nil {
 		s.Index.Shrink() // nolint: errcheck
+		// Sealing is the index's flush point, because it is the moment after
+		// which nothing else will repair it. The durability hot path flushes log
+		// bytes only, relying on open() rebuilding a short index tail — but that
+		// rebuild runs on the ACTIVE segment alone, so a segment that rolls
+		// between syncs would otherwise keep a permanently short index. One extra
+		// fsync per roll, off the hot path, confines the unflushed index to the
+		// active segment that open already fixes, and makes an offset in a sealed
+		// segment durable by construction.
+		//
+		// Best-effort, like the shrink above: a failure here costs a rebuilt
+		// index tail, not data, and seal runs on paths that cannot return one.
+		s.Index.Sync() // nolint: errcheck
+		s.dirtyIndex = false
 	}
 }
 
@@ -801,7 +820,8 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 	if s.closed {
 		return 0, ErrSegmentClosed
 	}
-	s.dirty = true
+	s.dirtyData = true
+	s.dirtyIndex = true
 	if s.blockMode {
 		if err = s.appendBlock(p); err != nil {
 			return 0, err
@@ -1130,31 +1150,60 @@ func (s *segment) removeWaiter(waiter interface{}) {
 // group-commit contract, so nothing is weakened: the segment stays marked dirty
 // and the following sync flushes it.
 func (s *segment) Sync() error {
-	// Snapshot what to flush, and take the dirty mark with it. Clearing BEFORE
-	// the fsync (not after) is the safe order: an append landing during the
-	// fsync re-marks the segment and is covered by the next sync, whereas
-	// clearing afterwards would erase that mark and lose the append.
+	return s.sync(true)
+}
+
+// SyncData flushes ONLY the segment's log bytes, leaving the index alone. This
+// is the durability hot path: an index behind its log is a state recovery
+// already repairs, since the append path writes the log frame before the index
+// entry and open rebuilds the missing tail. Skipping it halves the fsyncs a
+// per-commit caller pays. The index is flushed when the segment seals, which is
+// what keeps that repair confined to the active segment.
+func (s *segment) SyncData() error {
+	return s.sync(false)
+}
+
+// sync flushes the log bytes, and the index too when withIndex is set.
+//
+// Each half's dirty mark is taken BEFORE its fsync and restored if that fsync
+// fails. Clearing first is what makes an append landing mid-flush safe — it
+// re-marks the segment and rides the next sync rather than being erased by this
+// one — and restoring on failure is what stops a reported error from leaving a
+// segment that looks durable while its bytes are still in OS buffers.
+func (s *segment) sync(withIndex bool) error {
 	s.Lock()
-	if s.closed || !s.dirty {
+	if s.closed {
 		s.Unlock()
 		return nil
 	}
-	backing, idx := s.backing, s.Index
-	s.dirty = false
+	var (
+		backing = s.backing
+		idx     *index // non-nil only if the index needs flushing
+		data    = s.dirtyData
+	)
+	if withIndex && s.dirtyIndex {
+		idx = s.Index // nil for an offloaded index: nothing local to flush
+		s.dirtyIndex = false
+	}
+	s.dirtyData = false
 	s.Unlock()
+	if !data && idx == nil {
+		return nil
+	}
 
 	// With the lock released a concurrent Clean can close the segment under us
 	// (rewrites run outside the log mutex). Such a segment is already durable,
 	// or is being made durable by the rewrite that closed it, so treat a closed
 	// half as success — the same tolerance the whole-log sync path applies.
-	err := backing.Sync()
-	if errors.Is(err, os.ErrClosed) {
-		err = nil
+	var err error
+	if data {
+		if err = backing.Sync(); errors.Is(err, os.ErrClosed) {
+			err = nil
+		}
 	}
 	// The index carries its own mutex and takes it for both writes and flushes,
 	// so flushing without the segment lock cannot race the remap-on-expand that
-	// would otherwise flush a mapping being torn down. A nil index is an
-	// offloaded one: nothing local to sync.
+	// would otherwise flush a mapping being torn down.
 	if err == nil && idx != nil {
 		if ierr := idx.Sync(); ierr != nil &&
 			!errors.Is(ierr, os.ErrClosed) && !errors.Is(ierr, ErrSegmentClosed) {
@@ -1162,13 +1211,13 @@ func (s *segment) Sync() error {
 		}
 	}
 	if err != nil {
-		// Put the dirty mark BACK. The data is still only in OS buffers, so
-		// leaving the segment marked clean would make the caller's retry — and
-		// every later sync — return success without flushing anything, turning a
-		// reported failure into silent data loss on the next power cut. Re-marking
-		// can only cost a redundant fsync.
 		s.Lock()
-		s.dirty = true
+		if data {
+			s.dirtyData = true
+		}
+		if idx != nil {
+			s.dirtyIndex = true
+		}
 		s.Unlock()
 		return err
 	}

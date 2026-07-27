@@ -48,21 +48,29 @@ type CommitLog interface {
 	// Truncate removes all messages from the log starting at the given offset.
 	Truncate(offset int64) error
 
-	// Sync makes everything appended so far durable against power loss: it
-	// fsyncs the log and index of every segment written since its last sync.
-	// After Sync returns, a reopened log recovers every record appended before
-	// the call.
+	// Sync makes the log durable through offset: once it returns, a reopened log
+	// recovers every record up to and including offset. Pass an offset returned
+	// by Append — typically the last of a commit — or NewestOffset to cover
+	// everything written so far.
 	//
-	// This is the durability primitive — use it to make a commit durable. It
-	// does NOT checkpoint the high watermark, which is only an optimization
-	// (recovery rides out a stale checkpoint), and which costs a second fsync of
-	// the active segment plus an atomic rewrite of the checkpoint file. Reach
-	// for SyncAll instead only when the checkpoint itself must be current.
+	// This is the durability primitive; use it to make a commit durable.
+	// CONCURRENT CALLERS SHARE ONE FSYNC: a caller whose offset a flush already
+	// covers returns without issuing another, so N commits landing together cost
+	// one fsync rather than N. That is what makes per-commit durability
+	// affordable, and it is why callers should NOT batch above this — the log is
+	// the only layer that knows what a given fsync actually covered.
 	//
-	// Safe to call concurrently with appends, and concurrent callers are the
-	// point: the fsync runs outside the segment lock, so appends keep landing
-	// while a sync is in flight and can be batched into the next one.
-	Sync() error
+	// It flushes log bytes ONLY: not the index, and not the high-watermark
+	// checkpoint. Both are states recovery already repairs — a stale checkpoint
+	// is walked forward on open, and an index behind its log is rebuilt, since
+	// the append path writes the log frame before the index entry. A segment's
+	// index is flushed when it seals, which is what keeps that repair confined to
+	// the active segment. Reach for SyncAll when the checkpoint itself must be
+	// current.
+	//
+	// Safe to call concurrently with appends. A record appended while a flush is
+	// in flight is not claimed by it and is covered by the next one.
+	Sync(offset int64) error
 
 	// SyncAll makes everything appended so far durable (as Sync) and ALSO
 	// checkpoints the high watermark. Used before externally-visible filesystem

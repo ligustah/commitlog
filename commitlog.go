@@ -76,7 +76,17 @@ type commitLog struct {
 	//
 	// Lock order: appendMu before mu, never the reverse.
 	appendMu sync.Mutex
-	hw       int64
+	// The group-commit barrier behind Sync. syncDurable is the highest offset
+	// known to be on stable storage; syncFlushing says a flush is in flight and
+	// syncDone is closed when it finishes. Concurrent callers whose offset is
+	// already covered return without an fsync of their own, which is the whole
+	// point: N commits cost one fsync rather than N. Guarded by syncMu, which is
+	// held only around the bookkeeping, never across the fsync itself.
+	syncMu       sync.Mutex
+	syncDurable  int64
+	syncFlushing bool
+	syncDone     chan struct{}
+	hw           int64
 	closed           chan struct{}
 	closeOnce        sync.Once      // guards close(l.closed)
 	bgWG             sync.WaitGroup // tracks the checkpoint + cleaner loops
@@ -195,6 +205,9 @@ func New(opts Options) (CommitLog, error) {
 		closed:           make(chan struct{}),
 		hwWaiters:        make(map[contextReader]chan bool),
 		leaderEpochCache: epochCache,
+		// -1, not 0: offset 0 is a real record, so a zero value would report the
+		// log's very first append as already durable and skip its flush.
+		syncDurable: -1,
 	}
 
 	if err := l.init(); err != nil {
@@ -1399,12 +1412,59 @@ func (l *commitLog) checkpointHWLoop() {
 	}
 }
 
-// Sync is the durability primitive: it fsyncs the log and index of every
-// segment written since its last sync, without checkpointing the high
-// watermark. See the interface doc for why a durability caller should prefer it
-// over SyncAll.
-func (l *commitLog) Sync() error {
-	return l.syncSegments()
+// Sync makes the log durable through offset. See the interface doc for the
+// contract; this is the group-commit barrier behind it.
+//
+// A caller already covered by a completed flush returns without an fsync. One
+// whose offset a flush in flight will cover waits for it instead of issuing a
+// second. Otherwise the caller leads: it snapshots the tail, flushes, and
+// publishes what that flush covered — which is generally far more than its own
+// offset, so the callers waiting behind it are covered too.
+func (l *commitLog) Sync(offset int64) error {
+	for {
+		l.syncMu.Lock()
+		if offset <= l.syncDurable {
+			l.syncMu.Unlock()
+			return nil
+		}
+		if l.syncFlushing {
+			// Someone else is already flushing. Wait for it rather than queueing
+			// a redundant fsync behind it, then re-check: their flush usually
+			// covers this offset too, since they snapshot the tail AFTER this
+			// append landed.
+			wait := l.syncDone
+			l.syncMu.Unlock()
+			<-wait
+			continue
+		}
+		l.syncFlushing = true
+		done := make(chan struct{})
+		l.syncDone = done
+		l.syncMu.Unlock()
+
+		// Snapshot the tail BEFORE flushing: every record up to here has already
+		// been written to the OS (the append path advances the tail only after
+		// its write returns), so the flush makes exactly this much durable.
+		// Records appended during the flush are not claimed — they ride the next
+		// one, which is the group-commit contract.
+		target := l.NewestOffset()
+		err := l.syncSegmentData()
+
+		l.syncMu.Lock()
+		if err == nil && target > l.syncDurable {
+			l.syncDurable = target
+		}
+		l.syncFlushing = false
+		close(done)
+		l.syncMu.Unlock()
+
+		if err != nil {
+			return err
+		}
+		// Round again rather than assuming success covered this caller: a flush
+		// that started before this append landed can complete without reaching
+		// its offset, and that caller must lead the next one.
+	}
 }
 
 // SyncAll makes everything appended so far durable against power loss: it
@@ -1425,19 +1485,32 @@ func (l *commitLog) SyncAll() error {
 	return l.checkpointHW()
 }
 
-// syncSegments fsyncs every dirty segment. It snapshots the segment slice
+// syncSegmentData fsyncs the LOG BYTES of every segment written since its last
+// flush, leaving indexes alone — the durability hot path. An index behind its
+// log is a state recovery already repairs, and seal flushes the index of any
+// segment that rolls, so the unrepaired case never outlives the active segment.
+func (l *commitLog) syncSegmentData() error {
+	return l.forEachSegment((*segment).SyncData)
+}
+
+// syncSegments fsyncs every dirty segment, log and index both.
+func (l *commitLog) syncSegments() error {
+	return l.forEachSegment((*segment).Sync)
+}
+
+// forEachSegment fsyncs every segment with sync. It snapshots the segment slice
 // rather than holding l.mu across the fsyncs: an append that rolls a new
 // segment needs the write lock, so holding the read lock for the duration would
 // stall the roll behind the very fsync a concurrent commit is waiting on. A
 // segment appended after the snapshot is simply not covered by this call, which
 // is the same boundary the per-segment sync already draws.
-func (l *commitLog) syncSegments() error {
+func (l *commitLog) forEachSegment(sync func(*segment) error) error {
 	l.mu.RLock()
 	segments := make([]*segment, len(l.segments))
 	copy(segments, l.segments)
 	l.mu.RUnlock()
 	for _, seg := range segments {
-		if err := seg.Sync(); err != nil {
+		if err := sync(seg); err != nil {
 			// A segment closed concurrently: Clean rewrites/closes segments
 			// OUTSIDE l.mu (see the struct comment), so a sync racing a Clean
 			// can grab a segment Clean just closed. Such a segment is already

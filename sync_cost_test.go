@@ -42,7 +42,7 @@ func TestSyncSkipsHighWatermarkCheckpoint(t *testing.T) {
 	for i := 1; i < 10; i++ {
 		app(i)
 	}
-	require.NoError(t, l.Sync())
+	require.NoError(t, l.Sync(l.NewestOffset()))
 	after, err := os.ReadFile(hwPath)
 	require.NoError(t, err)
 	require.Equal(t, before, after, "Sync must not rewrite the high-watermark checkpoint")
@@ -59,7 +59,7 @@ func TestSyncSkipsHighWatermarkCheckpoint(t *testing.T) {
 func TestSyncFsyncsDirtySegmentsOnly(t *testing.T) {
 	l, app := syncLog(t)
 	app(0)
-	require.NoError(t, l.Sync())
+	require.NoError(t, l.Sync(l.NewestOffset()))
 
 	l.mu.RLock()
 	segs := append([]*segment(nil), l.segments...)
@@ -73,13 +73,13 @@ func TestSyncFsyncsDirtySegmentsOnly(t *testing.T) {
 		seg.Unlock()
 	}
 
-	require.NoError(t, l.Sync())
+	require.NoError(t, l.Sync(l.NewestOffset()))
 	for i, c := range counters {
 		require.Zero(t, c.syncs, "segment %d had nothing new to flush", i)
 	}
 
 	app(1)
-	require.NoError(t, l.Sync())
+	require.NoError(t, l.Sync(l.NewestOffset()))
 	total := 0
 	for _, c := range counters {
 		total += c.syncs
@@ -95,7 +95,7 @@ func BenchmarkSyncCost(b *testing.B) {
 		name string
 		fn   func(l *commitLog) error
 	}{
-		{"Sync", (*commitLog).Sync},
+		{"Sync", func(l *commitLog) error { return l.Sync(l.NewestOffset()) }},
 		{"SyncAll", (*commitLog).SyncAll},
 	} {
 		b.Run(bc.name, func(b *testing.B) {
@@ -111,22 +111,54 @@ func BenchmarkSyncCost(b *testing.B) {
 	}
 }
 
-// BenchmarkSyncConcurrent measures per-commit cost when many writers sync the
-// same log at once — the shape a group-commit batcher sits on. With the fsync
-// held outside the segment lock, appends keep landing during a sync instead of
-// serializing behind it.
+// BenchmarkSyncConcurrent measures many writers committing to one log at once —
+// the group-commit shape — and reports **fsyncs/op** alongside the time.
+//
+// The fsync count is the number that demonstrates coalescing; wall-clock here
+// is dominated by whichever caller happens to be leading a flush and does not
+// cleanly attribute. Each caller syncs the offset IT appended, which is what
+// lets the barrier cover it off someone else's flush.
 func BenchmarkSyncConcurrent(b *testing.B) {
-	l, _ := syncLog(b)
-	var i int
+	l, fsyncs := benchCountingLog(b)
+	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			i++
-			if _, err := l.Append([]*Message{{Value: []byte("v")}}); err != nil {
+			offs, err := l.Append([]*Message{{Value: []byte("v")}})
+			if err != nil {
 				b.Fatal(err)
 			}
-			if err := l.Sync(); err != nil {
+			if err := l.Sync(offs[0]); err != nil {
 				b.Fatal(err)
 			}
 		}
 	})
+	b.StopTimer()
+	b.ReportMetric(float64(fsyncs())/float64(b.N), "fsyncs/op")
+}
+
+// BenchmarkSyncTailConcurrent asks for the log's CURRENT tail rather than the
+// caller's own offset. The tail advances with every append, so it is never
+// covered by a flush already in flight and every caller leads one — the same
+// barrier, defeated by what the caller asks for. The contrast in fsyncs/op is
+// the argument for syncing the offset you were given.
+func BenchmarkSyncTailConcurrent(b *testing.B) {
+	l, fsyncs := benchCountingLog(b)
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := l.Append([]*Message{{Value: []byte("v")}}); err != nil {
+				b.Fatal(err)
+			}
+			if err := l.Sync(l.NewestOffset()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.StopTimer()
+	b.ReportMetric(float64(fsyncs())/float64(b.N), "fsyncs/op")
+}
+
+// benchCountingLog is a single-segment log whose backing counts fsyncs.
+func benchCountingLog(b *testing.B) (*commitLog, func() int64) {
+	return countingLog(b, Options{Path: tempDir(b), MaxSegmentBytes: 1 << 30})
 }
