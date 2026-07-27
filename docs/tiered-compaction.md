@@ -139,6 +139,56 @@ reader pinning a generation can be allowed to finish against the old object
 while new readers open the new one. That is a direction, not a decision; the
 constraint above is the requirement.
 
+## Two things this mechanism must be given, not decide
+
+Both come from the policy layer's companion document, and both are right.
+
+### No internal clock for tiered descent
+
+commitlog must not run a background loop moving segments down the chain. This is
+the same rule `DisableAutoClean` already encodes for compaction: the internal
+cleaner has no transaction awareness, so a pass it started on its own could
+compact across an open transaction's range. The layer above is the only one that
+knows whether a pass is safe *yet*.
+
+This is already the status quo for tiering — `OffloadBefore` is caller-driven,
+and there is no internal offload loop — so the requirement is to keep it that
+way rather than to change anything. Worth stating explicitly, because "descend
+on a timer" is the obvious thing to add and it would quietly move the *when*
+decision to the layer that cannot make it safely.
+
+### Exactly one writer per store key
+
+The invariant above is written from a single process's point of view: it says a
+*reader* must never splice pre- and post-compaction bytes. That is not
+sufficient once replicas share a tier. Two nodes rewriting the same base offset
+into one store is a different and harder problem, and not one this mechanism
+should be asked to solve — ownership has to be granted above.
+
+**What makes it urgent is that the violation is silent.** `SegmentStore.Put`
+overwrites any existing object and there is no conditional or compare-and-swap
+form, so two compactors racing on one key produce a lost update with no error
+reported to either. Nothing in the read path can detect it afterwards, for the
+same reason a rewrite is invisible to offsets: both nodes still agree on every
+offset and disagree only about which records remain readable at them.
+
+**Generation-stamped keys can make it loud instead.** They are already the
+direction for the reader invariant, and if a rewrite writes a *new* key rather
+than overwriting the live one, two competing compactors produce two distinct
+objects instead of one corrupted object. The conflict becomes detectable, and
+the loser's object is discardable. That does not move ownership into commitlog —
+it stays policy — but it turns a silent corruption into something a caller can
+notice, which is worth having even when ownership is working correctly.
+
+One refinement to the tombstone-divergence concern, since it affects how much
+the retention window must be widened: the GC horizon is a comparison of a
+record's own timestamp against `now - CompactTombstoneRetention` at pass time.
+Two nodes therefore apply the *same* rule and differ only in how far each has
+got — a node that ran later has collected a superset of what an earlier one did,
+never a different set. The divergence is one-directional and bounded by the lag
+between passes, which is what makes widening the window by worst-case
+replication lag a sound fix rather than an approximation.
+
 ## What changes in `clean()`
 
 The offloaded-prefix exclusion goes away: tiered segments stop being exempt from
