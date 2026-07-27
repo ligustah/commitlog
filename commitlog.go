@@ -1506,16 +1506,23 @@ type CleanSpec struct {
 	// callers pass their LSO so open transactions can never shadow or be
 	// compacted.
 	Ceiling int64
-	// StripBelow: records strictly below are DECIDED. Compaction removes
+	// StripBelow: records strictly below it are DECIDED, and nothing above
+	// the log needs their per-record bookkeeping any more. Compaction removes
 	// control records (AttrControl) below it, removes aborted data records,
-	// and rewrites surviving records with StripHeaders removed — turning
-	// them into plain records that transactional readers pass through
-	// without buffering. Offsets, timestamps, leader epochs, keys, values,
-	// and attribute bits survive the rewrite.
+	// and rewrites the survivors without StripHeaders. Offsets, timestamps,
+	// leader epochs, keys, values and attribute bits survive the rewrite.
 	StripBelow int64
-	// StripHeaders are the per-message header keys removed below StripBelow
-	// (the transactional layer's pid/epoch/seq). Empty disables stripping
-	// (and marker removal — the two are only safe together).
+	// StripHeaders are the per-message header keys removed below StripBelow.
+	// Empty disables stripping, and with it marker removal — the two are only
+	// safe together.
+	//
+	// The log attaches no meaning to these keys: they are whatever the caller
+	// wrote and has since finished with, removed as bytes. A transactional
+	// caller typically names the headers carrying its producer, epoch and
+	// sequence, so that a decided record costs its readers nothing to skip —
+	// but that is an example of the mechanism, not its definition, and a
+	// caller with entirely different per-record bookkeeping uses it the same
+	// way.
 	StripHeaders []string
 	// Aborted reports whether the data record at offset belongs to an
 	// aborted transaction. Consulted only below Ceiling; must be safe for
