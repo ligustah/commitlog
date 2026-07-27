@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.23.0 — 2026-07-27
 
 - **Breaking**: the module's `go` directive moves from **1.22 to 1.26**, and
   `klauspost/compress` from v1.18.0 to **v1.19.1**. These are one decision: every
