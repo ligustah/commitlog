@@ -185,3 +185,54 @@ func TestReadOnlyTierDoesNotWriteTheManifest(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, keys, "a read-only tier must write nothing, manifest included")
 }
+
+// The question a shared-tier collector has to have answered: does this call
+// name objects ANOTHER live process is serving? It must not, or garbage
+// collection deletes a peer's data.
+//
+// This is what the manifest buys. Judged by local segments alone the answer
+// would be yes, because a process only knows the objects it adopted or wrote.
+func TestUnreferencedObjectsSparesAPeersObjects(t *testing.T) {
+	origin, store, last := tieredLog(t)
+
+	// A second log over the same store, opened BEFORE the peer offloads more,
+	// so it cannot have adopted what comes next.
+	peer, cleanup := setupWithOptions(t, Options{
+		Path:             tempDir(t),
+		MaxSegmentBytes:  64,
+		SegmentStore:     store,
+		DisableAutoClean: true,
+	})
+	defer cleanup()
+
+	// The origin offloads further segments the peer has never seen.
+	for i := 0; i < 24; i++ {
+		offs, err := origin.Append([]*Message{{Key: []byte("k"), Value: []byte("padding value")}})
+		require.NoError(t, err)
+		last = offs[0]
+	}
+	origin.SetHighWatermark(last)
+	n, err := origin.OffloadBefore(last + 1)
+	require.NoError(t, err)
+	require.Positive(t, n, "the origin must have offloaded something new")
+
+	live, err := origin.ExportTierState()
+	require.NoError(t, err)
+	require.NotEmpty(t, live)
+
+	// The peer's own view is stale — it holds fewer segments than the tier now
+	// has, which is precisely the situation that used to be dangerous.
+	peerState, err := peer.ExportTierState()
+	require.NoError(t, err)
+	require.Less(t, len(peerState), len(live), "the peer's view must be behind")
+
+	orphans, err := peer.UnreferencedObjects()
+	require.NoError(t, err)
+	for _, o := range live {
+		require.NotContains(t, orphans, o.LogKey,
+			"an object the tier's manifest names must never be called garbage")
+		if o.IndexKey != "" {
+			require.NotContains(t, orphans, o.IndexKey)
+		}
+	}
+}

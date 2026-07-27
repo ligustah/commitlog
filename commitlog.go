@@ -573,16 +573,39 @@ func (l *commitLog) UnreferencedObjects() ([]string, error) {
 		return nil, errors.Wrap(err, "list store")
 	}
 
-	// The live set is taken from the SEGMENTS rather than by re-reading the
-	// markers off disk, because a segment holds the key it actually opened. A
-	// marker rewritten by a rewrite that has not yet swapped its backing names
-	// the new object while a reader is still on the old one, and reading the
-	// marker would call that reader's object garbage.
-	// The manifest is never garbage: it is what makes the tier readable, and no
-	// segment references it, so a sweep that judged only by segment references
-	// would hand the caller its own index to delete.
+	// Live means named by the STORE'S MANIFEST or read by one of this log's
+	// segments — the union, because each alone is wrong in a different way.
+	//
+	// The manifest alone would miss an object this log is reading but has not
+	// yet republished: a rewrite installs new objects and then writes the
+	// manifest, and in between the segment is on a key the manifest does not
+	// name yet.
+	//
+	// This log's segments alone would miss everything ANOTHER process
+	// offloaded since this one opened, which on a shared store is exactly the
+	// data that must not be collected. That is the difference between
+	// "unreferenced by me" and "unreferenced", and getting it wrong deletes
+	// data a live peer is serving.
+	//
+	// The manifest itself is never garbage: it is what makes the tier
+	// readable, and nothing references it.
 	referenced := make(map[string]bool, len(keys))
 	referenced[manifestKey] = true
+	if manifest, err := readTierManifest(l.SegmentStore); err == nil {
+		for _, o := range manifest {
+			if o.LogKey != "" {
+				referenced[o.LogKey] = true
+			}
+			if o.IndexKey != "" {
+				referenced[o.IndexKey] = true
+			}
+		}
+	} else {
+		// Refuse rather than under-report. A manifest that exists but cannot be
+		// read tells us nothing about what is live, and a garbage list built
+		// without it would name objects the tier still depends on.
+		return nil, errors.Wrap(err, "read tier manifest")
+	}
 	l.mu.RLock()
 	for _, s := range l.segments {
 		s.RLock()

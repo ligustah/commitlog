@@ -5,6 +5,28 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.36.1 — 2026-07-27
+
+- **Fixed**: `UnreferencedObjects` judged garbage by this log's own segments
+  only, so on a shared store it named objects another live process had
+  offloaded — the exact case v0.36.0's manifest was supposed to settle. The
+  documentation and the implementation disagreed, and the documentation was the
+  correct one.
+
+  Live is now judged against the store's **manifest** as well as this log's
+  segments. The union matters in both directions: the manifest alone would miss
+  an object this log is reading but has not yet republished (a rewrite installs
+  objects, then writes the manifest), and the segments alone miss everything a
+  peer offloaded since this log opened.
+
+  A manifest that exists but cannot be read is now an error rather than an
+  empty result, since a garbage list built without it would name objects the
+  tier still depends on.
+
+  The remaining caveat is timing rather than locality, and is documented as
+  such: an object uploaded by a process that has not yet published its manifest
+  is named by nothing and will be listed. Anything already published is safe.
+
 ## v0.36.0 — 2026-07-27
 
 - **Added**: a **tier manifest** — the store now describes itself, and

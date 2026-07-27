@@ -264,16 +264,19 @@ type CommitLog interface {
 	//   - an object a previous owner of the store uploaded and never removed.
 	//
 	//
-	// IMPORTANT: unreferenced means unreferenced BY THIS LOG, and that
-	// distinction is load-bearing rather than cautionary. Offload markers are
-	// LOCAL to each process, so where a store is shared, another process's
-	// markers routinely name objects this log has never heard of — everything
-	// uploaded before this one took ownership, for a start. Deleting those
-	// would break a reader that is still serving them.
+	// Live is judged against the STORE'S MANIFEST as well as this log's own
+	// segments, so an object another process offloaded is not called garbage
+	// merely because this log has not adopted it. That is what makes the result
+	// usable on a shared store, and it is why the manifest exists.
 	//
-	// Only the caller knows whether the store is shared and who else is live,
-	// so this reports rather than deletes; feed the result to
-	// DeleteStoreObjects once it is known to be safe.
+	// The remaining caveat is timing rather than locality: an object uploaded by
+	// a process that has not yet published its manifest is not yet named by
+	// anything, and will be listed. Collect on a store with a writer mid-offload
+	// and that upload is the one at risk. Anything already published is safe.
+	//
+	// It reports rather than deletes because only the caller knows whether a
+	// concurrent writer is running at all; feed the result to
+	// DeleteStoreObjects when none is.
 	UnreferencedObjects() ([]string, error)
 
 	// NewestOffset returns the offset of the last message in the log or -1 if
