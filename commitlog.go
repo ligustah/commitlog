@@ -158,8 +158,22 @@ type Options struct {
 	CompactMaxGoroutines int  // Max number of goroutines to use in a log compaction
 	// CompactMinAge is a protected compaction horizon: a segment is not eligible
 	// for compaction until its most recent write is at least this old, so recent
-	// segments are kept intact (preserving their full per-record history). Zero
-	// disables the lag (any sealed segment may be compacted).
+	// segments keep their full per-record history. Zero disables the lag (any
+	// sealed segment may be compacted).
+	//
+	// It is not a performance knob. It is the bound on HOW FAR A CONSUMER MAY
+	// LAG and still see every version of a key rather than only the latest.
+	// Compaction is defined to preserve the latest value per key, not the
+	// sequence of values, so a reader resuming from an offset older than this
+	// horizon finds intermediate versions already gone — the log is intact and
+	// its own contract is met, but a consumer maintaining anything derived from
+	// the SEQUENCE of changes (an incremental view, a downstream replica, a
+	// change feed) has silently missed updates it needed.
+	//
+	// So size it against the worst lag a dependent consumer may accumulate —
+	// including downtime and rebuild time — not against compaction cost. The
+	// failure it prevents is invisible at the point it happens: nothing errors,
+	// the consumer simply holds a view that no longer matches the log.
 	CompactMinAge time.Duration
 	// CompactTombstoneRetention enables tombstone GC on plain (spec-less)
 	// Clean calls: a latest-per-key record carrying AttrTombstone older than
