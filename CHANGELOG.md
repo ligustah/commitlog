@@ -5,6 +5,33 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.26.0 — 2026-07-27
+
+- **Added**: `segment.ReplaceOffloaded` — installs a freshly-written local
+  segment as the next generation of an offloaded one (C4). This is what lets a
+  tiered segment be compacted at all.
+
+  A local rewrite gets its atomicity from a rename over the same path. A store
+  has no equivalent, since `Put` overwrites unconditionally and cannot be made
+  conditional, so the generation is the substitute: the new bytes go to a key
+  nothing is reading, and the **marker is the commit point** that decides which
+  generation the segment is — the same role it already plays for a first
+  offload. A crash before the marker leaves orphaned objects nothing points at;
+  after it, the segment is the new generation.
+
+  The caches that would otherwise keep serving the old bytes are invalidated
+  between the commit and the swap: without that the rewrite would appear to
+  succeed while reads continued to come from the pre-rewrite window.
+
+  **Superseded keys are returned rather than deleted.** A reader that opened the
+  segment beforehand holds a backing over the old key and is entitled to finish;
+  deleting underneath it would turn a rewrite into a read error. It is also why
+  deletion has to be explicit rather than implied by an overwrite — a rewrite
+  that empties a segment leaves the old objects with nothing to overwrite them.
+
+  Not yet wired into the cleaners; that is C6, which removes the exclusion
+  keeping them away from offloaded segments.
+
 ## v0.25.0 — 2026-07-27
 
 - **Added**: invalidation for both of the caches that outlive the objects they

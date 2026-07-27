@@ -1313,6 +1313,118 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 	return newSegment(path, baseOffset, maxBytes, false, suffix, codec)
 }
 
+// ReplaceOffloaded installs fresh — a fully-written LOCAL working segment — as
+// the next generation of this offloaded segment, and returns the object keys the
+// rewrite superseded.
+//
+// This is what lets a tiered segment be compacted at all. A local rewrite gets
+// its atomicity from Replace's rename over the same path; a store has no
+// equivalent, because Put overwrites unconditionally and cannot be made
+// conditional. The generation is the substitute: the new bytes go to a key
+// nothing is reading, and the MARKER is the commit point that decides which
+// generation the segment is, exactly as it does for a first offload.
+//
+// Ordering, and what a crash at each step leaves:
+//
+//  1. upload the new log object, and the index object for an offloaded index.
+//     A crash here leaves objects nothing points at — orphans, reclaimable by
+//     comparing the store's keys against the markers.
+//  2. rewrite the marker. THIS IS THE COMMIT POINT. Before it the segment is
+//     the old generation; after it, the new one.
+//  3. invalidate the caches that would otherwise keep serving the old bytes:
+//     the backing's read-ahead window and, for an offloaded index, its cache
+//     entry. Skipping this is how a rewrite would appear to succeed and still
+//     serve pre-rewrite reads.
+//  4. swap in a backing over the new key.
+//
+// The superseded keys are RETURNED rather than deleted here. A reader that
+// opened this segment before the swap holds a backing over the old key and is
+// entitled to finish; deleting underneath it would turn a rewrite into a read
+// error. The caller deletes them once no such reader can remain — which is also
+// why deletion must be explicit rather than implied by the overwrite it
+// replaces: a rewrite that empties a segment leaves the old objects behind with
+// nothing to overwrite them.
+func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]string, error) {
+	s.Lock()
+	defer s.Unlock()
+	if s.store == nil {
+		return nil, errors.New("commitlog: segment is not offloaded")
+	}
+
+	var (
+		gen         = s.storeGen + 1
+		newKey      = segmentStoreKey(s.BaseOffset, gen)
+		newIndexKey string
+		superseded  = []string{s.storeKey}
+	)
+
+	size, err := fresh.backing.Size()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.Put(newKey, io.NewSectionReader(fresh.backing, 0, size), size); err != nil {
+		return nil, errors.Wrap(err, "put rewritten segment")
+	}
+	if s.indexKey != "" {
+		newIndexKey = segmentIndexStoreKey(s.BaseOffset, gen)
+		r, isize, err := fresh.Index.offloadReader()
+		if err != nil {
+			return nil, errors.Wrap(err, "read rewritten index")
+		}
+		if err := s.store.Put(newIndexKey, r, isize); err != nil {
+			return nil, errors.Wrap(err, "put rewritten index")
+		}
+		superseded = append(superseded, s.indexKey)
+	}
+
+	meta := offloadMeta{
+		LogKey:         newKey,
+		IndexKey:       newIndexKey,
+		FirstOffset:    fresh.firstOffset,
+		LastOffset:     fresh.lastOffset,
+		FirstWriteTime: fresh.firstWriteTime,
+		LastWriteTime:  fresh.lastWriteTime,
+		Position:       fresh.position,
+		PhysPosition:   size,
+		BlockMode:      fresh.blockMode,
+		Generation:     gen,
+	}
+	markerBytes, err := json.Marshal(meta)
+	if err != nil {
+		return nil, errors.Wrap(err, "encode offload marker")
+	}
+	if err := os.WriteFile(s.offloadMarkerPath(), markerBytes, 0o644); err != nil {
+		return nil, errors.Wrap(err, "write offload marker")
+	}
+
+	// Committed. From here the segment IS the new generation, so anything still
+	// able to serve the old one has to be cleared before the swap.
+	if sb, ok := s.backing.(*storeBacking); ok {
+		sb.Invalidate()
+	}
+	if s.indexKey != "" && s.indexCache != nil {
+		s.indexCache.Invalidate(s.indexCacheKey())
+	}
+
+	sb, err := newStoreBackingSize(s.store, newKey, size)
+	if err != nil {
+		return nil, err
+	}
+	s.backing = sb
+	s.storeKey = newKey
+	s.storeGen = gen
+	s.indexKey = newIndexKey
+	s.firstOffset = fresh.firstOffset
+	s.lastOffset = fresh.lastOffset
+	s.firstWriteTime = fresh.firstWriteTime
+	s.lastWriteTime = fresh.lastWriteTime
+	s.position = fresh.position
+	s.physPosition = size
+	s.blocks = fresh.blocks
+	s.blockMode = fresh.blockMode
+	return superseded, nil
+}
+
 // Cleaned creates a cleaned segment for this segment.
 func (s *segment) Cleaned() (*segment, error) {
 	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, cleanedSuffix, s.codec)
