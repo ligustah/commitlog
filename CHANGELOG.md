@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.22.4 — 2026-07-27
 
 - **Docs (contract)**: `TruncateBefore` promised `OldestOffset() >= minOffset`
   after the call. That is false, and the same comment said why two sentences
