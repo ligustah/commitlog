@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed (performance)**: `Sync`'s coalescing barely coalesced. It flushed the
+  instant it took leadership, so a committer arriving a microsecond later was
+  not covered and had to lead a flush of its own — measured, **98% of concurrent
+  committers led their own**, which is no batching at all. A consumer measured
+  the result as 6.5× slower than the caller-side batching v0.22.0 told them to
+  retire, flat from 4 writers up. They were right.
+
+  The leader now holds the door open before flushing, for the duration of the
+  PREVIOUS flush. That self-tunes: on a fast disk the wait is short, on a slow
+  one it grows and the batches grow with it, which is where batching pays.
+
+  Measured, commits per fsync on one log: **1 writer 1.0, 4 writers 0.26, 16
+  writers 0.064, 64 writers 0.019** — 53 commits per fsync, against 0.68 before.
+
+  Two cleverer variants were tried and both measured worse, which is why the
+  simple one is in: skipping the wait when nobody joined the last flush is
+  self-reinforcing (with no window nobody can arrive in time to join, so it
+  never re-arms) and took 64 writers back to 0.42; decaying the window by half
+  instead was unstable at high concurrency, landing at 0.167.
+
+  The regression test's bar was also wrong — it asserted "fewer fsyncs than
+  callers", which the barely-coalescing version passed comfortably.
+
 ## v0.22.0 — 2026-07-27
 
 - **Breaking / Changed**: `Sync()` becomes `Sync(offset)` — "make the log

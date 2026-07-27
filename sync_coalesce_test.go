@@ -84,8 +84,11 @@ func TestConcurrentSyncsShareOneFsync(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	require.Less(t, fsyncs(), int64(writers),
-		"%d concurrent syncs cost %d fsyncs — they are not coalescing",
+	// A bar far below one-per-caller, because "fewer than N" is met even by a
+	// barrier that barely batches: before the leader held its window open, 32
+	// concurrent committers still cost ~0.8 fsyncs each and passed that test.
+	require.Less(t, fsyncs(), int64(writers/4),
+		"%d concurrent syncs cost %d fsyncs — they are barely coalescing",
 		writers, fsyncs())
 	require.Positive(t, fsyncs())
 }
