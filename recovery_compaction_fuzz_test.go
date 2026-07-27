@@ -372,9 +372,27 @@ func fzReadAll(t *testing.T, l *commitLog) map[int64]SerializedMessage {
 
 // fzAssertNoOrphanedRecords enforces classify's cross-segment promise: control
 // markers below StripBelow are removable only because the records they governed
-// are stripped in the same pass. So if ANY marker has been removed, no
-// surviving record may still be carrying the strip targets — otherwise a reader
-// is left buffering records whose marker no longer exists.
+// are stripped in the same pass. A record left carrying the strip targets with
+// no marker that could govern it strands a reader, buffering it forever.
+//
+// A marker governs the records of its transaction, which sit at LOWER offsets.
+// So a surviving record still carrying headers is orphaned only when EVERY
+// marker above it has been removed — while one remains above it, a reader still
+// has something to release it on.
+//
+// The earlier form of this check was "if any marker was removed, no record may
+// carry headers", and it reported a violation that was not one: markers at
+// offsets 0-7 had been removed, the only transactional record was at 15, and
+// markers above 15 were all alive. Those removed markers governed offsets below
+// 7, where the log held no transactional records at all — nothing was stranded.
+// A fuzz oracle that fails on correct behaviour is worse than a missing one; it
+// spends real investigation and then teaches you to distrust it.
+//
+// What this does NOT prove: the generator appends markers and transactional
+// records independently, with no transaction structure tying them together, so
+// there is no way to check that a record is released by its OWN marker rather
+// than a later one. It catches the stranding case, which is the one that hangs
+// a reader.
 //
 // Deliberately checked on a partially-compacted log: the rewrite budget applies
 // rewrites one segment at a time, and this invariant is only violable when a
@@ -386,25 +404,31 @@ func fzAssertNoOrphanedRecords(t *testing.T, l *commitLog, markerOffs, txnOffs [
 	}
 	got := fzReadAll(t, l)
 
-	removedMarkers := 0
-	for _, off := range markerOffs {
-		if _, ok := got[off]; !ok {
-			removedMarkers++
+	survivingAbove := func(off int64) bool {
+		for _, mo := range markerOffs {
+			if mo <= off {
+				continue
+			}
+			if _, alive := got[mo]; alive {
+				return true
+			}
 		}
+		return false
 	}
-	if removedMarkers == 0 {
-		return // every marker still present: nothing can be orphaned
-	}
+
 	for _, off := range txnOffs {
 		m, ok := got[off]
 		if !ok {
 			continue
 		}
+		if survivingAbove(off) {
+			continue // a marker that could govern it is still there
+		}
 		for _, h := range []string{"pid", "epoch", "seq"} {
 			_, has := m.Headers()[h]
 			require.False(t, has,
-				"record at %d still carries %q while %d control marker(s) have been removed",
-				off, h, removedMarkers)
+				"record at %d still carries %q and every marker above it has been "+
+					"removed, so nothing is left to release it", off, h)
 		}
 	}
 }

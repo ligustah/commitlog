@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\n\n\n\n\n\nFX\x19&\x94\xe4jjjjj\xff\x81\n\n\x1f\n\n\n\n\n\n\n\n\n\n\nAAjjjXXjjj\x00@\xffA0")
