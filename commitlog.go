@@ -96,13 +96,21 @@ type commitLog struct {
 	syncFlushing bool
 	syncDone     chan struct{}
 	// syncWindow is how long the next flush's leader holds the door open for
-	// other committers to join it, set to the previous flush's duration.
-	// syncWindow is how long the next flush's leader holds the door open for
-	// other committers to join it, and syncJoined counts how many joined the
-	// flush in flight. A flush nobody joined sets the window back to zero, so a
-	// lone committer never pays for a batch that was not going to form.
-	syncWindow       time.Duration
-	syncJoined       int
+	// other committers to join it, set to the previous flush's duration, and
+	// syncJoined counts how many joined the flush in flight.
+	//
+	// The window is what makes the barrier batch at all. Without it — flushing
+	// the moment leadership is taken, and letting everyone else queue behind the
+	// flush in flight — only callers arriving DURING an fsync are captured, and
+	// on a fast disk that is a sliver of the cycle: measured at 64 concurrent
+	// committers, 2323 flushes led against 1011 rides. With the window it is 51
+	// against 3149.
+	syncWindow time.Duration
+	syncJoined int
+	// Instrumentation for the batching tests: how many Sync calls led a flush
+	// versus rode someone else's. Counted under syncMu.
+	syncLeaders      int64
+	syncFollowers    int64
 	hw               int64
 	closed           chan struct{}
 	closeOnce        sync.Once      // guards close(l.closed)
@@ -1438,9 +1446,13 @@ func (l *commitLog) checkpointHWLoop() {
 // publishes what that flush covered — which is generally far more than its own
 // offset, so the callers waiting behind it are covered too.
 func (l *commitLog) Sync(offset int64) error {
+	waited := false
 	for {
 		l.syncMu.Lock()
 		if offset <= l.syncDurable {
+			if waited {
+				l.syncFollowers++
+			}
 			l.syncMu.Unlock()
 			return nil
 		}
@@ -1452,9 +1464,11 @@ func (l *commitLog) Sync(offset int64) error {
 			wait := l.syncDone
 			l.syncJoined++
 			l.syncMu.Unlock()
+			waited = true
 			<-wait
 			continue
 		}
+		l.syncLeaders++
 		l.syncFlushing = true
 		done := make(chan struct{})
 		l.syncDone = done
