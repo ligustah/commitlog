@@ -21,14 +21,16 @@ transparency), not the byte-level file format. They are grounded in the code —
 | `CommitLog.tla` | append / commit / checkpoint / crash + tail recovery / truncation | `commitlog.go` (`SetHighWatermark`, `checkpointHW`, `RecoverTail`, `Truncate`, `TruncateBefore`) |
 | `Compaction.tla` | transaction-aware compaction: latest-per-key, aborted-shadowing, tombstone GC, stripping, convergence | `compact_cleaner.go` |
 | `Offload.tla` | tiered storage: read-through + LRU index cache with pinning | `segment_store.go`, `index_cache.go` |
-| `MultiWriter.tla` | tier writes when two processes may each believe they own them: writer-stamped keys, fenced deletes, reclaimable garbage | `segment.go` (`segmentStoreKey`, `Delete`), `commitlog.go` (`SetTierWriter`, `DeleteStoreObjects`, `UnreferencedObjects`) |
+| `MultiWriter.tla` | what a shared SegmentStore does with two writers — the evidence for the single-writer contract, not a defence | `interface.go` (the contract), `commitlog.go` (`SetTierReadOnly`, `ExportTierState`) |
 
 Each spec has a `.cfg` (the verified configuration) plus at least one
 `*_Buggy*.cfg` that swaps in a deliberately broken variant to show the
-invariants have teeth (TLC produces a counterexample). `MultiWriter` has three,
-one per defence it models — an unstamped key, an unfenced delete, and a fence
-with no lineage rule fail in three different ways, and a single config could
-only demonstrate one of them.
+invariants have teeth (TLC produces a counterexample). `MultiWriter` has three, because it models
+three different ways a shared store goes wrong and one config can only show
+one of them. Note that `MultiWriter_ContractBroken.cfg` is not a bug in the
+log: it is what the shipped code does when its single-writer contract is
+violated, kept so that the obligation on the caller is backed by a
+counterexample instead of a warning.
 
 ## Running
 
@@ -60,7 +62,7 @@ java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter.cfg MultiWrite
 java -cp tla2tools.jar tlc2.TLC -workers auto -config CommitLog_Buggy.cfg  CommitLog.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config Compaction_Buggy.cfg Compaction.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config Offload_Buggy.cfg     Offload.tla
-java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_Buggy.cfg       MultiWriter.tla
+java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_ContractBroken.cfg MultiWriter.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_BuggyDelete.cfg MultiWriter.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_BuggyLeak.cfg   MultiWriter.tla
 ```
@@ -204,10 +206,12 @@ close the window either, and the spec shows why mechanically: a generation is
 read from each writer's **own local marker**, so two writers that both believe
 they own the tier compute the same next generation and address the same key.
 
-**Teeth** (`MultiWriter_Buggy.cfg`, `Stamped = FALSE`): the pre-stamp key,
-generation only. TLC reports **NoClobber** violated in four states — elect the
-new owner, the old one (not yet knowing) offloads, the new one offloads, and the
-second PUT silently replaces the first at the identical key.
+**The contract's cost** (`MultiWriter_ContractBroken.cfg`, `Stamped = FALSE`):
+deterministic keys, which is what the shipped code writes. TLC reports
+**NoClobber** violated in four states — elect the new owner, the old one (not
+yet knowing) offloads, the new one offloads, and the second PUT silently
+replaces the first at the identical key. This is not a defect to fix in the
+log; it is precisely what the caller is promising cannot happen.
 
 **Teeth** (`MultiWriter_BuggyLeak.cfg`, `LineageReclaim = FALSE`): stamped keys
 and fenced deletes, but without the rule that a writer may reclaim keys its own

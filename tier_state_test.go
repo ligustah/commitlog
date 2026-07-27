@@ -7,9 +7,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// tieredLog builds a log with some sealed segments offloaded under the given
-// writer identity, and returns it with its store.
-func tieredLog(t *testing.T, writer string) (*commitLog, *FileSegmentStore, int64) {
+// tieredLog builds a log with some sealed segments offloaded, and returns it
+// with its store.
+func tieredLog(t *testing.T) (*commitLog, *FileSegmentStore, int64) {
 	t.Helper()
 	dir := tempDir(t)
 	store, err := NewFileSegmentStore(filepath.Join(dir, "store"))
@@ -19,7 +19,6 @@ func tieredLog(t *testing.T, writer string) (*commitLog, *FileSegmentStore, int6
 		Path:             dir,
 		MaxSegmentBytes:  64,
 		SegmentStore:     store,
-		TierWriter:       writer,
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)
@@ -39,11 +38,11 @@ func tieredLog(t *testing.T, writer string) (*commitLog, *FileSegmentStore, int6
 }
 
 // The state has to carry everything needed to place a segment without reading
-// its object — including the writer and generation, so the receiving log can
-// allocate the NEXT generation on a rewrite instead of colliding with what is
-// already there.
+// its object — including the generation, so the receiving log allocates the
+// NEXT one on a rewrite instead of starting again at zero and addressing a key
+// that already exists.
 func TestExportTierStateDescribesEveryOffloadedSegment(t *testing.T) {
-	l, _, _ := tieredLog(t, "nodeA")
+	l, _, _ := tieredLog(t)
 
 	state, err := l.ExportTierState()
 	require.NoError(t, err)
@@ -51,10 +50,9 @@ func TestExportTierStateDescribesEveryOffloadedSegment(t *testing.T) {
 
 	for _, o := range state {
 		require.NotEmpty(t, o.LogKey)
-		require.Equal(t, "nodeA", o.Writer, "the identity must survive the handover")
 		require.Equal(t, 0, o.Generation)
-		require.Equal(t, o.LogKey, segmentStoreKey(o.BaseOffset, o.Generation, o.Writer),
-			"the key must be the one its base offset, generation and writer name")
+		require.Equal(t, o.LogKey, segmentStoreKey(o.BaseOffset, o.Generation),
+			"the key must be the one its base offset and generation name")
 		require.Positive(t, o.PhysPosition)
 		require.LessOrEqual(t, o.FirstOffset, o.LastOffset)
 	}
@@ -73,7 +71,7 @@ func TestExportTierStateDescribesEveryOffloadedSegment(t *testing.T) {
 // owner's state must make those objects its own — readable through the log, and
 // not uploaded a second time.
 func TestImportTierStateAdoptsObjectsWrittenByAnotherProcess(t *testing.T) {
-	old, store, last := tieredLog(t, "nodeA")
+	old, store, last := tieredLog(t)
 	state, err := old.ExportTierState()
 	require.NoError(t, err)
 	require.NotEmpty(t, state)
@@ -87,7 +85,6 @@ func TestImportTierStateAdoptsObjectsWrittenByAnotherProcess(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  64,
 		SegmentStore:     store,
-		TierWriter:       "nodeB",
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -113,28 +110,25 @@ func TestImportTierStateAdoptsObjectsWrittenByAnotherProcess(t *testing.T) {
 	require.Equal(t, state, after, "the state must survive the round trip intact")
 
 	// Checked against the KEY as well, not only against the other side of the
-	// round trip: export and import share the code that carries the identity,
-	// so a round trip that lost it on both sides would still compare equal.
+	// round trip: export and import share the code that carries this, so a round
+	// trip that lost it on both sides would still compare equal.
 	for _, o := range after {
-		require.Equal(t, storeKeyWriter(o.LogKey), o.Writer,
-			"the exported identity must agree with the key it names")
-		require.Equal(t, "nodeA", o.Writer)
+		require.Equal(t, segmentStoreKey(o.BaseOffset, o.Generation), o.LogKey,
+			"the exported state must agree with the key it names")
 	}
 
-	// And it did not upload a second copy of anything.
+	// And it did not upload a second copy of anything: the store still holds
+	// exactly the objects the first log put there.
 	keys, err := store.List()
 	require.NoError(t, err)
-	for _, k := range keys {
-		require.Equal(t, "nodeA", storeKeyWriter(k),
-			"adoption must not have written new objects")
-	}
+	require.Len(t, keys, len(state), "adoption must not have written new objects")
 }
 
 // Having adopted them, the successor can also reclaim them — which is the other
 // half of the problem, since objects it cannot name are objects it pays for
 // forever.
 func TestImportedObjectsBecomeReclaimable(t *testing.T) {
-	old, store, last := tieredLog(t, "nodeA")
+	old, store, last := tieredLog(t)
 	state, err := old.ExportTierState()
 	require.NoError(t, err)
 
@@ -143,7 +137,6 @@ func TestImportedObjectsBecomeReclaimable(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  64,
 		SegmentStore:     store,
-		TierWriter:       "nodeB",
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -160,8 +153,8 @@ func TestImportedObjectsBecomeReclaimable(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, orphans)
 
-	// Retention drops a tiered segment, and its object goes with it — even
-	// though the object carries the PREVIOUS identity's stamp.
+	// Retention drops a tiered segment, and its object goes with it — an object
+	// this process never uploaded.
 	successor.mu.RLock()
 	var tiered *segment
 	for _, s := range successor.segments {
@@ -186,7 +179,7 @@ func TestImportedObjectsBecomeReclaimable(t *testing.T) {
 // is silent — the records are still there, just different ones — so it has to be
 // refused rather than detected later.
 func TestImportTierStateRefusesAnObjectCoveringOtherRecords(t *testing.T) {
-	old, store, last := tieredLog(t, "nodeA")
+	old, store, last := tieredLog(t)
 	state, err := old.ExportTierState()
 	require.NoError(t, err)
 	require.NotEmpty(t, state)
@@ -196,7 +189,6 @@ func TestImportTierStateRefusesAnObjectCoveringOtherRecords(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  64,
 		SegmentStore:     store,
-		TierWriter:       "nodeB",
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -228,7 +220,7 @@ func TestImportTierStateRefusesAnObjectCoveringOtherRecords(t *testing.T) {
 // these would otherwise corrupt the read path in a way the caller could not see
 // from the return value.
 func TestImportTierStateRefusesStateItCannotApply(t *testing.T) {
-	l, store, _ := tieredLog(t, "nodeA")
+	l, store, _ := tieredLog(t)
 	state, err := l.ExportTierState()
 	require.NoError(t, err)
 	require.NotEmpty(t, state)
@@ -250,7 +242,7 @@ func TestImportTierStateRefusesStateItCannotApply(t *testing.T) {
 		match string
 	}{
 		{"missing object", bend(func(o *TierObject) {
-			o.LogKey = segmentStoreKey(o.BaseOffset, 9, "nodeA")
+			o.LogKey = segmentStoreKey(o.BaseOffset, 9)
 		}), "missing object"},
 		{"no log key", bend(func(o *TierObject) { o.LogKey = "" }), "no log key"},
 		// The size bounds every read of the object, so a state that disagrees
@@ -258,7 +250,6 @@ func TestImportTierStateRefusesStateItCannotApply(t *testing.T) {
 		// copy is gone by then.
 		{"size understated", bend(func(o *TierObject) { o.PhysPosition-- }), "bytes but it is"},
 		{"size overstated", bend(func(o *TierObject) { o.PhysPosition++ }), "bytes but it is"},
-		{"unusable writer", bend(func(o *TierObject) { o.Writer = "node.1" }), "unusable writer"},
 		{"offsets inverted", bend(func(o *TierObject) {
 			o.FirstOffset = o.LastOffset + 1
 		}), "above last offset"},
@@ -293,7 +284,7 @@ func TestImportTierStateRefusesStateItCannotApply(t *testing.T) {
 // what it managed. The offsets check fires per segment, so a second entry that
 // disagrees with its local segment stops the import mid-batch.
 func TestImportTierStateReportsWhatItApplied(t *testing.T) {
-	l, _, _ := tieredLog(t, "nodeA")
+	l, _, _ := tieredLog(t)
 	state, err := l.ExportTierState()
 	require.NoError(t, err)
 

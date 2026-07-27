@@ -16,17 +16,17 @@ import (
 // objects through the log, cannot avoid uploading a second copy of the same
 // bytes, and cannot ever reclaim them.
 //
-// Discovering them from the store instead does NOT work, which is worth being
-// explicit about because it looks like it should. Generations are per-writer —
-// each writer derives the next one from its own local marker — so for a single
-// base offset a shared store may hold both wA.g3 and wB.g1, and nothing in the
-// store orders them. Keys, sizes and timestamps all fail to say which is
-// current; adoption by scanning would be guessing.
+// Handing it over explicitly is what makes a change of owner work. The
+// alternative — the new owner scanning the store and inferring what is current
+// — is not sound in general: a generation is derived from the writer's own
+// local marker, so a store that has been through a bad handover can hold two
+// objects for one base offset with nothing to order them, and a crash between
+// an upload and its marker leaves an object that was never committed. Both are
+// invisible to a scan.
 //
-// The total order has to come from the layer that has consensus. So the log
-// exports this state and imports state handed back to it, and whoever owns
-// replication decides what is current. It is the same division as CleanSpec's
-// Ceiling: the log honours a decision it cannot itself make.
+// So the state travels with the ownership decision, from whatever makes that
+// decision. It is the same division as CleanSpec's Ceiling: the log honours a
+// decision it cannot itself make.
 type TierObject struct {
 	// BaseOffset identifies the segment. It is the key the caller matches on.
 	BaseOffset int64
@@ -50,11 +50,10 @@ type TierObject struct {
 	// BlockMode records whether the object is block-compressed, since it
 	// cannot be read correctly without knowing.
 	BlockMode bool
-	// Writer is the identity that wrote these objects, and Generation which
-	// generation they are. Carried so the state survives a handover intact:
-	// the receiving log needs both to allocate the next generation on a
-	// rewrite rather than colliding with what is already there.
-	Writer     string
+	// Generation is which generation these objects are. Carried so the state
+	// survives a handover intact: the receiving log needs it to allocate the
+	// NEXT generation on a rewrite, rather than starting again at zero and
+	// addressing a key that already exists.
 	Generation int
 }
 
@@ -70,7 +69,6 @@ func tierObjectFromMeta(baseOffset int64, m offloadMeta) TierObject {
 		Position:       m.Position,
 		PhysPosition:   m.PhysPosition,
 		BlockMode:      m.BlockMode,
-		Writer:         m.Writer,
 		Generation:     m.Generation,
 	}
 }
@@ -86,7 +84,6 @@ func (o TierObject) meta() offloadMeta {
 		Position:       o.Position,
 		PhysPosition:   o.PhysPosition,
 		BlockMode:      o.BlockMode,
-		Writer:         o.Writer,
 		Generation:     o.Generation,
 	}
 }
@@ -111,7 +108,6 @@ func (l *commitLog) ExportTierState() ([]TierObject, error) {
 				Position:       s.position,
 				PhysPosition:   s.physPosition,
 				BlockMode:      s.blockMode,
-				Writer:         s.storeWriter,
 				Generation:     s.storeGen,
 			})
 		}
@@ -130,6 +126,10 @@ func (l *commitLog) ImportTierState(objs []TierObject) (int, error) {
 	if l.SegmentStore == nil {
 		return 0, errors.New("commitlog: cannot import tier state without a SegmentStore")
 	}
+	// Importing writes markers and drops local bytes, but touches no object, so
+	// a read-only tier can still import: that is exactly what a process does
+	// when it is told what a store holds without being given the right to
+	// change it.
 
 	// Validated in full BEFORE anything is applied. Import mutates the read
 	// path and drops local bytes, so a batch that is half-applied and then
@@ -158,10 +158,6 @@ func (l *commitLog) ImportTierState(objs []TierObject) (int, error) {
 			return 0, errors.Errorf(
 				"commitlog: tier state for %d has first offset %d above last offset %d",
 				o.BaseOffset, o.FirstOffset, o.LastOffset)
-		case !validTierWriter(o.Writer):
-			return 0, errors.Errorf(
-				"commitlog: tier state for %d has an unusable writer %q",
-				o.BaseOffset, o.Writer)
 		case o.IndexKey != "" && l.RemoteIndexCache == nil:
 			return 0, errors.Errorf(
 				"commitlog: tier state for %d has an offloaded index but no RemoteIndexCache is configured",
@@ -213,7 +209,6 @@ func (l *commitLog) ImportTierState(objs []TierObject) (int, error) {
 		active = l.segments[len(l.segments)-1]
 	}
 
-	var superseded []string
 	applied := 0
 	for _, o := range sorted {
 		seg, ok := byBase[o.BaseOffset]
@@ -242,15 +237,12 @@ func (l *commitLog) ImportTierState(objs []TierObject) (int, error) {
 			// Pointing at a different object: the caller's state wins. The old
 			// keys join this log's lineage, so they can be reclaimed later —
 			// this log is the one that stopped referencing them.
-			old := []string{seg.storeKey}
-			if seg.indexKey != "" {
-				old = append(old, seg.indexKey)
-			}
+			// The objects it stops referencing become garbage, findable through
+			// UnreferencedObjects — nothing else knows they were dropped.
 			if err := seg.replaceOffloadedTargetLocked(o.meta(), l.RemoteIndexCache); err != nil {
 				seg.Unlock()
 				return applied, errors.Wrapf(err, "repoint segment %d", o.BaseOffset)
 			}
-			superseded = append(superseded, old...)
 		default:
 			// A local segment whose bytes are already in the store. Its records
 			// must be the ones the object holds; otherwise dropping the local
@@ -272,6 +264,5 @@ func (l *commitLog) ImportTierState(objs []TierObject) (int, error) {
 		applied++
 	}
 
-	l.noteSuperseded(superseded)
 	return applied, nil
 }

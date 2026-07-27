@@ -860,7 +860,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	// and the segment object itself carries on — so the caller keeps the SAME
 	// segment rather than the working copy, which is only the vehicle.
 	if seg.isOffloaded() {
-		superseded, err := seg.ReplaceOffloaded(cleaned, spec.TierWriter, c.cache)
+		superseded, err := seg.ReplaceOffloaded(cleaned, c.cache)
 		if err != nil {
 			return nil, removed, nil, err
 		}

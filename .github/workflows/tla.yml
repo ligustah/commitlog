@@ -65,6 +65,6 @@ jobs:
           check CommitLog_Buggy         CommitLog   "CommittedPrefixStability"
           check Compaction_Buggy        Compaction  "ViewPreserved|NoAbortedBelowCeiling"
           check Offload_Buggy           Offload     "PinnedStaysCached"
-          check MultiWriter_Buggy       MultiWriter "NoClobber"
+          check MultiWriter_ContractBroken MultiWriter "NoClobber"
           check MultiWriter_BuggyDelete MultiWriter "MarkerIntegrity"
           check MultiWriter_BuggyLeak   MultiWriter "EveryOrphanReclaimable"

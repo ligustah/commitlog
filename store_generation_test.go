@@ -15,22 +15,22 @@ import (
 // whole point: a rewrite must not be able to land on the key a reader is
 // already reading.
 func TestSegmentStoreKeyGenerations(t *testing.T) {
-	require.Equal(t, "00000000000000000042.log", segmentStoreKey(42, 0, ""))
-	require.Equal(t, "00000000000000000042.index", segmentIndexStoreKey(42, 0, ""))
+	require.Equal(t, "00000000000000000042.log", segmentStoreKey(42, 0))
+	require.Equal(t, "00000000000000000042.index", segmentIndexStoreKey(42, 0))
 
 	seen := map[string]bool{}
 	for gen := 0; gen < 8; gen++ {
-		k := segmentStoreKey(42, gen, "")
+		k := segmentStoreKey(42, gen)
 		require.False(t, seen[k], "generation %d reused key %s", gen, k)
 		seen[k] = true
 
-		ik := segmentIndexStoreKey(42, gen, "")
+		ik := segmentIndexStoreKey(42, gen)
 		require.False(t, seen[ik], "generation %d reused index key %s", gen, ik)
 		seen[ik] = true
 	}
 
 	// Distinct base offsets must not collide with a generation of another.
-	require.NotEqual(t, segmentStoreKey(42, 1, ""), segmentStoreKey(43, 0, ""))
+	require.NotEqual(t, segmentStoreKey(42, 1), segmentStoreKey(43, 0))
 }
 
 // A marker written before generations existed has no generation field. It must
@@ -49,7 +49,7 @@ func TestOffloadMarkerWithoutGenerationReadsAsZero(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, meta.Generation)
 	require.Equal(t, "00000000000000000000.log", meta.LogKey)
-	require.Equal(t, segmentStoreKey(0, meta.Generation, ""), meta.LogKey,
+	require.Equal(t, segmentStoreKey(0, meta.Generation), meta.LogKey,
 		"a legacy marker's key must be exactly the generation-0 key")
 }
 
@@ -72,7 +72,7 @@ func TestOffloadMarkerV1ReadsAsZero(t *testing.T) {
 // expects.
 func TestOffloadMarkerGenerationRoundTrips(t *testing.T) {
 	encoded, err := json.Marshal(offloadMeta{
-		LogKey: segmentStoreKey(7, 3, ""), Generation: 3, LastOffset: 9,
+		LogKey: segmentStoreKey(7, 3), Generation: 3, LastOffset: 9,
 	})
 	require.NoError(t, err)
 	require.Contains(t, string(encoded), `"generation":3`)
@@ -80,9 +80,9 @@ func TestOffloadMarkerGenerationRoundTrips(t *testing.T) {
 	var back offloadMeta
 	require.NoError(t, json.Unmarshal(encoded, &back))
 	require.Equal(t, 3, back.Generation)
-	require.Equal(t, segmentStoreKey(7, 3, ""), back.LogKey)
+	require.Equal(t, segmentStoreKey(7, 3), back.LogKey)
 
-	zero, err := json.Marshal(offloadMeta{LogKey: segmentStoreKey(7, 0, "")})
+	zero, err := json.Marshal(offloadMeta{LogKey: segmentStoreKey(7, 0)})
 	require.NoError(t, err)
 	require.NotContains(t, string(zero), "generation",
 		"generation 0 must not appear, so markers stay as they were")
@@ -126,7 +126,7 @@ func TestOffloadedSegmentCarriesItsGeneration(t *testing.T) {
 		}
 		offloaded++
 		require.Equal(t, 0, gen, "a first offload is generation 0")
-		require.Equal(t, segmentStoreKey(s.BaseOffset, gen, ""), key,
+		require.Equal(t, segmentStoreKey(s.BaseOffset, gen), key,
 			"the segment's key must be the one its generation names")
 	}
 	require.Positive(t, offloaded)

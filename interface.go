@@ -1,6 +1,44 @@
 package commitlog
 
 // CommitLog is the durable write-ahead log interface used to back each stream.
+//
+// # Single-writer contract for a SegmentStore
+//
+// A log with a SegmentStore assumes it is the ONLY process writing to that
+// store. It does not stamp its identity into object keys, does not fence its
+// deletes against anyone else's, and cannot detect a second writer. This is a
+// deliberate boundary: who owns a store is a question about cluster
+// membership, and nothing the log can observe answers it.
+//
+// The obligation that falls on the caller is exactly this: AT MOST ONE process
+// may have a store writable at a time. Express it with SetTierReadOnly — every
+// process that does not own the tier runs read-only, and ownership moves by the
+// previous owner going read-only BEFORE the next one comes out of it.
+//
+// That ordering is the part worth getting right, because it is not automatic
+// and its failure is silent. A demoted leader reads its own lagging view of
+// membership and briefly still believes it owns the tier; consensus does not
+// help, since a node is leader at the moment it DECIDES, not at the moment its
+// write lands. So a handover has to wait out two things, not one:
+//
+//   - how long a former owner can still BELIEVE it owns the tier, and
+//   - how long a write it already issued can still be IN FLIGHT — including
+//     retries, since a retrying client can stretch one logical write well past
+//     a single timeout.
+//
+// Only the second is easy to overlook, and it is the one no amount of
+// signalling can shorten: once a request is with the storage client, it will
+// land whether or not the sender still believes anything.
+//
+// If two processes do write concurrently, they compute the SAME next generation
+// from their own local markers, address the same key, and one silently
+// overwrites the other. Object stores offer no compare-and-swap to break the
+// tie, so there is no error for either party and the loser may be the one whose
+// data was current. tla/MultiWriter.tla models that failure precisely; it is
+// the evidence for this contract rather than a description of a defence, since
+// the log has none.
+//
+// A log with no SegmentStore is unaffected by any of this.
 type CommitLog interface {
 	// Delete closes the log and removes all data associated with it from the
 	// filesystem.
@@ -120,84 +158,35 @@ type CommitLog interface {
 	// work transparently; a restart reopens them from the store.
 	OffloadBefore(minOffset int64) (int, error)
 
-	// SetTierWriter updates the identity stamped into the object keys this log
-	// writes to its SegmentStore, and fenced against when it deletes them. Call
-	// it when ownership of tier writes moves — a new leader epoch, a new node.
+	// SetTierReadOnly grants or withdraws this log's right to write to its
+	// SegmentStore. While read-only it will not offload, will not rewrite a
+	// tiered segment, will not apply tier retention, and refuses
+	// DeleteStoreObjects. Reads are unaffected, and a tiered read stays
+	// transparent.
 	//
-	// It exists because consensus cannot fence a write to an external store. A
-	// node is leader at the moment it DECIDES, not at the moment its PUT lands;
-	// its view of leadership lags, its in-flight requests cannot be observed or
-	// cancelled, and no amount of waiting makes the claim it needs ("I will
-	// still be the owner when this lands") a statement about the past. Stamping
-	// the identity into the key sidesteps that entirely: two owners cannot
-	// address the same object, so a stale one produces garbage to reclaim
-	// rather than a silent overwrite of live data. The generation alone does
-	// NOT achieve this — it is read from each writer's own local marker, so two
-	// writers both compute the same next generation.
+	// This is how ownership of a shared store is expressed. commitlog assumes
+	// it is the ONLY writer to its store — see the contract on this interface —
+	// so a process that does not own the tier runs read-only, and a handover is
+	// the previous owner going read-only before the next one comes out of it.
 	//
-	// The id must be letters, digits, '-' or '_' (max 64). A '.' or '/' does
-	// not survive the key format and is refused rather than silently mangled.
-	// Empty means unstamped, which is the right setting for the single-writer
-	// case: keys keep their original form and no delete is fenced.
-	//
-	// Changing the id does NOT abandon existing objects: reads resolve keys
-	// from the offload marker verbatim, never by recomputing them, so objects
-	// written under a previous identity stay readable. They do, however, become
-	// undeletable through the fence — see UnreferencedObjects for reclaiming
-	// them.
-	SetTierWriter(id string) error
+	// Going read-only takes effect for operations that START after it returns.
+	// It does not cancel a write already in flight, because nothing can: once a
+	// request is with the storage client it will land whether or not this log
+	// still believes it owns anything. Sizing the handover so those writes have
+	// drained is the caller's job, and getting it wrong is the failure the
+	// contract describes.
+	SetTierReadOnly(readOnly bool)
 
-	// DeleteStoreObjects removes objects from the SegmentStore, refusing any
-	// key stamped by a writer other than this log's current one.
+	// DeleteStoreObjects removes objects from the SegmentStore, returning those
+	// it removed. It is refused outright while the tier is read-only.
 	//
-	// This is the fenced counterpart to the keys CleanWithSpec hands back: a
-	// rewrite cannot delete the object it supersedes (a reader that opened the
-	// segment first is still reading it), so the caller deletes them once no
-	// such reader can remain. That deletion is the dangerous half of the tier
-	// protocol — a clobbered upload leaves the old bytes recoverable somewhere,
-	// a delete leaves nothing — so it goes through the same fence as every
-	// other removal rather than a raw store call.
-	//
-	// Deleting is idempotent: a key that is already gone is not an error.
-	// Unstamped keys are NOT fenced, since they predate any identity and no
-	// writer can be shown not to own them. Neither are keys THIS log
-	// superseded: a superseded object is one this log's own marker named until
-	// a rewrite replaced it, so its lineage is not in doubt whatever identity
-	// wrote the bytes. Fencing those would refuse the caller the very keys
-	// CleanWithSpec just handed it — which, after an identity change, is every
-	// rewrite from then on.
-	//
-	// Anything else stamped by another identity is refused, and needs an
-	// explicit AdoptTierWriters claim.
+	// This is the counterpart to the keys CleanWithSpec hands back: a rewrite
+	// cannot delete the object it supersedes, because a reader that opened the
+	// segment first is still reading it, so the caller deletes them once no such
+	// reader can remain. Deleting is idempotent — a key that is already gone is
+	// not an error — so a caller retrying after a partial failure does not have
+	// to tell the cases apart.
 	DeleteStoreObjects(keys []string) ([]string, error)
-
-	// AdoptTierWriters declares identities whose store objects this log may
-	// also reclaim, for the objects the fence would otherwise strand: those
-	// written under an identity this process no longer holds and did not
-	// supersede in its current lifetime — a crash between a rewrite and the
-	// deletion of what it replaced, or an offload whose marker was lost.
-	//
-	// This is deliberately an assertion the CALLER makes, not something the log
-	// infers. Nothing observable at this layer establishes it: an identity that
-	// looks idle may be a process about to come back from a pause with a PUT
-	// already in flight. Whatever retires the previous epoch — a consensus term
-	// that has moved on, a lease that has expired, an operator who confirmed
-	// the node is gone — lives above the log, so the claim comes from there.
-	//
-	// The claim required is that the identity is no longer SERVING those
-	// objects, which is stronger than "no longer writing" and is the condition
-	// that actually matters. Where several processes share a store, each keeps
-	// its offload markers locally: a process that lost ownership still holds
-	// markers naming its objects and still reads through them, and nothing
-	// tells it to stop. Adopting a demoted-but-live peer's identity therefore
-	// lets this log delete objects that peer is actively reading — the failure
-	// the delete fence exists to prevent, arrived at by permission instead of
-	// by race.
-	//
-	// Adopting an identity that can still write is worse again: it reintroduces
-	// the hazard the stamp removes, with the damage now a delete rather than an
-	// overwrite, and a delete leaves nothing to recover.
-	AdoptTierWriters(ids ...string) error
 
 	// ExportTierState returns this log's tier bookkeeping — which store object
 	// currently holds each offloaded segment, and everything needed to place
@@ -246,11 +235,8 @@ type CommitLog interface {
 	//
 	//   - a rewrite that superseded an object whose key was never deleted,
 	//   - an upload that succeeded before a crash lost the marker naming it,
-	//   - an object written under a previous identity, which the delete fence
-	//     now refuses to remove.
+	//   - an object a previous owner of the store uploaded and never removed.
 	//
-	// Fencing without this would trade a corruption bug for an unbounded
-	// storage bill, which is a better failure but still a failure.
 	//
 	// IMPORTANT: unreferenced means unreferenced BY THIS LOG, and that
 	// distinction is load-bearing rather than cautionary. Offload markers are

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -120,9 +119,6 @@ type segment struct {
 	// marker; the backing opened here keeps its own key, so a reader in flight
 	// finishes against the generation it started on.
 	storeGen int
-	// storeWriter is the identity stamped into this segment's object keys,
-	// from its marker. Empty for an unstamped (single-writer) log.
-	storeWriter string
 
 	sync.RWMutex
 }
@@ -167,135 +163,35 @@ func (s *segment) offloadMarkerPath() string {
 //
 // The GENERATION is what makes a rewrite safe. SegmentStore.Put overwrites
 // unconditionally and has no compare-and-swap form, so rewriting in place would
-// change an object out from under a reader already reading it — and, where two
-// processes share a tier, would lose one of their writes with no error to
-// either. A rewrite therefore writes the NEXT generation to a NEW key and
-// deletes the old one once nothing needs it, which turns both hazards into
-// something observable: a reader holds a key that cannot change, and two
-// uploaders racing produce two distinct objects rather than one corrupted one.
+// change an object out from under a reader already reading it. A rewrite
+// therefore writes the NEXT generation to a NEW key and deletes the old one once
+// nothing needs it, which leaves a reader holding a key that cannot change.
+//
+// It does NOT defend against a second writer, and is not meant to: the
+// generation is read from this log's own marker, so two processes writing one
+// store would compute the same next key. commitlog assumes it is the only
+// writer — see the CommitLog interface docs for that contract and what it
+// costs to break.
 //
 // Generation 0 keeps the original un-suffixed form, so objects written before
 // generations existed keep their keys. That costs nothing, because the offload
 // marker records the key VERBATIM and is the only thing that resolves it —
 // nothing recomputes a key for an existing object.
-// The WRITER stamp is what makes the key safe when more than one process may
-// believe it owns writes to this store. The generation alone does not: it is
-// derived from the writer's OWN local marker, so two nodes that each think they
-// are the owner both read generation N and both write N+1 — the identical key,
-// a straight overwrite, and the loser may be the one whose data is current.
-// Consensus does not close that either, because a node is leader-at-decide-time
-// rather than leader-at-write-time; its applied view of leadership lags.
-//
-// With the writer stamped in, a stale writer physically cannot land on the
-// current writer's key. Its objects become orphans the owner can reclaim
-// instead of corruption nobody can detect.
-//
-// An empty writer keeps the un-stamped form, so a single-writer log — every log
-// with no shared tier — has exactly the keys it always had.
-func segmentStoreKey(baseOffset int64, gen int, writer string) string {
-	return baseOffset0Key(baseOffset, gen, writer, logSuffix)
+func segmentStoreKey(baseOffset int64, gen int) string {
+	return baseOffset0Key(baseOffset, gen, logSuffix)
 }
 
-func baseOffset0Key(baseOffset int64, gen int, writer, suffix string) string {
-	switch {
-	case writer == "" && gen == 0:
+func baseOffset0Key(baseOffset int64, gen int, suffix string) string {
+	if gen == 0 {
 		return fmt.Sprintf("%020d%s", baseOffset, suffix)
-	case writer == "":
-		return fmt.Sprintf("%020d.g%d%s", baseOffset, gen, suffix)
-	default:
-		return fmt.Sprintf("%020d.w%s.g%d%s", baseOffset, writer, gen, suffix)
 	}
+	return fmt.Sprintf("%020d.g%d%s", baseOffset, gen, suffix)
 }
-
-// validTierWriter reports whether id is usable as a writer stamp.
-//
-// The stamp has to survive a round trip through the object key, and the key is
-// a '.'-delimited format. An id carrying a '.' therefore parses back as
-// something SHORTER than it went in — and because the fence compares the parsed
-// stamp against the current identity, the writer is then refused permission to
-// delete its own objects, which leaks them forever. A '/' is likewise unsafe:
-// object stores treat it as a path separator, so it would silently relocate the
-// object outside the log's prefix.
-//
-// Rather than escape, the set of legal ids is restricted to what round-trips
-// unambiguously. This is a real constraint on callers — a dotted hostname is
-// NOT a valid id, and has to be substituted or hashed — so it fails loudly at
-// the point the identity is supplied instead of quietly at the first delete.
-func validTierWriter(id string) bool {
-	if id == "" || len(id) > maxTierWriterLen {
-		return id == ""
-	}
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '-', r == '_':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// maxTierWriterLen bounds the stamp so a key stays comfortably inside the key
-// length every object store accepts.
-const maxTierWriterLen = 64
-
-// storeKeyWriter returns the writer stamp a key carries, or "" for an unstamped
-// one. Used to fence deletes: a writer must not remove an object it does not
-// own, because a stale one acting on its own lagging view of ownership would
-// otherwise delete objects the current writer is still serving — and unlike a
-// clobbered upload there is nothing left to recover.
-//
-// The parse is POSITIONAL rather than a search for a '.w'-prefixed component: a
-// scan would find the first component that happens to start with 'w' anywhere
-// in the key, so an unrelated naming scheme could be read as a stamp and fence
-// a delete that should have been allowed. A stamp appears only in the one place
-// baseOffset0Key puts it — immediately after the fixed-width base offset.
-func storeKeyWriter(key string) string {
-	if len(key) < baseOffsetKeyWidth {
-		return ""
-	}
-	rest := key[baseOffsetKeyWidth:]
-	if !strings.HasPrefix(rest, ".w") {
-		return ""
-	}
-	rest = rest[len(".w"):]
-	end := strings.IndexByte(rest, '.')
-	if end < 0 {
-		return ""
-	}
-	writer, tail := rest[:end], rest[end:]
-
-	// The generation component has to be there as well. baseOffset0Key never
-	// writes a stamp without one, so a key that has a '.w…' in that position but
-	// no '.g<digits>' after it belongs to some other naming scheme — and reading
-	// it as a stamp would fence a delete that should have been allowed.
-	if !strings.HasPrefix(tail, ".g") {
-		return ""
-	}
-	digits := tail[len(".g"):]
-	if i := strings.IndexByte(digits, '.'); i >= 0 {
-		digits = digits[:i]
-	}
-	if digits == "" {
-		return ""
-	}
-	for _, r := range digits {
-		if r < '0' || r > '9' {
-			return ""
-		}
-	}
-	return writer
-}
-
-// baseOffsetKeyWidth is the zero-padded width every store key begins with, as
-// written by baseOffset0Key.
-const baseOffsetKeyWidth = 20
 
 // segmentIndexStoreKey is the store object key for an offloaded segment's index
 // (option 2), mirroring the log key with the index suffix.
-func segmentIndexStoreKey(baseOffset int64, gen int, writer string) string {
-	return baseOffset0Key(baseOffset, gen, writer, indexSuffix)
+func segmentIndexStoreKey(baseOffset int64, gen int) string {
+	return baseOffset0Key(baseOffset, gen, indexSuffix)
 }
 
 // offloadMeta is the JSON content of a v2 .offloaded marker. It carries enough to
@@ -313,10 +209,6 @@ type offloadMeta struct {
 	Position       int64  `json:"position"`
 	PhysPosition   int64  `json:"phys_position"`
 	BlockMode      bool   `json:"block_mode"`
-	// Writer identity stamped into this marker's object keys — a leader epoch
-	// or node id supplied by the layer that owns tier writes. Absent for a log
-	// with a single writer, which is every log with no shared tier.
-	Writer string `json:"writer,omitempty"`
 	// Generation of the objects this marker points at. Absent (0) in markers
 	// written before generations existed, which is exactly right: those objects
 	// carry generation-0 keys. A rewrite writes the next generation to new keys
@@ -363,7 +255,7 @@ func readOffloadMarker(path string) (offloadMeta, error) {
 // segmentStoreKey(s.BaseOffset, gen). Both are passed rather than derived here
 // so the caller — which knows whether this is a first offload or a rewrite
 // replacing an existing generation — decides which objects are being written.
-func (s *segment) offloadTo(store SegmentStore, key string, gen int, writer string, cache *RemoteIndexCache) error {
+func (s *segment) offloadTo(store SegmentStore, key string, gen int, cache *RemoteIndexCache) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
@@ -387,7 +279,7 @@ func (s *segment) offloadTo(store SegmentStore, key string, gen int, writer stri
 	// presence implies both objects exist.
 	var indexKey string
 	if cache != nil {
-		indexKey = segmentIndexStoreKey(s.BaseOffset, gen, writer)
+		indexKey = segmentIndexStoreKey(s.BaseOffset, gen)
 		r, isize, err := s.Index.offloadReader()
 		if err != nil {
 			return errors.Wrap(err, "read index for offload")
@@ -408,7 +300,6 @@ func (s *segment) offloadTo(store SegmentStore, key string, gen int, writer stri
 		PhysPosition:   size,
 		BlockMode:      s.blockMode,
 		Generation:     gen,
-		Writer:         writer,
 	}
 	return s.attachOffloadedLocked(store, meta, cache)
 }
@@ -460,7 +351,6 @@ func (s *segment) replaceOffloadedTargetLocked(meta offloadMeta, cache *RemoteIn
 	s.storeKey = meta.LogKey
 	s.indexKey = meta.IndexKey
 	s.storeGen = meta.Generation
-	s.storeWriter = meta.Writer
 	s.firstOffset = meta.FirstOffset
 	s.lastOffset = meta.LastOffset
 	s.firstWriteTime = meta.FirstWriteTime
@@ -528,7 +418,6 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 	// right — but a reopen fills both from the marker, so a segment offloaded in
 	// this process otherwise disagreed with the same segment after a restart.
 	s.storeGen = meta.Generation
-	s.storeWriter = meta.Writer
 	s.firstOffset = meta.FirstOffset
 	s.lastOffset = meta.LastOffset
 	s.firstWriteTime = meta.FirstWriteTime
@@ -597,8 +486,7 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		// The marker resolves the generation; nothing recomputes it from the
 		// base offset. A marker written before generations existed reports 0,
 		// which is the generation its un-suffixed keys already encode.
-		storeGen:    meta.Generation,
-		storeWriter: meta.Writer,
+		storeGen: meta.Generation,
 	}
 
 	if meta.IndexKey == "" {
@@ -1548,7 +1436,7 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 // why deletion must be explicit rather than implied by the overwrite it
 // replaces: a rewrite that empties a segment leaves the old objects behind with
 // nothing to overwrite them.
-func (s *segment) ReplaceOffloaded(fresh *segment, writer string, cache *RemoteIndexCache) ([]string, error) {
+func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]string, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.store == nil {
@@ -1557,7 +1445,7 @@ func (s *segment) ReplaceOffloaded(fresh *segment, writer string, cache *RemoteI
 
 	var (
 		gen         = s.storeGen + 1
-		newKey      = segmentStoreKey(s.BaseOffset, gen, writer)
+		newKey      = segmentStoreKey(s.BaseOffset, gen)
 		newIndexKey string
 		superseded  = []string{s.storeKey}
 	)
@@ -1570,7 +1458,7 @@ func (s *segment) ReplaceOffloaded(fresh *segment, writer string, cache *RemoteI
 		return nil, errors.Wrap(err, "put rewritten segment")
 	}
 	if s.indexKey != "" {
-		newIndexKey = segmentIndexStoreKey(s.BaseOffset, gen, writer)
+		newIndexKey = segmentIndexStoreKey(s.BaseOffset, gen)
 		r, isize, err := fresh.Index.offloadReader()
 		if err != nil {
 			return nil, errors.Wrap(err, "read rewritten index")
@@ -1592,7 +1480,6 @@ func (s *segment) ReplaceOffloaded(fresh *segment, writer string, cache *RemoteI
 		PhysPosition:   size,
 		BlockMode:      fresh.blockMode,
 		Generation:     gen,
-		Writer:         writer,
 	}
 	markerBytes, err := json.Marshal(meta)
 	if err != nil {
@@ -1625,7 +1512,6 @@ func (s *segment) ReplaceOffloaded(fresh *segment, writer string, cache *RemoteI
 	s.backing = sb
 	s.storeKey = newKey
 	s.storeGen = gen
-	s.storeWriter = writer
 	s.indexKey = newIndexKey
 	s.firstOffset = fresh.firstOffset
 	s.lastOffset = fresh.lastOffset
