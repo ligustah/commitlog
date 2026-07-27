@@ -5,6 +5,22 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed (hang)**: `Sync(offset)` never returned for an offset the log no
+  longer reaches. It waits until the durable watermark covers the offset, and
+  that watermark comes from the log's tail — so once retention moved the tail
+  below an offset the caller was still holding, the condition could never be
+  met and the call spun fsyncs forever. Reachable through the public API:
+  append, `Truncate` below it, then `Sync` the offset you were given.
+
+  Those records are gone, so there is nothing left to make durable and the call
+  now returns.
+
+  Found while auditing whether the barrier's own tests could detect a broken
+  watermark. They could not — they hung, which is how the missing termination
+  guarantee surfaced.
+
 ## v0.22.1 — 2026-07-27
 
 - **Fixed (performance)**: `Sync`'s coalescing barely coalesced. It flushed the

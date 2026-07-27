@@ -1535,9 +1535,19 @@ func (l *commitLog) Sync(offset int64) error {
 		if err != nil {
 			return err
 		}
-		// Round again rather than assuming success covered this caller: a flush
-		// that started before this append landed can complete without reaching
-		// its offset, and that caller must lead the next one.
+		if target < offset {
+			// The flush succeeded and still did not reach this offset, which
+			// means the log does not GO that far: retention moved the tail below
+			// it after the caller appended there. Looping cannot fix that — the
+			// tail only advances on appends this call does not make — so waiting
+			// to be covered would spin fsyncs forever. The records are gone, so
+			// there is nothing left to make durable and the request is satisfied
+			// by what remains.
+			return nil
+		}
+		// Otherwise round again rather than assuming success covered this
+		// caller: a flush that started before this append landed can complete
+		// without reaching its offset, and that caller must lead the next one.
 	}
 }
 

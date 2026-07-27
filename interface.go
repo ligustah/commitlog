@@ -70,6 +70,10 @@ type CommitLog interface {
 	//
 	// Safe to call concurrently with appends. A record appended while a flush is
 	// in flight is not claimed by it and is covered by the next one.
+	//
+	// An offset the log no longer reaches — retention moved the tail below it
+	// after the caller appended there — returns nil rather than waiting to be
+	// covered: those records are gone, so there is nothing left to make durable.
 	Sync(offset int64) error
 
 	// SyncAll makes everything appended so far durable (as Sync) and ALSO
