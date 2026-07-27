@@ -54,16 +54,40 @@ func TestSyncSkipsHighWatermarkCheckpoint(t *testing.T) {
 	require.NotEqual(t, before, final, "SyncAll must still checkpoint the high watermark")
 }
 
-// Sync fsyncs every segment written since its last sync, and nothing else — a
-// second Sync with no appends in between must not touch the disk at all.
+// A flush must fsync only the segments written since their last one — the
+// SEALED ones behind the tail are already durable and must not be paid for
+// again on every commit.
+//
+// The log is rolled deliberately so there are several segments. An earlier
+// version of this test used a single-segment log, which made "only the dirty
+// segment" vacuous: with one segment, flushing all of them and flushing only
+// the dirty one are the same thing, and the test passed with dirty tracking
+// disabled entirely.
 func TestSyncFsyncsDirtySegmentsOnly(t *testing.T) {
-	l, app := syncLog(t)
-	app(0)
-	require.NoError(t, l.Sync(l.NewestOffset()))
+	l, cleanup := setupWithOptions(t, Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 64, // roll constantly
+	})
+	t.Cleanup(cleanup)
+
+	var last int64
+	for i := 0; i < 20; i++ {
+		offs, err := l.Append([]*Message{{Value: []byte("some padding value")}})
+		require.NoError(t, err)
+		last = offs[0]
+	}
+	require.NoError(t, l.Sync(last))
+
+	// Append once more FIRST, then wrap: the append may roll a fresh segment,
+	// and that new one is precisely the segment expected to be flushed.
+	offs, err := l.Append([]*Message{{Value: []byte("some padding value")}})
+	require.NoError(t, err)
 
 	l.mu.RLock()
 	segs := append([]*segment(nil), l.segments...)
 	l.mu.RUnlock()
+	require.Greater(t, len(segs), 2, "the log must have rolled for this to mean anything")
+
 	counters := make([]*countingBacking, len(segs))
 	for i, seg := range segs {
 		c := &countingBacking{segmentBacking: seg.backing}
@@ -73,18 +97,16 @@ func TestSyncFsyncsDirtySegmentsOnly(t *testing.T) {
 		seg.Unlock()
 	}
 
-	require.NoError(t, l.Sync(l.NewestOffset()))
-	for i, c := range counters {
-		require.Zero(t, c.syncs, "segment %d had nothing new to flush", i)
-	}
+	// Only the ACTIVE segment took that write, so only it may be fsynced — the
+	// sealed ones behind it were made durable by the first flush.
+	require.NoError(t, l.Sync(offs[0]))
 
-	app(1)
-	require.NoError(t, l.Sync(l.NewestOffset()))
-	total := 0
-	for _, c := range counters {
-		total += c.syncs
+	for i, c := range counters[:len(counters)-1] {
+		require.Zero(t, c.syncs,
+			"sealed segment %d was already durable and must not be fsynced again", i)
 	}
-	require.Equal(t, 1, total, "exactly the appended-to segment must be fsynced")
+	require.Equal(t, 1, counters[len(counters)-1].syncs,
+		"the appended-to segment must be fsynced exactly once")
 }
 
 // BenchmarkSyncCost contrasts the durability primitive with the promote-path
