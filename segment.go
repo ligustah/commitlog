@@ -660,7 +660,7 @@ func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
 	// every freshly installed rewrite retaining a decode buffer pair it
 	// might never serve a read from (part of run 32's per-segment heap
 	// ratchet).
-	_, data, err := s.decodeBlock(*blk, nil, nil)
+	_, data, err := s.decodeBlock(nil, *blk, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -754,7 +754,7 @@ func (s *segment) reconcileIndexTailBlocks() error {
 	}
 	for i := anchored; i < len(s.blocks); i++ {
 		blk := s.blocks[i]
-		_, data, err := s.decodeBlock(blk, nil, nil)
+		_, data, err := s.decodeBlock(nil, blk, nil, nil)
 		if err != nil {
 			return err
 		}
@@ -1073,10 +1073,10 @@ func (s *segment) readAtLocked(p []byte, off int64) (n int, err error) {
 // segment, decompressing and copying across as many blocks as the request
 // spans. It mirrors os.File.ReadAt semantics: a short read returns io.EOF.
 func (s *segment) readBlocks(p []byte, off int64) (int, error) {
-	return s.readBlocksCache(s.cache, p, off)
+	return s.readBlocksCache(s.cache, nil, p, off)
 }
 
-func (s *segment) readBlocksCache(c *blockCache, p []byte, off int64) (int, error) {
+func (s *segment) readBlocksCache(c *blockCache, st *scanStream, p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("commitlog: negative read offset %d", off)
 	}
@@ -1093,7 +1093,7 @@ func (s *segment) readBlocksCache(c *blockCache, p []byte, off int64) (int, erro
 		if blk == nil {
 			return n, io.EOF
 		}
-		m, err := s.blockCopyIntoCache(c, p[n:], *blk, cur-blk.logicalStart)
+		m, err := s.blockCopyIntoCache(c, st, p[n:], *blk, cur-blk.logicalStart)
 		if err != nil {
 			return n, err
 		}
@@ -1102,10 +1102,82 @@ func (s *segment) readBlocksCache(c *blockCache, p []byte, off int64) (int, erro
 	return n, nil
 }
 
+// scanStream serves a sweep's reads from ONE open stream over the segment's
+// bytes, instead of a ranged read per call.
+//
+// It is shaped as a ReadAt so it drops into the existing read paths unchanged,
+// but it is only a stream underneath: a read that starts exactly where the last
+// one ended is served by reading forward, and anything else falls back to a
+// ranged read on the backing.
+//
+// Falling back rather than re-opening is deliberate. A jump is either a one-off
+// (in which case a fresh stream would cost a request and be abandoned) or the
+// caller is not really sweeping (in which case ranged reads are the right
+// shape anyway). The stream keeps its position across a fallback, so a sweep
+// that steps aside once carries on streaming afterwards.
+//
+// A nil *scanStream is valid and reads through to the backing, so callers that
+// are not sweeping need no special case.
+type scanStream struct {
+	backing segmentBacking
+	rc      io.ReadCloser
+	pos     int64
+	// broken records that the stream failed and must not be retried: a store
+	// that cannot serve one should not be asked once per record.
+	broken bool
+}
+
+func newScanStream(backing segmentBacking) *scanStream {
+	return &scanStream{backing: backing}
+}
+
+func (ss *scanStream) ReadAt(p []byte, off int64) (int, error) {
+	if ss == nil || ss.broken || len(p) == 0 {
+		return ss.readRanged(p, off)
+	}
+	if ss.rc == nil {
+		rc, err := ss.backing.Stream(off)
+		if err != nil {
+			// Not fatal: the bytes are still reachable the ranged way, and a
+			// sweep that works slowly beats one that fails.
+			ss.broken = true
+			return ss.readRanged(p, off)
+		}
+		ss.rc, ss.pos = rc, off
+	}
+	if off != ss.pos {
+		return ss.readRanged(p, off)
+	}
+	n, err := io.ReadFull(ss.rc, p)
+	ss.pos += int64(n)
+	if err == io.ErrUnexpectedEOF {
+		err = io.EOF
+	}
+	return n, err
+}
+
+func (ss *scanStream) readRanged(p []byte, off int64) (int, error) {
+	return ss.backing.ReadAt(p, off)
+}
+
+// Close releases the stream. Safe on a nil scanStream and on one that never
+// opened, so a sweep can defer it unconditionally.
+func (ss *scanStream) Close() error {
+	if ss == nil || ss.rc == nil {
+		return nil
+	}
+	err := ss.rc.Close()
+	ss.rc, ss.broken = nil, true
+	return err
+}
+
 // scanReadAt is ReadAt for one-shot sequential scans: block decodes go
 // through the caller's cache instead of the segment's, so a pass over N
 // segments retains one decode buffer pair, not N (see blockCopyIntoCache).
-func (s *segment) scanReadAt(c *blockCache, p []byte, off int64) (n int, err error) {
+//
+// st carries the sweep's open stream, or is nil for a caller that is not
+// sweeping.
+func (s *segment) scanReadAt(c *blockCache, st *scanStream, p []byte, off int64) (n int, err error) {
 	s.RLock()
 	defer s.RUnlock()
 	if s.closed {
@@ -1115,9 +1187,12 @@ func (s *segment) scanReadAt(c *blockCache, p []byte, off int64) (n int, err err
 		return 0, ErrSegmentClosed
 	}
 	if !s.blockMode {
+		if st != nil {
+			return st.ReadAt(p, off)
+		}
 		return s.backing.ReadAt(p, off)
 	}
-	return s.readBlocksCache(c, p, off)
+	return s.readBlocksCache(c, st, p, off)
 }
 
 // findBlock returns the block whose logical range contains the given logical
@@ -1146,11 +1221,11 @@ func (s *segment) findBlock(logical int64) *blockRef {
 // every scanned segment retaining a decode buffer pair for its lifetime,
 // O(segments) heap per clean pass (run 32's ~500MB-1GB transients and creeping
 // baseline).
-func (s *segment) blockCopyIntoCache(c *blockCache, dst []byte, b blockRef, srcOff int64) (int, error) {
+func (s *segment) blockCopyIntoCache(c *blockCache, st *scanStream, dst []byte, b blockRef, srcOff int64) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.seg != s || c.start != b.physStart {
-		raw, data, err := s.decodeBlock(b, c.raw, c.data)
+		raw, data, err := s.decodeBlock(st, b, c.raw, c.data)
 		c.raw = raw
 		if err != nil {
 			// The decode may have scribbled over c.data; don't serve it.
@@ -1171,13 +1246,19 @@ func (s *segment) blockCopyIntoCache(c *blockCache, dst []byte, b blockRef, srcO
 // buffers. data holds exactly the block's logical bytes and never aliases
 // raw — raw (codec None) payloads are copied — so callers may recycle the two
 // buffers independently.
-func (s *segment) decodeBlock(b blockRef, rawBuf, dataBuf []byte) (raw, data []byte, err error) {
+func (s *segment) decodeBlock(st *scanStream, b blockRef, rawBuf, dataBuf []byte) (raw, data []byte, err error) {
 	need := int(b.payloadLen())
 	if cap(rawBuf) < need {
 		rawBuf = make([]byte, need)
 	}
 	raw = rawBuf[:need]
-	if _, err := s.backing.ReadAt(raw, b.payloadStart()); err != nil {
+	// Through the sweep's stream when there is one: a scan visits blocks in
+	// ascending physical order, so these are exactly the reads that stream.
+	readAt := s.backing.ReadAt
+	if st != nil {
+		readAt = st.ReadAt
+	}
+	if _, err := readAt(raw, b.payloadStart()); err != nil {
 		return raw, nil, errors.Wrap(err, "read block payload failed")
 	}
 	data, err = b.codec.DecompressInto(dataBuf, raw)
@@ -1861,6 +1942,14 @@ func (s *segment) Delete() error {
 type segmentScanner struct {
 	s   *segment
 	pos int64
+	// stream is the sweep's single open read over the segment. A scan walks
+	// every frame front to back, so the reads it makes are precisely the ones
+	// worth serving from one stream rather than one ranged request each —
+	// against an object store that is the difference between a GET per window
+	// and a GET per segment, and cost there is per request, not per byte.
+	//
+	// Opened lazily on the first read and closed by Close.
+	stream *scanStream
 	// cache holds the scan's block-decode buffers. Passing one cache to
 	// every scanner of a multi-segment pass (clean, digest build,
 	// consolidation) keeps the whole pass at one retained buffer pair;
@@ -1881,7 +1970,31 @@ func newSegmentScanner(segment *segment) *segmentScanner {
 // decode cache.
 func newSegmentScannerCache(segment *segment, c *blockCache) *segmentScanner {
 	segmentScans.Add(1)
-	return &segmentScanner{s: segment, cache: c}
+	// Under the lock: a rewrite swaps the backing while holding the write lock,
+	// so reading the field bare races it. The scan then keeps the backing it
+	// started on, which is the same guarantee a rewrite already gives a reader —
+	// the object a reader opened is never the one a rewrite replaces.
+	segment.RLock()
+	backing := segment.backing
+	segment.RUnlock()
+	// Only where it pays. A nil stream reads straight through to the backing,
+	// so a local scan behaves exactly as it did before streaming existed.
+	var stream *scanStream
+	if backing.StreamPays() {
+		stream = newScanStream(backing)
+	}
+	return &segmentScanner{
+		s:      segment,
+		cache:  c,
+		stream: stream,
+	}
+}
+
+// Close releases the scan's stream. A scanner that is dropped without it leaks
+// whatever the backing handed out — a file descriptor locally, an open HTTP
+// response against an object store.
+func (s *segmentScanner) Close() error {
+	return s.stream.Close()
 }
 
 // Scan should be called repeatedly to iterate over the messages in the
@@ -1894,12 +2007,18 @@ func newSegmentScannerCache(segment *segment, c *blockCache) *segmentScanner {
 // old index-driven scan for raw segments (positions and sizes match).
 func (s *segmentScanner) Scan() (messageSet, *entry, error) {
 	header := make(messageSet, msgSetHeaderLen)
-	if _, err := s.s.scanReadAt(s.cache, header, s.pos); err != nil {
+	if _, err := s.s.scanReadAt(s.cache, s.stream, header, s.pos); err != nil {
+		// The scan is over, so release the stream HERE rather than leaving it to
+		// the caller's defer. A caller typically rewrites the segment straight
+		// after draining it, and the defer would not have run yet: on Windows an
+		// open read handle blocks the rename that installs the rewrite, turning
+		// a leaked handle into a hard failure rather than a slow leak.
+		s.stream.Close()
 		return nil, nil, err
 	}
 	size := header.Size()
 	payload := make([]byte, size)
-	if _, err := s.s.scanReadAt(s.cache, payload, s.pos+msgSetHeaderLen); err != nil {
+	if _, err := s.s.scanReadAt(s.cache, s.stream, payload, s.pos+msgSetHeaderLen); err != nil {
 		return nil, nil, err
 	}
 	msgSet := append(header, payload...)

@@ -132,7 +132,10 @@ type restoreRequiredStore struct{}
 
 func (restoreRequiredStore) Put(string, io.Reader, int64) error        { return nil }
 func (restoreRequiredStore) ReadAt(string, []byte, int64) (int, error) { return 0, ErrRestoreRequired }
-func (restoreRequiredStore) Size(string) (int64, error)                { return 0, ErrRestoreRequired }
-func (restoreRequiredStore) List() ([]string, error)                   { return nil, nil }
-func (restoreRequiredStore) Delete(string) error                       { return nil }
-func (restoreRequiredStore) LiveRead() bool                            { return false }
+func (restoreRequiredStore) Stream(string, int64) (io.ReadCloser, error) {
+	return nil, ErrRestoreRequired
+}
+func (restoreRequiredStore) Size(string) (int64, error) { return 0, ErrRestoreRequired }
+func (restoreRequiredStore) List() ([]string, error)    { return nil, nil }
+func (restoreRequiredStore) Delete(string) error        { return nil }
+func (restoreRequiredStore) LiveRead() bool             { return false }

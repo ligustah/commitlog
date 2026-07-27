@@ -1106,6 +1106,7 @@ func (l *commitLog) Truncate(offset int64) error {
 			ss              = newSegmentScanner(seg)
 			newSegment, err = seg.Truncated()
 		)
+		defer ss.Close()
 		if err != nil {
 			return err
 		}
@@ -1219,6 +1220,7 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 		boundary := l.segments[boundaryIdx]
 		if boundary.BaseOffset < minOffset {
 			ss := newSegmentScanner(boundary)
+			defer ss.Close()
 			var (
 				newBaseOffset int64 = -1
 				kept          []messageSet

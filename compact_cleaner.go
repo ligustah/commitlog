@@ -781,6 +781,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		lastEpoch          uint64
 		haveEpoch          bool
 	)
+	defer ss.Close()
 	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 		var (
 			offset      = ms.Offset()
@@ -932,6 +933,7 @@ func consolidateSegments(segments []*segment, maxRewrites int, budgetDur time.Du
 		}
 		bw.reset(cleaned)
 		ss := newSegmentScannerCache(seg, sc)
+		defer ss.Close()
 		for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 			if err := bw.add(ms); err != nil {
 				return nil, err

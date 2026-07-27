@@ -121,6 +121,7 @@ func buildKeyDigest(seg *segment, sc *blockCache) (*keyDigest, error) {
 		haveEpoch = false
 		ss        = newSegmentScannerCache(seg, sc)
 	)
+	defer ss.Close()
 	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 		var (
 			offset = ms.Offset()

@@ -22,6 +22,24 @@ import (
 type segmentBacking interface {
 	// ReadAt reads len(p) bytes at off, with io.ReaderAt semantics.
 	ReadAt(p []byte, off int64) (int, error)
+	// Stream returns a reader over the backing's bytes from off to the end,
+	// for a caller that knows it is going to read them all. See
+	// SegmentStore.Stream for why that distinction is worth expressing.
+	//
+	// The caller must Close it. Consult StreamPays first — a backing may
+	// implement this and still be better read through ReadAt.
+	Stream(off int64) (io.ReadCloser, error)
+	// StreamPays reports whether a sequential sweep is better served by Stream
+	// than by repeated ReadAt.
+	//
+	// It is false for a local file and true for a store, because the two are
+	// paying for different things. A store charges per REQUEST, so collapsing a
+	// sweep into one is a large, structural win. A local read costs a syscall
+	// against an OS that is already doing readahead for us, and opening a
+	// second handle to stream from costs a syscall of its own — measurably
+	// worse, not better: routing local scans through a stream made this repo's
+	// test suite take five times as long, all of it in file opens.
+	StreamPays() bool
 	// Write appends p to the backing (active, local segments only).
 	Write(p []byte) (int, error)
 	// Size returns the current byte length of the backing.
@@ -52,10 +70,35 @@ func openLocalBacking(path string) (*localBacking, error) {
 }
 
 func (l *localBacking) ReadAt(p []byte, off int64) (int, error) { return l.f.ReadAt(p, off) }
-func (l *localBacking) Write(p []byte) (int, error)             { return l.f.Write(p) }
-func (l *localBacking) Sync() error                             { return l.f.Sync() }
-func (l *localBacking) Close() error                            { return l.f.Close() }
-func (l *localBacking) Name() string                            { return l.f.Name() }
+
+// StreamPays is false: the OS page cache already reads ahead for a sequential
+// local read, and opening a handle to stream from costs more than it saves.
+func (l *localBacking) StreamPays() bool { return false }
+
+// Stream opens a SECOND handle rather than seeking the backing's own. The
+// active segment's handle is in append mode and shared with the writer, so
+// seeking it would move the file position out from under an append; and a
+// reader that owns its handle can be closed independently of the segment.
+//
+// Provided for completeness and for a caller that explicitly wants it; scans do
+// not use it, because StreamPays is false.
+func (l *localBacking) Stream(off int64) (io.ReadCloser, error) {
+	f, err := os.Open(l.f.Name())
+	if err != nil {
+		return nil, err
+	}
+	if off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	return f, nil
+}
+func (l *localBacking) Write(p []byte) (int, error) { return l.f.Write(p) }
+func (l *localBacking) Sync() error                 { return l.f.Sync() }
+func (l *localBacking) Close() error                { return l.f.Close() }
+func (l *localBacking) Name() string                { return l.f.Name() }
 
 func (l *localBacking) Size() (int64, error) {
 	fi, err := l.f.Stat()
@@ -89,6 +132,24 @@ type SegmentStore interface {
 	// io.ReaderAt semantics (a short read returns io.EOF). A restore-required
 	// store returns ErrRestoreRequired.
 	ReadAt(key string, p []byte, off int64) (int, error)
+	// Stream returns a reader over the object under key from off to its end,
+	// for a caller that knows it is going to read all of it. The caller must
+	// Close it. A restore-required store returns ErrRestoreRequired.
+	//
+	// This exists because ReadAt alone cannot express "I want the whole
+	// object", and against an object store that distinction is the bill: cost
+	// is per REQUEST, not per byte. Reading a 1 GiB object through a windowed
+	// ReadAt is a thousand GETs for bytes that one GET would have delivered.
+	// The scans that dominate — compaction, recovery, digest building, replay
+	// — all sweep a segment front to back, so this is the primary read mode
+	// rather than an optimisation for an unusual case.
+	//
+	// It is pull-shaped (returning a reader) rather than push-shaped (a
+	// WriteTo) so a caller can stop early without contortions, and because
+	// every backend already has one to hand back — gocloud's NewRangeReader,
+	// os.Open — which keeps implementations free of adapter code. Put already
+	// takes an io.Reader, so the two directions stay symmetric.
+	Stream(key string, off int64) (io.ReadCloser, error)
 	// Size returns the byte length of the object under key.
 	Size(key string) (int64, error)
 	// List returns the keys present in the store.
@@ -154,6 +215,20 @@ func (s *FileSegmentStore) ReadAt(key string, p []byte, off int64) (int, error) 
 	}
 	defer f.Close()
 	return f.ReadAt(p, off)
+}
+
+func (s *FileSegmentStore) Stream(key string, off int64) (io.ReadCloser, error) {
+	f, err := os.Open(s.objectPath(key))
+	if err != nil {
+		return nil, err
+	}
+	if off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	return f, nil
 }
 
 func (s *FileSegmentStore) Size(key string) (int64, error) {
@@ -305,6 +380,18 @@ func (b *storeBacking) refill(off int64) error {
 //
 // Safe to call concurrently with reads: a read in flight has already copied out
 // of the buffer under the same mutex.
+// Stream hands back the store's own reader over the object, bypassing the
+// read-ahead window entirely. That is the point: the window exists to amortise
+// requests for a caller reading in pieces, and a caller that says it wants the
+// rest of the object does not need amortising — it needs one request.
+// StreamPays is true: a store charges per request, and a sweep served by
+// ranged reads pays one per window for bytes a single request would deliver.
+func (b *storeBacking) StreamPays() bool { return true }
+
+func (b *storeBacking) Stream(off int64) (io.ReadCloser, error) {
+	return b.store.Stream(b.key, off)
+}
+
 func (b *storeBacking) Invalidate() {
 	b.mu.Lock()
 	defer b.mu.Unlock()

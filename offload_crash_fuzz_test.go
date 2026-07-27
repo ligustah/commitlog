@@ -35,6 +35,10 @@ type fzFaultStore struct {
 	leaveTmp bool
 }
 
+func (s *fzFaultStore) Stream(key string, off int64) (io.ReadCloser, error) {
+	return s.inner.Stream(key, off)
+}
+
 func (s *fzFaultStore) Put(key string, r io.Reader, size int64) error {
 	if s.failNext {
 		s.failNext = false
