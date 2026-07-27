@@ -31,8 +31,10 @@ library from that fork onward.
   lineage so retention can reclaim them later. Guards worth knowing: the
   offsets must match what the segment holds (adoption **drops** the local
   bytes, so an object covering other records would swap a reader's data
-  underneath it, silently); the whole batch is validated — objects' existence
-  included — before any of it is applied; and the active segment cannot be
+  underneath it, silently); each object must be the size the state claims,
+  since that size bounds every read of it and the local copy is gone by then;
+  the whole batch is validated — objects' existence included — before any of it
+  is applied; and the active segment cannot be
   named.
 
 - **Changed**: `AdoptTierWriters`' documented condition was too weak. It said

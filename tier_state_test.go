@@ -253,6 +253,11 @@ func TestImportTierStateRefusesStateItCannotApply(t *testing.T) {
 			o.LogKey = segmentStoreKey(o.BaseOffset, 9, "nodeA")
 		}), "missing object"},
 		{"no log key", bend(func(o *TierObject) { o.LogKey = "" }), "no log key"},
+		// The size bounds every read of the object, so a state that disagrees
+		// with it hides the object's tail or reads past its end — and the local
+		// copy is gone by then.
+		{"size understated", bend(func(o *TierObject) { o.PhysPosition-- }), "bytes but it is"},
+		{"size overstated", bend(func(o *TierObject) { o.PhysPosition++ }), "bytes but it is"},
 		{"unusable writer", bend(func(o *TierObject) { o.Writer = "node.1" }), "unusable writer"},
 		{"offsets inverted", bend(func(o *TierObject) {
 			o.FirstOffset = o.LastOffset + 1

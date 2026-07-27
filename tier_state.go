@@ -172,9 +172,22 @@ func (l *commitLog) ImportTierState(objs []TierObject) (int, error) {
 		// The objects must actually be there. A marker naming a missing object
 		// is not discovered until a read reaches for it, which turns a bad
 		// import into a failure somewhere else entirely.
-		if _, err := l.SegmentStore.Size(o.LogKey); err != nil {
+		size, err := l.SegmentStore.Size(o.LogKey)
+		if err != nil {
 			return 0, errors.Wrapf(err, "tier state for %d names a missing object %s",
 				o.BaseOffset, o.LogKey)
+		}
+		// And they must be the size the state claims, because that size is what
+		// bounds every read of the object — the store is asked for bytes, not
+		// for records. Importing drops the local copy, so a state that
+		// understates the object hides its tail with nothing left to compare
+		// against, and one that overstates it reads past the end. The store had
+		// to be asked for the size anyway to know the object exists, so this
+		// costs nothing beyond using the answer.
+		if o.PhysPosition != size {
+			return 0, errors.Errorf(
+				"commitlog: tier state for %d claims object %s is %d bytes but it is %d",
+				o.BaseOffset, o.LogKey, o.PhysPosition, size)
 		}
 		if o.IndexKey != "" {
 			if _, err := l.SegmentStore.Size(o.IndexKey); err != nil {
