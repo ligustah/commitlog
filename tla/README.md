@@ -21,10 +21,13 @@ transparency), not the byte-level file format. They are grounded in the code —
 | `CommitLog.tla` | append / commit / checkpoint / crash + tail recovery / truncation | `commitlog.go` (`SetHighWatermark`, `checkpointHW`, `RecoverTail`, `Truncate`, `TruncateBefore`) |
 | `Compaction.tla` | transaction-aware compaction: latest-per-key, aborted-shadowing, tombstone GC, stripping, convergence | `compact_cleaner.go` |
 | `Offload.tla` | tiered storage: read-through + LRU index cache with pinning | `segment_store.go`, `index_cache.go` |
+| `MultiWriter.tla` | tier writes when two processes may each believe they own them: writer-stamped keys, fenced deletes, reclaimable garbage | `segment.go` (`segmentStoreKey`, `deleteFenced`), `commitlog.go` (`SetTierWriter`, `DeleteStoreObjects`, `UnreferencedObjects`) |
 
-Each spec has a `.cfg` (the verified configuration) plus a `*_Buggy.cfg` that
-swaps in a deliberately broken variant to show the invariants have teeth (TLC
-produces a counterexample).
+Each spec has a `.cfg` (the verified configuration) plus at least one
+`*_Buggy*.cfg` that swaps in a deliberately broken variant to show the
+invariants have teeth (TLC produces a counterexample). `MultiWriter` has two,
+one per defence it models — an unstamped key and an unfenced delete fail in
+different ways, and a single config could only demonstrate one of them.
 
 ## Running
 
@@ -50,11 +53,14 @@ Then, from this directory:
 java -cp tla2tools.jar tlc2.TLC -workers auto -config CommitLog.cfg   CommitLog.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config Compaction.cfg  Compaction.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config Offload.cfg     Offload.tla
+java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter.cfg MultiWriter.tla
 
 # The "teeth" runs — each is EXPECTED to report an invariant violation
 java -cp tla2tools.jar tlc2.TLC -workers auto -config CommitLog_Buggy.cfg  CommitLog.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config Compaction_Buggy.cfg Compaction.tla
 java -cp tla2tools.jar tlc2.TLC -workers auto -config Offload_Buggy.cfg     Offload.tla
+java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_Buggy.cfg       MultiWriter.tla
+java -cp tla2tools.jar tlc2.TLC -workers auto -config MultiWriter_BuggyDelete.cfg MultiWriter.tla
 ```
 
 ## Results
@@ -64,6 +70,7 @@ java -cp tla2tools.jar tlc2.TLC -workers auto -config Offload_Buggy.cfg     Offl
 | `CommitLog` | 9,984 | all invariants hold |
 | `Compaction` | 813,616 | all invariants hold |
 | `Offload` | 5,441 | all invariants hold |
+| `MultiWriter` | 1,344 | all invariants hold |
 
 Each `*_Buggy.cfg` produces the expected counterexample (see below).
 
@@ -162,6 +169,46 @@ so it cannot change a read's result. The index is modeled as exact derived data
 **Teeth** (`Offload_Buggy.cfg`, `BuggyEvict = TRUE`): eviction that ignores pin
 counts. TLC reports a **PinnedStaysCached** violation — an index evicted out
 from under an in-flight seek, the corruption the pin count prevents.
+
+### MultiWriter.tla — tier writes under contested ownership
+
+Invariants:
+
+- **NoClobber** — no PUT ever overwrites an existing object with different
+  content. `SegmentStore.Put` has no compare-and-swap form, so a lost update
+  here produces no error for either party and leaves nothing to recover.
+- **MarkerIntegrity** — the object a writer's marker names still holds what
+  that writer put there. It is required of a *demoted* writer too: losing an
+  election does not stop it serving reads, and nothing tells it to stop.
+- **ReadCorrect** — the observable form: a read returns what the reader's own
+  marker promised.
+- **ReclaimAttributable** — every object is either live (some marker names it)
+  or carries a stamp saying who may reclaim it. Fencing converts corruption
+  into garbage, so the garbage has to stay accountable or the leak is unbounded.
+
+The model exists because the hazard is easy to argue about incorrectly. It is
+*not* that consensus is unreliable. It is that consensus establishes who leads
+at the moment it **decides**, while the PUT lands at a later moment nobody
+controls — so each writer here acts on a belief that is allowed to be stale, and
+`Elect` deliberately has no synchronous revocation. The generation does not
+close the window either, and the spec shows why mechanically: a generation is
+read from each writer's **own local marker**, so two writers that both believe
+they own the tier compute the same next generation and address the same key.
+
+**Teeth** (`MultiWriter_Buggy.cfg`, `Stamped = FALSE`): the pre-stamp key,
+generation only. TLC reports **NoClobber** violated in four states — elect the
+new owner, the old one (not yet knowing) offloads, the new one offloads, and the
+second PUT silently replaces the first at the identical key.
+
+**Teeth** (`MultiWriter_BuggyDelete.cfg`, `FencedDelete = FALSE`): stamped keys,
+unfenced deletes. TLC reports **MarkerIntegrity** violated. The counterexample is
+sharper than the one that motivated the fence: the object is removed by the
+*legitimate new owner*, not by a stale writer. Markers are local, so a writer
+cannot see that another process's marker still names an object, and "garbage by
+my own view" is not the same claim as "garbage". That is exactly why
+`UnreferencedObjects` reports rather than deletes — whether an unreferenced
+object is safe to remove depends on whether the tier is shared, which only the
+caller knows.
 
 ## Scope and abstraction notes
 

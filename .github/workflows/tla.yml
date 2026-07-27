@@ -29,7 +29,7 @@ jobs:
       - name: "Verify specs (expect: no error found)"
         working-directory: tla
         run: |
-          for spec in CommitLog Compaction Offload; do
+          for spec in CommitLog Compaction Offload MultiWriter; do
             echo "::group::$spec"
             out="$(java -cp tla2tools.jar tlc2.TLC -workers auto \
                      -config "$spec.cfg" "$spec.tla" 2>&1)" || { echo "$out"; exit 1; }
@@ -47,19 +47,23 @@ jobs:
       - name: "Buggy configs (expect: the matching invariant violated)"
         working-directory: tla
         run: |
+          # $1 is the CONFIG stem, not the spec: a spec may carry more than one
+          # broken variant, each pinned to the invariant it is supposed to break.
           check() {
-            spec="$1"; want="$2"
-            echo "::group::${spec}_Buggy (expecting: $want)"
+            cfg="$1"; spec="$2"; want="$3"
+            echo "::group::${cfg} (expecting: $want)"
             out="$(java -cp tla2tools.jar tlc2.TLC -workers auto \
-                     -config "${spec}_Buggy.cfg" "$spec.tla" 2>&1 || true)"
+                     -config "${cfg}.cfg" "$spec.tla" 2>&1 || true)"
             echo "$out"
             if ! grep -Eq "Invariant ($want) is violated" <<<"$out"; then
-              echo "ERROR: ${spec}_Buggy.cfg did not report a violation of: $want"
+              echo "ERROR: ${cfg}.cfg did not report a violation of: $want"
               exit 1
             fi
-            echo "OK: ${spec}_Buggy.cfg violated $want as expected"
+            echo "OK: ${cfg}.cfg violated $want as expected"
             echo "::endgroup::"
           }
-          check CommitLog  "CommittedPrefixStability"
-          check Compaction "ViewPreserved|NoAbortedBelowCeiling"
-          check Offload    "PinnedStaysCached"
+          check CommitLog_Buggy         CommitLog   "CommittedPrefixStability"
+          check Compaction_Buggy        Compaction  "ViewPreserved|NoAbortedBelowCeiling"
+          check Offload_Buggy           Offload     "PinnedStaysCached"
+          check MultiWriter_Buggy       MultiWriter "NoClobber"
+          check MultiWriter_BuggyDelete MultiWriter "MarkerIntegrity"
