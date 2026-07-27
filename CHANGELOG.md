@@ -5,6 +5,27 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed (corruption)**: `Truncate` could rebuild the boundary segment from a
+  torn read, leaving a log that could not be read end to end. Before replacing
+  that segment it SCANS it to copy the records below the cut, and that scan ran
+  outside the segment's lock — so an append extending the segment mid-scan left
+  the copy holding a partial frame. Reproduced in roughly one run in eight of a
+  concurrent append-and-truncate test.
+
+  `Truncate` now takes the append lock, as a segment roll does: both redefine
+  where an append lands.
+
+  The near-miss worth recording is that this path looks safe. `Truncate` calls
+  `Delete` or `Replace` on the very segment the appender holds, and both take
+  that segment's write lock — which orders the two WRITES, and says nothing
+  about the scan that precedes them. `TruncateBefore` and `Clean` are genuinely
+  safe here for a structural reason instead: neither ever rewrites the active
+  segment, and a sealed segment takes no appends.
+
+  Found by a scheduled concurrency sweep, not a report.
+
 ## v0.22.2 — 2026-07-27
 
 - **Fixed (hang)**: `Sync(offset)` never returned for an offset the log no

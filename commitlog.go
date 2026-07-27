@@ -879,9 +879,23 @@ func (l *commitLog) IsClosed() bool {
 }
 
 // Truncate removes all messages from the log starting at the given offset.
+// Truncate takes appendMu because, like a segment roll, it redefines where an
+// append lands — and unlike the write itself, the part that matters here is NOT
+// ordered by the segment's own lock.
+//
+// It is tempting to argue that it is: Truncate calls Delete or Replace on the
+// very segment an in-flight appender is holding, and both take that segment's
+// write lock, so the two writes are ordered. That argument is wrong, and the
+// test that goes with this found it. Before replacing the boundary segment,
+// Truncate SCANS it to copy the records below the cut — and that scan runs
+// outside the segment lock. An append extending the segment mid-scan leaves the
+// copy holding a torn frame, and the rebuilt log then cannot be read end to
+// end. Reproduced in roughly one run in eight.
 func (l *commitLog) Truncate(offset int64) error {
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	seg, idx := findSegment(l.segments, offset)
