@@ -184,6 +184,54 @@ Each load-bearing guard was checked by mutation rather than by passing: invertin
 latest-per-key, dropping the prefix filter, ignoring the sidecars, and collapsing
 the run planner to one run per segment each fail a test that names the defect.
 
+## Measured, finally
+
+`TestPrefixReadCostProfile` counts what a store actually bills for — **requests
+issued and bytes transferred** — through a `SegmentStore` wrapper. It does not
+measure wall-clock: these tests run against a filesystem store, so timings would
+describe a local disk and say nothing about the object store the setting exists
+for. Request and byte counts are hardware-independent.
+
+4000 records of ~230 bytes, 64KB segments, prefix `want:`:
+
+**Dense — 1 hit in 4 (960 hits, 24 segments), gaps ≈ 0.9KB**
+
+| tier budget | requests | bytes | vs. no coalescing |
+|---|---|---|---|
+| none | 972 | 844 KB | — |
+| ≥ 1KB | 24 | 1569 KB | **40× fewer requests, 1.86× the bytes** |
+
+**Sparse — 1 hit in 40 (99 hits, 30 segments), gaps ≈ 9KB**
+
+| tier budget | requests | bytes | vs. no coalescing |
+|---|---|---|---|
+| ≤ 4KB | 114 | 990 KB | — |
+| ≥ 16KB | 30 | 1826 KB | 3.8× fewer requests, 1.84× the bytes |
+
+**The formula predicts both.** At $0.0004/1k GETs and $0.09/GB the breakeven gap
+is ~4.4KB. Dense gaps (0.9KB) sit below it, so coalescing wins — saving 948
+requests costs 725KB, which is about **6× cheaper**. Sparse gaps (9KB) sit above
+it, so coalescing loses — saving 84 requests costs 835KB, about **2× more
+expensive**. The measurement agrees with the model, on both sides of the line.
+
+**And it contradicts the default I had chosen.** At 64KB the tier budget behaves
+identically to 1MB on both shapes: it coalesces everything. A default justified
+*on price* was sitting an order of magnitude above the price breakeven, which
+means it was really a "bytes are free" default wearing a cost argument.
+
+The tier default is now **4KB**, matching the computed breakeven. Deployments
+reading from inside the same region, where bytes genuinely are free, should raise
+it — and that is now an explicit instruction rather than an accident.
+
+Two structural notes the numbers make visible:
+
+- **Requests never drop below the segment count** (24 and 30). One stream per
+  segment is the floor; coalescing cannot do better than that.
+- **The budget is a threshold on the actual gap distribution, not a dial.**
+  Nothing changes between 1KB and 4KB in the sparse case, then everything changes
+  between 4KB and 16KB, because the real gaps are ~9KB. Tuning it without knowing
+  the workload's gap distribution is guesswork.
+
 ## Still open
 
 Prefix position in key order — early or late — which decides whether a sparse key

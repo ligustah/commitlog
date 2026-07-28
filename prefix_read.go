@@ -274,10 +274,18 @@ func prefixUpperBound(prefix []byte) []byte {
 // EXPENSIVE shape. Where bytes are actually priced the breakeven is computable —
 // gap = 1e9 * C_req / C_GB — and that is the number to use instead of this one.
 //
-// Both are argued, NOT measured.
+// The TIER default is MEASURED (TestPrefixReadCostProfile) and equals the
+// breakeven gap at commonly quoted egress pricing, ~4.4KB. It was 64KB, chosen
+// by argument; the measurement showed 64KB behaving identically to 1MB on every
+// shape tested — coalescing everything — so a default justified on price was
+// sitting an order of magnitude above the price breakeven. A deployment reading
+// from inside the same region, where bytes really are free, should raise it.
+//
+// The LOCAL default remains argued, not measured: its cost is seeks and
+// syscalls rather than requests and bytes, which the same harness cannot see.
 const (
 	defaultPrefixReadCoalesceBytes     = 4 << 20
-	defaultPrefixReadTierCoalesceBytes = 64 << 10
+	defaultPrefixReadTierCoalesceBytes = 4 << 10
 )
 
 // Fan-out is bounded PER TIER, and how wide it should be is a property of the
