@@ -57,6 +57,16 @@ func (idx *index) shrink() error {
 	if err := idx.file.Truncate(idx.position); err != nil {
 		return errors.Wrap(err, "truncate failed during shrink")
 	}
+	// size tracks the FILE, so it must follow the truncate whether or not a
+	// remap happens. Updating it only in the remap branch left an index shrunk
+	// while EMPTY claiming the pre-allocated size of a file that no longer
+	// existed, with a nil mapping — a state nothing rejected and everything
+	// downstream misread. writeAt then compared against the stale size, decided
+	// no expansion was needed, and copied into a nil mapping: slicing nil at
+	// [0:] is legal Go, so the write silently did NOTHING while position still
+	// advanced. The index then claimed entries it did not hold, and the first
+	// read of one panicked indexing the nil mapping.
+	idx.size = idx.position
 	if remap && idx.position > 0 {
 		idx.mapMu.Lock()
 		mmap, err := mmapFile(idx.file)
@@ -65,7 +75,9 @@ func (idx *index) shrink() error {
 		if err != nil {
 			return errors.Wrap(err, "remap failed after shrink")
 		}
-		idx.size = idx.position
 	}
+	// A zero-length file cannot be mapped, so an empty index legitimately has
+	// no mapping. That is now COHERENT rather than merely survivable: size is 0
+	// too, so the next write expands the file and maps it before touching it.
 	return nil
 }

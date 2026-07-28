@@ -206,6 +206,20 @@ func (idx *index) ReadAt(p []byte, offset int64) (n int, err error) {
 	if idx.position < offset+entryWidth {
 		return 0, io.EOF
 	}
+	// position says an entry is there; the mapping says otherwise. Report it
+	// rather than index past the mapping.
+	//
+	// This should be unreachable — it exists because when it WAS reachable, the
+	// symptom was a panic inside a library, which takes the caller's process
+	// down with it. An error the caller can handle is strictly better than
+	// that, whatever the cause, and a corrupt index is not something to paper
+	// over with io.EOF: that would read as "no more entries" and silently
+	// truncate whatever was scanning.
+	if int64(len(idx.mmap)) < offset+entryWidth {
+		return 0, errors.Wrapf(errIndexCorrupt,
+			"index %s claims %d bytes but only %d are mapped (reading at %d)",
+			idx.path, idx.position, len(idx.mmap), offset)
+	}
 	n = copy(p, idx.mmap[offset:offset+entryWidth])
 	return n, nil
 }
@@ -234,10 +248,14 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 		// Exclude a concurrent flush for the swap: it holds the mapping shared
 		// without mu, so this is the one teardown mu alone does not cover.
 		idx.mapMu.Lock()
-		oldMmap := idx.mmap
-		if err := unmapFile(oldMmap); err != nil {
-			idx.mapMu.Unlock()
-			return errors.Wrap(err, "failed to unmap memory mapped index file")
+		// An index shrunk while empty has no mapping to release — a zero-length
+		// file cannot be mapped. Unmapping nothing is not an error to report,
+		// it is a step that does not apply.
+		if oldMmap := idx.mmap; oldMmap != nil {
+			if err := unmapFile(oldMmap); err != nil {
+				idx.mapMu.Unlock()
+				return errors.Wrap(err, "failed to unmap memory mapped index file")
+			}
 		}
 		idx.mmap, err = mmapFile(idx.file)
 		idx.mapMu.Unlock()

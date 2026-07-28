@@ -22,5 +22,15 @@ func syncMmap(mmap gommap.MMap, f *os.File) error {
 }
 
 func (idx *index) shrink() error {
-	return idx.file.Truncate(idx.position)
+	if err := idx.file.Truncate(idx.position); err != nil {
+		return err
+	}
+	// size tracks the FILE, so it follows the truncate. Leaving it at the
+	// pre-allocated value made writeAt compare against a file that no longer
+	// existed and skip the expansion it needed — harmless here only because
+	// shrink runs at seal, after which nothing writes. Keeping it honest costs
+	// nothing and removes the standing trap. (The Windows implementation has
+	// the same line for a sharper reason; see there.)
+	idx.size = idx.position
+	return nil
 }

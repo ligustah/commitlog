@@ -5,6 +5,40 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.38.1 — 2026-07-28
+
+- **Fix**: shrinking an index while it was EMPTY left it silently unwritable,
+  and any later read of it panicked.
+
+  Reported by sqlcdc against v0.36.1: `findEntry` → `index.ReadAt`, *"slice
+  bounds out of range capacity 0"*, on an empty active-segment index.
+
+  On Windows `shrink()` unmaps before truncating, because an open view blocks
+  `SetEndOfFile`. It remapped only `if remap && idx.position > 0`, and set
+  `idx.size` inside that same branch — so an empty index was left with a **nil
+  mapping** while `size` still described the pre-allocated file that had just
+  been truncated away.
+
+  The panic is the *second* symptom. The first is silent corruption: `writeAt`
+  compared against the stale size, decided no expansion was needed, and copied
+  into the nil mapping — and slicing a nil slice at `[0:]` is legal Go, so the
+  write did **nothing** while `position` still advanced. The index then claimed
+  entries it did not hold, without error. Only a later read of one of those
+  entries surfaced it, as a crash.
+
+  `shrink()` now keeps `size` consistent with the file on both platforms;
+  `writeAt` skips the unmap when there is no mapping; and `ReadAt` reports
+  `errIndexCorrupt` rather than indexing past a short mapping — a panic inside a
+  library takes the caller's process down, and an error is strictly better
+  whatever the cause. Deliberately not `io.EOF`, which would read as "no more
+  entries" and silently truncate a scan.
+
+  **Not verified**: the reporter's exact production trigger (a concurrent second
+  reader with `SearchTimestamp` probing high offsets). `Shrink` is only called
+  from `seal()`, so how their workload reaches this state is not yet identified.
+  What is fixed is the mechanism producing that precise signature, plus a guard
+  that turns any other route into a handled error.
+
 ## v0.38.0 — 2026-07-28
 
 One reader, configured by options, with a key-prefix filter that reads only the
