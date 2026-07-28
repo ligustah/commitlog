@@ -5,6 +5,60 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.37.0 — 2026-07-28
+
+Three parts of the tier surface existed because of how the API grew, not
+because a log needed them. All three were breaking, so they ship together as
+one migration rather than three. `docs/tier-layering.md` records the reasoning.
+
+- **Breaking**: `CleanWithSpec` no longer returns superseded store keys — it
+  returns `(verified int64, err error)` — and the log **reclaims those objects
+  itself**.
+
+  Returning them made the caller responsible for commitlog's own garbage, and
+  that was not a boundary but an evasion. The reason the keys were exported at
+  all is that a rewrite cannot tell when an in-flight reader has finished with
+  the object it replaced; handing them upward passed that problem to someone
+  with strictly less information.
+
+  The log knows its readers, so it tracks them. A backing over a store object
+  carries a reference count, taken when a scan acquires it and released when
+  that scan closes. A rewrite queues the superseded key with the backing that
+  was serving it, and the queue drains at the *start* of a later clean pass — by
+  which point most readers are long gone, and anything still held waits another
+  pass.
+
+  Reclamation touches only what this log uploaded and its own rewrite replaced.
+  That is a far narrower claim than "unreferenced by me", which remains unsafe
+  on a shared store. It never deletes an object the manifest still names: a pass
+  republishes the manifest before queueing, and a pass whose publish failed
+  holds reclamation off entirely, so a crash in between leaves an orphan rather
+  than a dangling reference — storage, not correctness, and
+  `UnreferencedObjects` reports it. It is suppressed while the tier is
+  read-only, a delete being a store write like any other, and the queue is held
+  across that rather than dropped.
+
+  Callers should **delete** their `DeleteStoreObjects` plumbing rather than port
+  it. `DeleteStoreObjects` and `UnreferencedObjects` remain as operator tools
+  for the shared-store case, where garbage this log did not create can still
+  appear; they are no longer part of the normal path.
+
+- **Breaking**: `CleanSpec.SkipTiered` is gone. Use `SetTierReadOnly`.
+
+  The same idea at two scopes — one said "not this pass", the other "not this
+  process" — and offering both invited a caller to set them to disagree.
+  Whether a log may write to its store is a property of the **log**, so the mode
+  that expresses ownership is what remains, and `CleanWithSpec` derives the
+  pass's behaviour from it.
+
+- **Breaking**: `ExportTierState` and `ImportTierState` are gone.
+
+  They existed only so a caller could carry commitlog's segment index through
+  its own consensus. Since the tier manifest (v0.36.0) the store describes
+  itself and a log adopts what it finds on open, so these were a second way to
+  do what now happens by itself — and one that could disagree with it.
+  `TierObject` stays; `TierManifest()` returns it.
+
 ## v0.36.1 — 2026-07-27
 
 - **Fixed**: `UnreferencedObjects` judged garbage by this log's own segments
