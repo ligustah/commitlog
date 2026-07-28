@@ -1,6 +1,8 @@
 package commitlog
 
 import (
+	"errors"
+	"io"
 	"os"
 	"sort"
 )
@@ -45,11 +47,29 @@ func findSegmentIndexByTimestamp(segments []*segment, timestamp int64) (int, err
 	idx := sort.Search(n, func(i int) bool {
 		// Read the first entry in the segment to determine the base timestamp.
 		var entry entry
-		if e := segments[i].Index.ReadEntryAtLogOffset(&entry, 0); e != nil {
+		switch e := segments[i].Index.ReadEntryAtLogOffset(&entry, 0); {
+		case e == nil:
+			return entry.Timestamp > timestamp
+		case errors.Is(e, io.EOF):
+			// The segment is EMPTY — it has no first entry, not a broken one.
+			// That is the normal state of the active segment in the window just
+			// after a roll, so it must not be reported as a failure.
+			//
+			// Sorting it after every timestamp is where an empty segment
+			// belongs: it holds no record, so no record in it is at or before
+			// anything, and the search lands on the last segment that does hold
+			// one.
+			//
+			// This used to set err, which EarliestOffsetAfterTimestamp
+			// special-cased and LatestOffsetBeforeTimestamp did not — so the
+			// latter failed with a bare "EOF" whenever the search happened to
+			// touch a just-rolled segment. Timing-dependent, which is why
+			// concurrent readers made it show up.
+			return true
+		default:
 			err = e
 			return true
 		}
-		return entry.Timestamp > timestamp
 	})
 	return idx, err
 }

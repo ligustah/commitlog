@@ -5,6 +5,46 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.38.2 — 2026-07-28
+
+Concurrent readers and timestamp probes on a LIVE log are supported. They were
+also, until now, racy and prone to a spurious error — both found by writing the
+test that was supposed to merely demonstrate the support.
+
+- **Fix (data race)**: `LatestOffsetBeforeTimestamp` read `seg.lastOffset`
+  without the segment's lock, racing every concurrent append.
+
+  Found by `TestConcurrentReadersAndProbesOnLiveLog` under `-race`. This is a
+  path callers run **unattended on a timer** — a tiering horizon, an offset
+  lookup — so it raced whenever a probe happened to land while a record was
+  being written. Every other reader of that field goes through `LastOffset()`,
+  which takes the read lock; this one did not.
+
+- **Fix**: `LatestOffsetBeforeTimestamp` failed with a bare `EOF` whenever the
+  segment search touched an EMPTY segment — the normal state of the active
+  segment in the window just after a roll.
+
+  `findSegmentIndexByTimestamp` reads each segment's first index entry, and an
+  empty segment legitimately has none. That `io.EOF` was recorded as a failure;
+  `EarliestOffsetAfterTimestamp` special-cased it, `LatestOffsetBeforeTimestamp`
+  did not. An empty segment now sorts after every timestamp — where a segment
+  holding no records belongs — with no error. Timing-dependent, which is why
+  concurrent readers made it observable.
+
+- **New**: `ErrTimestampBeforeLog`, returned when a timestamp lookup asks for a
+  point earlier than anything the log still holds.
+
+  It was an ad-hoc `errors.New` that callers could only string-match. The
+  distinction matters to an unattended caller: "the log does not go back that
+  far" is a normal answer to absorb — clamp to the oldest offset and carry on —
+  while an index or I/O failure is not. Without a sentinel the two are one
+  opaque error, and the safe handling of each is the wrong handling of the other.
+
+- **Changed**: `delete_cleaner`'s age-retention loop reads `LastWriteTime()`
+  through the accessor rather than the bare field, matching the identical read
+  in `cleanTier` a few lines above. Safe before only as a property of the loop
+  rather than of the field.
+
 ## v0.38.1 — 2026-07-28
 
 - **Fix**: shrinking an index while it was EMPTY left it silently unwritable,

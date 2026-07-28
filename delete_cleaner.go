@@ -298,7 +298,13 @@ func (c *deleteCleaner) applyAgeLimit(segments []*segment) ([]*segment, error) {
 	// Drop the prefix of segments whose last-written timestamp is less than
 	// the TTL, always retaining the active (last) segment.
 	for i, seg := range segments {
-		if i == len(segments)-1 || seg.lastWriteTime >= ttl {
+		// LastWriteTime(), not the bare field: cleanTier's identical read a few
+		// lines up takes the segment's read lock for it, and the two disagreeing
+		// is how one of them ends up being the wrong one. Safe here only because
+		// the active segment short-circuits first and a sealed one is not being
+		// written — which is a property of the loop, not of the field, and the
+		// next edit to either could quietly remove it.
+		if i == len(segments)-1 || seg.LastWriteTime() >= ttl {
 			idx = i
 			break
 		}

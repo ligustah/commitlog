@@ -29,6 +29,18 @@ var ErrSegmentNotFound = errors.New("segment not found")
 // Concurrency Control is activated.
 var ErrIncorrectOffset = errors.New("incorrect offset")
 
+// ErrTimestampBeforeLog reports that a timestamp lookup asked for a point
+// EARLIER than anything the log still holds — so there is no offset at or
+// before it, and none is coming: retention only moves that boundary forward.
+//
+// A sentinel because the distinction matters to an unattended caller. "The log
+// does not go back that far" is a normal answer that such a caller should
+// absorb — clamp to the oldest offset and carry on — while a genuine index or
+// I/O failure is not. Without something to compare against, the two are one
+// opaque error and the safe handling of each is the wrong handling of the
+// other.
+var ErrTimestampBeforeLog = errors.New("commitlog: timestamp is before the beginning of the log")
+
 // ErrBlockFormat reports a segment written in a block format this build
 // does not understand. Callers probe for it at startup (before touching
 // anything) so an incompatible store is refused rather than half-read:
@@ -993,7 +1005,7 @@ func (l *commitLog) LatestOffsetBeforeTimestamp(timestamp int64) (int64, error) 
 		// if the given timestamp is before the start of the stream return an
 		// error.
 		if timestamp < seg.FirstWriteTime() {
-			return 0, errors.New("timestamp is before the beginning of the log")
+			return 0, ErrTimestampBeforeLog
 		}
 	} else {
 		seg = l.segments[idx-1]
@@ -1015,7 +1027,12 @@ func (l *commitLog) LatestOffsetBeforeTimestamp(timestamp int64) (int64, error) 
 		return 0, errors.Wrap(err, "failed to find log entry for timestamp")
 	}
 
-	return seg.lastOffset, nil
+	// LastOffset(), not the bare field: this runs concurrently with appends,
+	// which mutate lastOffset under the segment's write lock. Reading it
+	// directly was a data race against every live writer — and this is a path
+	// callers run unattended on a timer, so it raced whenever a probe happened
+	// to land while a record was being written.
+	return seg.LastOffset(), nil
 }
 
 // SetHighWatermark sets the high watermark on the log. All messages up to and
