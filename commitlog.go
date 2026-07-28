@@ -188,6 +188,60 @@ type Options struct {
 	// NON-transactional compacted logs (transactional layers pass their own
 	// CleanSpec instead, with transaction-aware bounds). Zero disables.
 	CompactTombstoneRetention time.Duration
+	// PrefixReadCoalesceBytes and PrefixReadTierCoalesceBytes are how large a
+	// gap between two wanted records ReadKeyPrefix reads THROUGH rather than
+	// splitting into a second request — for LOCAL segments and for segments
+	// offloaded to the SegmentStore. Zero takes the defaults; NEGATIVE means
+	// never coalesce, i.e. one request per isolated record.
+	//
+	// They differ because the tiers are limited by different things.
+	//
+	// A LOCAL read has no per-request price. What it costs is seeks and
+	// syscalls, against a page cache already reading ahead, so the useful unit
+	// is a large contiguous window and splitting one up buys nothing. The
+	// default is megabytes.
+	//
+	// A STORE charges per request and serves many at once, so splitting is what
+	// gives the fan-out something to parallelize. The default is far smaller,
+	// and where reads are priced per GB the right value is computable rather
+	// than guessable: reading through a gap transfers bytes that are discarded,
+	// splitting costs one more request, so coalescing pays exactly while
+	//
+	//	C_req > (gap / 1e9) * C_GB      i.e.      gap < 1e9 * C_req / C_GB
+	//
+	// At, say, $0.0004/1k GETs and $0.09/GB that breakeven is a few KB. Where
+	// bytes are effectively free — a store read from inside the same region —
+	// the right-hand side runs away and coalescing always wins on price.
+	//
+	// Per-request LATENCY is deliberately NOT part of the trade. A round trip is
+	// worth a lot of skipped bytes only when requests go out one at a time; with
+	// enough in flight it is hidden, and price is what remains.
+	// PrefixReadTierConcurrency is what keeps them in flight, so the two work
+	// together: a smaller gap means more requests, and the fan-out is what makes
+	// that cheap in time.
+	PrefixReadCoalesceBytes     int64
+	PrefixReadTierCoalesceBytes int64
+	// PrefixReadConcurrency and PrefixReadTierConcurrency are how many record
+	// reads ReadKeyPrefix keeps in flight against LOCAL segments and against
+	// segments offloaded to the SegmentStore. Zero takes the defaults.
+	//
+	// The unit is a RUN — a span of wanted records read contiguously (see
+	// PrefixReadCoalesceBytes) — not a segment, so a prefix whose keys are
+	// concentrated in a few segments still fans out.
+	//
+	// They are separate because the two tiers are limited by different things,
+	// and they are enforced INDEPENDENTLY, so a log holding both does not have
+	// its store reads throttled behind its disk reads. A store charges per
+	// request and serves many at once: keeping requests in flight is precisely
+	// how its round trips become throughput, so the tier default is high. A
+	// local read has no round trip to hide — it is a syscall against a page
+	// cache already reading ahead — so piling on goroutines buys queueing
+	// rather than bandwidth, and that default is modest.
+	//
+	// Neither is CompactMaxGoroutines: that bounds segment rewrites, which are
+	// CPU- and write-bound, not scattered reads that spend their time waiting.
+	PrefixReadConcurrency     int
+	PrefixReadTierConcurrency int
 	// TierReadOnly opens the log without the right to write to its
 	// SegmentStore: no offload, no rewrite of a tiered segment, no tier
 	// retention, no object deletes. Reads are unaffected.

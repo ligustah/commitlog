@@ -92,12 +92,100 @@ delete, not skip. This is the flag the digest already carries.
 **Correctness constraint agreed non-negotiable:** same answer with no digest
 present, falling back to a scan.
 
+## What was built
+
+`ReadKeyPrefix(prefix, upTo) ([]PrefixRecord, completeThrough, error)` in
+`prefix_read.go`. Sealed segments only, latest-per-key within the prefix,
+tombstones returned as tombstones, and the same answer with or without sidecars
+present.
+
+### Fetching the records is a cost decision, not a correctness one
+
+Locating the winners is the digest merge. Reading them is a separate problem:
+they are scattered, and there are two ways to get them.
+
+- Read a contiguous span and discard the frames between the ones wanted.
+- Address each one, paying a request per record.
+
+Which wins is **not a property of the storage device in the abstract** — it is
+what that tier charges for. So both the coalescing budget and the fan-out are
+configured **per tier**, and chosen **per segment**, since a log mid-offload
+holds both kinds at once.
+
+**Local.** No per-request price at all. What a local read costs is seeks and
+syscalls, against a page cache already reading ahead, so the useful unit is a
+large contiguous window — megabytes — and splitting one into scattered reads
+buys nothing. Concurrency is modest: there is no round trip to hide, so piling
+goroutines onto one device buys queueing rather than bandwidth.
+
+**Tiered.** A store charges per request and answers many at once. Splitting is
+what gives the fan-out something to parallelise, so the budget is small and the
+concurrency is high. Where bytes are actually priced, the breakeven is
+computable rather than guessable — reading through a gap transfers bytes that
+are discarded, splitting costs one more request, so coalescing pays while
+
+```
+C_req > (gap / 1e9) * C_GB        i.e.        gap < 1e9 * C_req / C_GB
+```
+
+At, say, $0.0004/1k GETs and $0.09/GB that is a few KB. Read from inside the
+same region, where bytes are effectively free, the right-hand side runs away and
+coalescing always wins on price.
+
+**Latency deliberately does not enter the trade.** An earlier version of this
+argued a megabyte-scale default from round-trip time. That only holds if requests
+are issued serially; with enough in flight the round trip is hidden and price is
+all that remains. Concurrency is what makes requests cheap in time, so the tier
+default is set on price and the fan-out pays for it.
+
+The four knobs are `PrefixReadCoalesceBytes` / `PrefixReadTierCoalesceBytes` and
+`PrefixReadConcurrency` / `PrefixReadTierConcurrency`. Zero takes the default, as
+everywhere else in `Options`; a **negative** coalesce budget means *never
+coalesce* — one request per isolated record, the fastest and most expensive
+setting. That escape hatch is negative rather than zero precisely so it cannot be
+confused with "unset".
+
+### The unit of parallelism is a run, not a segment
+
+A **run** is a span of wanted records close enough to read in one pass; the
+coalesce budget decides where one ends. Every run, across every segment, is
+fetched concurrently, and the two tiers' limits are enforced **independently** so
+a log holding both does not have its store reads throttled behind its disk reads.
+
+Parallelising per *segment* is the obvious shape, since each segment is its own
+file or object. It is also wrong: it caps the fan-out at the number of segments
+holding hits, so a prefix whose keys are concentrated in a few segments barely
+fans out however many records it wants.
+`TestPlanRunsFanOutIsNotCappedBySegmentCount` pins this — collapsing the planner
+back to one run per segment fails it.
+
+### What is tested
+
+Beyond the semantics: a differential test against an independent scan across ten
+prefixes and every bound in range; equivalence with sidecars deleted and with
+sidecars corrupted; agreement across every combination of coalesce and
+concurrency setting; a read over segments actually offloaded to a
+`FileSegmentStore`, including a tombstone making the round trip; and
+`TestPrefixReadTierBudgetGovernsTieredSegments`, which uses the scanner counter
+to prove the tier budget reshapes tiered reads while the local budget leaves them
+untouched.
+
+`TestReadKeyPrefixDoesNotScanSegmentsWithoutHits` pins the acceleration itself —
+one segment scanned for one hit across 60+ sealed segments, against 33 when the
+digests are ignored.
+
+Each load-bearing guard was checked by mutation rather than by passing: inverting
+latest-per-key, dropping the prefix filter, ignoring the sidecars, and collapsing
+the run planner to one run per segment each fail a test that names the defect.
+
 ## Still open
 
-Prefix position in key order — early or late — which decides whether the sparse
-key index is required or merely an optimisation. That is sqlcdc's key layout to
-answer, not something to guess here.
+Prefix position in key order — early or late — which decides whether a sparse key
+index (every Nth key → byte offset in the digest) is required or merely an
+optimisation. That is sqlcdc's key layout to answer. Nothing built here changes
+the clean path or the digest format; the sparse index would be the first thing
+that does.
 
-Because the read is now sealed-only, the commitlog-side work is a prefix-bounded
-digest merge; it does not change the clean path or the digest format unless the
-sparse index turns out to be required.
+The defaults are **argued, not measured**. There is no benchmark behind either
+number yet, and a deployment paying per-GB reads should compute its own coalesce
+budget from the formula above rather than trust the default.

@@ -829,6 +829,18 @@ func (s *segment) Position() int64 {
 	return s.position
 }
 
+// tiered reports whether this segment's bytes live in a SegmentStore rather
+// than a local file. The two are worth telling apart wherever the SHAPE of a
+// read matters rather than its result: a store charges per request and is
+// served best by many in flight, a local file is a syscall against a page cache
+// that is already reading ahead.
+func (s *segment) tiered() bool {
+	s.RLock()
+	defer s.RUnlock()
+	_, ok := s.backing.(*storeBacking)
+	return ok
+}
+
 func (s *segment) IsEmpty() bool {
 	s.RLock()
 	defer s.RUnlock()

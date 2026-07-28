@@ -299,6 +299,33 @@ type CommitLog interface {
 	// ErrSegmentNotFound if the log holds no segment at or after offset.
 	ReadMessageSet(offset int64, maxBytes int) ([]byte, error)
 
+	// ReadKeyPrefix returns the latest surviving record for every key beginning
+	// with prefix, in key order, plus the offset that answer is COMPLETE
+	// THROUGH. An empty prefix matches every key.
+	//
+	// It exists for STATE TRANSFER: moving a keyed working set to another
+	// process by shipping compacted state rather than the history that produced
+	// it. It reads the key digests instead of the records, so its cost tracks
+	// the records it returns rather than the records the log holds.
+	//
+	// SEALED SEGMENTS ONLY — never the active one. That is what makes
+	// completeThrough a boundary the caller can tail from rather than a moving
+	// target, and it keeps the active segment (which holds no digest) from
+	// forcing a scan of the tail on every call. upTo bounds the read from
+	// above, so a caller with a commit boundary transfers only what its
+	// consumers can already see; negative means everything sealed.
+	// completeThrough is the lower of upTo and the sealed boundary, and is
+	// returned even when nothing matches.
+	//
+	// TOMBSTONES ARE RETURNED, not omitted, carrying AttrTombstone. A
+	// destination applying this has to DELETE those keys; filtering them out
+	// resurrects deleted data with nothing to report it.
+	//
+	// The answer does NOT depend on the digests existing: a missing, corrupt or
+	// stale sidecar is rebuilt by scanning, and the result is identical. The
+	// digests are how it goes fast, not what it means.
+	ReadKeyPrefix(prefix []byte, upTo int64) (records []PrefixRecord, completeThrough int64, err error)
+
 	// Clean applies retention and compaction rules against the log, if
 	// applicable.
 	Clean() error
