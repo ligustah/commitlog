@@ -83,6 +83,45 @@ func TestCleanSpecTombstoneGC(t *testing.T) {
 	require.NotContains(t, got, offGoneTomb)
 }
 
+// Tombstone-ness comes from AttrTombstone and NEVER from the value being
+// empty. Both directions are silent when broken, so both are pinned here:
+// an empty-valued live record must survive GC, and a tombstone carrying a
+// payload must still be collected. The existing tests only cover the second
+// (every one pairs AttrTombstone with a non-empty value), which leaves an
+// "empty implies deleted" inference free to creep in — it would drop live
+// keys with legitimately empty values and report nothing.
+//
+// Segments roll per message here, so the surviving decision is made from the
+// sealed segments' key digests (digestFlagTombstone), not from a rescan.
+func TestCleanSpecTombstoneIsAttributeNotEmptyValue(t *testing.T) {
+	l, app := specLog(t)
+	old := timestamp() - int64(2*time.Hour)
+
+	// Live, empty-valued, and old enough that GC would take it if the empty
+	// value were mistaken for a tombstone.
+	offEmptyLive := app(&Message{Key: []byte("empty"), Value: nil, Timestamp: old})
+	// A tombstone whose payload is non-empty must still be collected — the
+	// converse inference ("non-empty implies live") is equally wrong.
+	offPayloadTomb := app(&Message{Key: []byte("payload"), Value: []byte("trailer"), Attributes: AttrTombstone, Timestamp: old})
+	app(&Message{Key: []byte("pad"), Value: []byte("pad")}) // active segment padding
+
+	requireCleanOK(t, l, (CleanSpec{
+		Ceiling:            l.HighWatermark(),
+		TombstoneGCBelow:   l.HighWatermark(),
+		TombstoneRetention: time.Hour,
+	}))
+
+	got := readAllMsgs(t, l)
+	require.Contains(t, got, offEmptyLive,
+		"live record with an empty value was collected: tombstone inferred from the value, not AttrTombstone")
+	require.Empty(t, got[offEmptyLive].Value(), "empty value must round-trip as empty")
+	require.NotContains(t, got, offPayloadTomb,
+		"expired tombstone survived because it carried a payload")
+	for off, m := range got {
+		require.NotEqual(t, "payload", string(m.Key()), "tombstoned key must vanish (offset %d)", off)
+	}
+}
+
 // An aborted record must neither survive nor shadow an older committed value
 // (H1 regression: the transaction-blind scan let an aborted "latest" delete
 // the committed copy, losing the key's value for every committed reader).
