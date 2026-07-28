@@ -1,8 +1,10 @@
 package commitlog
 
 import (
+	"bytes"
 	"io"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,10 +18,23 @@ import (
 // tiered segment onto a new object and leave the old one behind.
 func reclaimFixture(t *testing.T) (*commitLog, *writeCountingStore, func()) {
 	t.Helper()
+	var store *writeCountingStore
+	l, cleanup := reclaimFixtureStore(t, func(fs *FileSegmentStore) SegmentStore {
+		store = &writeCountingStore{FileSegmentStore: fs}
+		return store
+	})
+	return l, store, cleanup
+}
+
+// reclaimFixtureStore is reclaimFixture over a caller-chosen wrapper around the
+// file store, for tests that need to observe the store's deletes as they land
+// rather than only count them afterwards.
+func reclaimFixtureStore(t *testing.T, wrap func(*FileSegmentStore) SegmentStore) (*commitLog, func()) {
+	t.Helper()
 	dir := tempDir(t)
 	fs, err := NewFileSegmentStore(filepath.Join(dir, "store"))
 	require.NoError(t, err)
-	store := &writeCountingStore{FileSegmentStore: fs}
+	store := wrap(fs)
 
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
@@ -47,7 +62,7 @@ func reclaimFixture(t *testing.T) (*commitLog, *writeCountingStore, func()) {
 	n, err := l.OffloadBefore(last)
 	require.NoError(t, err)
 	require.Positive(t, n, "the fixture needs offloaded segments")
-	return l, store, cleanup
+	return l, cleanup
 }
 
 // cleanAll runs a full pass over everything committed.
@@ -313,19 +328,106 @@ func TestReclamationHoldsOffWhileTheManifestMayStillNameTheObject(t *testing.T) 
 	}
 }
 
-// Scans and passes run together: nothing a scan has pinned may go missing while
-// it reads, however many rewrites and reclamations happen underneath.
+// pinAuditStore records whether a delete lands on a key while a scan says it is
+// still holding it. hold/drop bracket the window a scanner is pinning a key.
 //
-// What this does NOT pin down is the acquire-under-the-segment-lock ordering.
-// Moving the acquire after the RUnlock leaves this test green — deferring the
-// drain to a later pass makes that window nearly unreachable, since the reader
-// would have to be descheduled across an entire subsequent pass to lose its
-// object. Nearly is not a guarantee and the correct ordering costs nothing, so
-// the code takes the claim under the lock; but that ordering is argued rather
-// than tested, and this comment is here so the next person does not read a
-// green run as proof of it.
-func TestConcurrentScansNeverLoseTheObjectTheyAreReading(t *testing.T) {
-	l, _, cleanup := reclaimFixture(t)
+// The bookkeeping is deliberately CONSERVATIVE at both ends: hold is called
+// after the scanner has already acquired, and drop before it releases. So the
+// audited window is strictly inside the real pin — this can miss a violation,
+// but it cannot invent one, which is the right way round for a concurrent test.
+// It is scoped to deletes issued by drainReclaim. A segment REMOVED outright —
+// compaction finding every record in it superseded — deletes its objects from
+// cleanupEmptySegment while a scan may well be holding them, and that is
+// deliberate (see TestReclamationWaitsForTheReaderHoldingTheOldObject): those
+// records are gone by decision, and the reader gets ErrSegmentClosed from the
+// segment. A rewrite decides nothing of the sort, which is the claim here.
+type pinAuditStore struct {
+	*FileSegmentStore
+
+	mu sync.Mutex
+	// pinned counts scans currently holding each key.
+	pinned map[string]int
+	// reclaimDeletes counts deletes that came from drainReclaim. Asserted
+	// POSITIVE: if drainReclaim is ever renamed, this attribution silently stops
+	// matching and the audit below would pass by covering nothing, which is the
+	// exact failure this whole test is being fixed for.
+	reclaimDeletes int
+	racy           []string // reclaim-path keys deleted while a scan held them
+}
+
+func newPinAuditStore(fs *FileSegmentStore) *pinAuditStore {
+	return &pinAuditStore{FileSegmentStore: fs, pinned: map[string]int{}}
+}
+
+func (s *pinAuditStore) hold(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pinned[key]++
+}
+
+func (s *pinAuditStore) drop(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pinned[key]--; s.pinned[key] <= 0 {
+		delete(s.pinned, key)
+	}
+}
+
+func (s *pinAuditStore) Delete(key string) error {
+	viaReclaim := bytes.Contains(debug.Stack(), []byte("drainReclaim"))
+	s.mu.Lock()
+	if viaReclaim {
+		s.reclaimDeletes++
+		if s.pinned[key] > 0 {
+			s.racy = append(s.racy, key)
+		}
+	}
+	s.mu.Unlock()
+	return s.FileSegmentStore.Delete(key)
+}
+
+// Scans and reclamation passes run together, and must interleave without a
+// race, a read error, or a delete that skips the deferred path.
+//
+// Read the name literally, because the obvious stronger reading is NOT what
+// this proves. It was called TestConcurrentScansNeverLoseTheObjectTheyAreReading
+// and asserted that reads through the pinned backing kept succeeding — and it
+// passed with the pin check in drainReclaim deleted outright. Two reasons, both
+// worth keeping:
+//
+//   - The read could not observe the loss. storeBacking reads ahead
+//     prefetchSize (1 MiB) and these objects are a few hundred bytes, so the
+//     first touch buffers the whole object and every later ReadAt is served
+//     from memory without going near the store. It was measuring the read-ahead
+//     buffer, not the pin.
+//   - Free-running scans cannot reach the window anyway. Reclamation is
+//     deliberately deferred to a LATER pass, so by the time a delete is issued
+//     the scanner that held the old object has released it several passes ago.
+//     Holding a pin across a drain is something a test has to arrange on
+//     purpose, which is what TestReclamationWaitsForTheReaderHoldingTheOldObject
+//     does — that is where the pin guarantee is proven, and this test is not a
+//     second copy of it.
+//
+// What is left here is still worth running. The store audit below is scoped to
+// the reclaim path and is opportunistic — it fires only if a delete happens to
+// land inside a hold window, which the deferral makes rare — but the count of
+// reclaim-path deletes is asserted positive, and THAT is deterministic: delete
+// superseded objects at the point of rewrite instead of queueing them, and this
+// test fails. So it holds the deferral itself in place, under concurrency, with
+// -race watching the interleaving.
+//
+// It also does not pin down the acquire-under-the-segment-lock ordering. Moving
+// the acquire after the RUnlock leaves this test green, for the same deferral
+// reason: the reader would have to be descheduled across an entire subsequent
+// pass to lose its object. Nearly unreachable is not a guarantee and the correct
+// ordering costs nothing, so the code takes the claim under the lock; but that
+// ordering is argued rather than tested.
+func TestConcurrentScansAndReclamationInterleaveSafely(t *testing.T) {
+	var store *pinAuditStore
+	l, cleanup := reclaimFixtureStore(t, func(fs *FileSegmentStore) SegmentStore {
+		store = newPinAuditStore(fs)
+		return store
+	})
 	defer cleanup()
 
 	var (
@@ -355,14 +457,20 @@ func TestConcurrentScansNeverLoseTheObjectTheyAreReading(t *testing.T) {
 						continue
 					}
 					sc := newSegmentScannerCache(s, newBlockCache())
-					if sc.pin != nil {
-						// Read through the pinned backing: the claim says this
-						// object stays until Close, whatever the passes do.
-						buf := make([]byte, 8)
-						if _, err := sc.pin.ReadAt(buf, 0); err != nil && !errors.Is(err, io.EOF) {
-							failure.Store(err.Error())
-						}
+					if sc.pin == nil {
+						_ = sc.Close()
+						continue
 					}
+					key := sc.pin.key
+					store.hold(key)
+					// The read is still worth doing — it exercises the backing
+					// while a pass runs — but the guarantee is the store audit
+					// above, for the read-ahead reason in the doc comment.
+					buf := make([]byte, 8)
+					if _, err := sc.pin.ReadAt(buf, 0); err != nil && !errors.Is(err, io.EOF) {
+						failure.Store(err.Error())
+					}
+					store.drop(key)
 					_ = sc.Close()
 				}
 			}
@@ -380,4 +488,16 @@ func TestConcurrentScansNeverLoseTheObjectTheyAreReading(t *testing.T) {
 	if err := failure.Load(); err != nil {
 		t.Fatalf("a scan lost the object it had pinned: %v", err)
 	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	// Opportunistic — see the doc comment. A green run here is not proof that
+	// pinned objects survive; it is the absence of the one symptom this shape
+	// can see.
+	require.Empty(t, store.racy, "reclamation deleted an object a scan was holding")
+	// The deterministic half: a run that reclaimed nothing — or whose deletes
+	// stopped going through drainReclaim — would satisfy every line above by
+	// covering no deletes at all.
+	require.Positive(t, store.reclaimDeletes,
+		"no delete was attributed to drainReclaim: either nothing was reclaimed, or "+
+			"reclamation stopped going through the deferred path")
 }
