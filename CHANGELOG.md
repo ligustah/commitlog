@@ -73,11 +73,20 @@ test that was supposed to merely demonstrate the support.
   whatever the cause. Deliberately not `io.EOF`, which would read as "no more
   entries" and silently truncate a scan.
 
-  **Not verified**: the reporter's exact production trigger (a concurrent second
-  reader with `SearchTimestamp` probing high offsets). `Shrink` is only called
-  from `seal()`, so how their workload reaches this state is not yet identified.
-  What is fixed is the mechanism producing that precise signature, plus a guard
-  that turns any other route into a handled error.
+  **No production path to this has been demonstrated** — a stronger statement
+  than the one made when this shipped, and it is the accurate one.
+
+  Two later attempts to reach the defect through a real log both passed with the
+  fix reverted. The bad state exists only IN MEMORY, and closing the log discards
+  it: on reopen `newIndex` finds a zero-length file and maps it fresh. Reaching
+  it needs the index to be *used* after an empty shrink within one process, and
+  `seal()` — its only caller — marks the segment sealed, after which nothing
+  writes to it. The unit test reaches it only by calling `Shrink` then
+  `writeEntries` directly, a sequence `seal()` does not produce.
+
+  So this is defence against a latent inconsistency, not a proven live bug, and
+  it is **probably not** what the reporter hit. The likelier cause of that report
+  is the timestamp-path race and spurious `EOF` fixed in v0.38.2.
 
 ## v0.38.0 — 2026-07-28
 

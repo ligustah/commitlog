@@ -60,29 +60,77 @@ func TestIndexShrinkOnEmptyIndexKeepsItUsable(t *testing.T) {
 	require.Equal(t, want.Timestamp, got.Timestamp)
 }
 
-// The same shape through a segment: roll a segment whose index is empty, then
-// keep using the log. This is the path the reporter actually hit.
-func TestSegmentSealWithEmptyIndexStaysReadable(t *testing.T) {
-	l, cleanup := setupWithOptions(t, Options{
-		Path:            tempDir(t),
-		MaxSegmentBytes: 64,
-		Compact:         true,
-	})
-	defer cleanup()
+// Closing a log whose active segment is EMPTY, then reopening it.
+//
+// Read the name literally: this asserts the reopen works, and nothing more. It
+// does NOT cover the empty-shrink defect above, and two attempts to make it do
+// so both passed with that fix reverted — which is how the honest limit in the
+// v0.38.1 changelog entry was established.
+//
+// The reason is worth keeping: a shrink on an empty index leaves a bad state
+// only IN MEMORY, and closing the log discards it. On reopen, newIndex finds a
+// zero-length file, re-allocates and maps it fresh, so the corruption never
+// survives the close it would have to survive to be observed here. Reaching the
+// defect needs the index to be USED after an empty shrink within one process,
+// and seal() — its only caller — marks the segment sealed, after which nothing
+// writes to it.
+//
+// So no production path to that defect has been demonstrated. The unit test
+// above reaches it by calling Shrink then writeEntries directly, which is a
+// sequence seal() does not produce. The fix stands as defence against a latent
+// inconsistency, not as a proven live bug — stated here because the earlier
+// version of this test claimed the coverage it did not have.
+func TestReopenAfterSealingAnEmptyIndexIsUsable(t *testing.T) {
+	dir := tempDir(t)
+	opts := Options{Path: dir, MaxSegmentBytes: 256, Compact: true}
 
-	for i := 0; i < 40; i++ {
+	cl, err := New(opts)
+	require.NoError(t, err)
+	l := cl.(*commitLog)
+
+	// Fill exactly up to a roll, so the ACTIVE segment is left empty: its
+	// index has no entries, and closing the log seals and shrinks it.
+	var lastOff int64
+	for i := 0; i < 200; i++ {
 		offs, err := l.Append([]*Message{{
-			Key: []byte("k"), Value: []byte("some padding value here"),
+			Key: []byte("k"), Value: []byte("padding to force segment rolls"),
 		}})
 		require.NoError(t, err)
 		l.SetHighWatermark(offs[0])
+		lastOff = offs[0]
 	}
+	// Roll to a fresh segment and leave it untouched.
+	segs := l.Segments()
+	active := segs[len(segs)-1]
+	require.NoError(t, l.split(active))
+	segs = l.Segments()
+	fresh := segs[len(segs)-1]
+	require.NotEqual(t, active.BaseOffset, fresh.BaseOffset, "expected a fresh segment")
+	require.Zero(t, fresh.Index.Position(), "the fresh active segment's index must be empty")
 
-	// Probe every offset, including past the end — SearchTimestamp-style
-	// probing of high offsets is how the reporter reached the bad index.
-	for _, seg := range l.Segments() {
-		for off := seg.BaseOffset; off <= seg.NextOffset()+2; off++ {
-			_, _ = seg.findEntry(off) // must not panic; an error is fine
-		}
-	}
+	require.NoError(t, l.Close()) // seals the empty segment: shrink on an empty index
+
+	// Reopen and use it: this is where a mishandled empty shrink surfaces.
+	l2, err := New(opts)
+	require.NoError(t, err)
+	defer l2.Close() // nolint: errcheck
+
+	require.Equal(t, lastOff, l2.NewestOffset(), "reopened log lost its tail")
+
+	// Reads must work, including probes past the end and by timestamp — the
+	// shapes the reporter was exercising.
+	r, err := l2.NewReader(From(l2.OldestOffset()), Uncommitted())
+	require.NoError(t, err)
+	require.NotEmpty(t, drainReader(t, r), "reopened log returned no records")
+
+	_, err = l2.EarliestOffsetAfterTimestamp(0)
+	require.NoError(t, err)
+	_, err = l2.EarliestOffsetAfterTimestamp(timestamp() + 3600_000)
+	require.NoError(t, err)
+
+	// And it must still accept writes.
+	offs, err := l2.Append([]*Message{{Key: []byte("after"), Value: []byte("reopen")}})
+	require.NoError(t, err)
+	l2.SetHighWatermark(offs[0])
+	require.Equal(t, lastOff+1, offs[0])
 }
