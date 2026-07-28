@@ -112,11 +112,17 @@ what that tier charges for. So both the coalescing budget and the fan-out are
 configured **per tier**, and chosen **per segment**, since a log mid-offload
 holds both kinds at once.
 
-**Local.** No per-request price at all. What a local read costs is seeks and
-syscalls, against a page cache already reading ahead, so the useful unit is a
-large contiguous window — megabytes — and splitting one into scattered reads
-buys nothing. Concurrency is modest: there is no round trip to hide, so piling
-goroutines onto one device buys queueing rather than bandwidth.
+**Local.** No per-request price, so the trade is set by the **device**, and
+"local" is not one device. On a spinning disk a seek costs milliseconds: read
+through megabytes to avoid one, and keep concurrency low, because concurrent
+random reads serialize on a single head and buy seeks rather than bandwidth. On
+an NVMe both of those invert — random access is nearly free and a deep queue is
+how the device is saturated, so the window should be small and the fan-out large,
+matching or exceeding the tiered settings.
+
+The defaults assume the unfavourable case (4MB window, concurrency 8). That is a
+conservative choice, **not a claim about local storage**, which is exactly why
+the values are configurable rather than inferred from the backing.
 
 **Tiered.** A store charges per request and answers many at once. Splitting is
 what gives the fan-out something to parallelise, so the budget is small and the

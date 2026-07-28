@@ -194,12 +194,14 @@ type Options struct {
 	// offloaded to the SegmentStore. Zero takes the defaults; NEGATIVE means
 	// never coalesce, i.e. one request per isolated record.
 	//
-	// They differ because the tiers are limited by different things.
-	//
-	// A LOCAL read has no per-request price. What it costs is seeks and
-	// syscalls, against a page cache already reading ahead, so the useful unit
-	// is a large contiguous window and splitting one up buys nothing. The
-	// default is megabytes.
+	// They are separate settings because the right answer depends on the DEVICE,
+	// and the tier is only where the setting can be attached. "Local" is not one
+	// kind of storage: on a spinning disk a seek costs milliseconds, so reading
+	// through megabytes to avoid one is a bargain and the window should be
+	// large; on an NVMe random access is nearly free and the same window is
+	// mostly wasted transfer. The local default assumes the unfavourable case
+	// (megabytes); lower it, and raise PrefixReadConcurrency, on fast random-
+	// access storage.
 	//
 	// A STORE charges per request and serves many at once, so splitting is what
 	// gives the fan-out something to parallelize. The default is far smaller,
@@ -229,14 +231,18 @@ type Options struct {
 	// PrefixReadCoalesceBytes) — not a segment, so a prefix whose keys are
 	// concentrated in a few segments still fans out.
 	//
-	// They are separate because the two tiers are limited by different things,
-	// and they are enforced INDEPENDENTLY, so a log holding both does not have
-	// its store reads throttled behind its disk reads. A store charges per
-	// request and serves many at once: keeping requests in flight is precisely
-	// how its round trips become throughput, so the tier default is high. A
-	// local read has no round trip to hide — it is a syscall against a page
-	// cache already reading ahead — so piling on goroutines buys queueing
-	// rather than bandwidth, and that default is modest.
+	// They are enforced INDEPENDENTLY, so a log holding both tiers does not have
+	// its store reads throttled behind its disk reads.
+	//
+	// How wide either should be is a property of the DEVICE. A store serves many
+	// requests at once, so keeping them in flight is how its round trips become
+	// throughput, and the tier default is high. Local is where it genuinely
+	// depends: on a spinning disk concurrent random reads defeat each other,
+	// since the queue serializes on one head and parallelism buys seeks rather
+	// than bandwidth; on an NVMe a deep queue is exactly how the device is
+	// saturated. The local default assumes the unfavourable case, so it is
+	// modest — on fast random-access storage there is no reason it should not
+	// match or exceed the tier value.
 	//
 	// Neither is CompactMaxGoroutines: that bounds segment rewrites, which are
 	// CPU- and write-bound, not scattered reads that spend their time waiting.

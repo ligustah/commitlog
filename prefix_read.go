@@ -257,18 +257,21 @@ func prefixUpperBound(prefix []byte) []byte {
 // defaultPrefixReadCoalesceBytes is the gap the fetch will read THROUGH rather
 // than pay for a second request (see Options.PrefixReadCoalesceBytes for the
 // How wide a gap between wanted records is read THROUGH rather than split into a
-// second request — per tier, because the two are constrained by different
-// things and the answers point opposite ways.
+// second request. Per tier, because that is where the setting can be attached —
+// NOT because either tier is one kind of device.
 //
-// LOCAL: there is no per-request price at all. What a local read costs is seeks
-// and syscalls, against an OS already reading ahead, so the useful unit is a
-// large contiguous window — a few MB — and splitting one into scattered reads
-// buys nothing.
+// The LOCAL default is deliberately CONSERVATIVE rather than descriptive. It
+// suits a device where seeking is expensive relative to reading — a spinning
+// disk, where one seek costs milliseconds and reading megabytes to avoid it is a
+// bargain. On an NVMe it is far too large: random access there is nearly free,
+// so a much smaller budget (with a correspondingly higher concurrency) is the
+// better shape. That is a property of the hardware, not of being local, and it
+// is why the value is configurable rather than inferred.
 //
-// TIER: a store charges per request, and answers many at once. Splitting is how
-// the fan-out gets its parallelism, so the budget is small; setting it to zero
-// gives one request per record, which is the FASTEST and the most EXPENSIVE
-// setting. Where bytes are actually priced, the breakeven is computable —
+// The TIER default is small because a store charges per request and answers many
+// at once, so splitting is what gives the fan-out something to parallelize. A
+// negative setting gives one request per isolated record: the FASTEST and most
+// EXPENSIVE shape. Where bytes are actually priced the breakeven is computable —
 // gap = 1e9 * C_req / C_GB — and that is the number to use instead of this one.
 //
 // Both are argued, NOT measured.
@@ -277,12 +280,19 @@ const (
 	defaultPrefixReadTierCoalesceBytes = 64 << 10
 )
 
-// Fan-out is bounded PER TIER, because the two tiers fail differently when
-// oversubscribed. A store charges per request and answers them in parallel, so
-// keeping many in flight is how its round trips turn into throughput. A local
-// file has no round trip to hide: the reads are syscalls against a page cache
-// already reading ahead, and piling goroutines onto one device buys queueing
-// rather than bandwidth.
+// Fan-out is bounded PER TIER, and how wide it should be is a property of the
+// DEVICE, not of the tier.
+//
+// A store answers many requests at once, so keeping many in flight is how its
+// round trips turn into throughput — hence a high tier default.
+//
+// Local is where "it depends" bites hardest, and the default assumes the
+// unfavourable case. On a spinning disk concurrent random reads mostly defeat
+// each other: the queue serializes on one head, and parallelism buys seeks
+// rather than bandwidth. On an NVMe the opposite holds — random access is
+// nearly free and a DEEP queue is precisely how the device is saturated, so 8 is
+// far too low and there is no reason it should not match or exceed the tier
+// value.
 //
 // Both are argued rather than measured, and neither is CompactMaxGoroutines
 // (10) — that bounds segment REWRITES, which are CPU- and write-bound, not

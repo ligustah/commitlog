@@ -642,6 +642,54 @@ func TestPrefixReadTierBudgetGovernsTieredSegments(t *testing.T) {
 	}
 }
 
+// The mirror of the tiered case: the LOCAL budget must reshape LOCAL reads, and
+// the tier budget must leave them alone. Together these pin the claim that the
+// four settings are genuinely per tier rather than one knob wearing two names —
+// which is what lets an NVMe be configured like a store (small reads, wide
+// fan-out) instead of like a spinning disk.
+func TestPrefixReadLocalBudgetGovernsLocalSegments(t *testing.T) {
+	l, app := denseSegLog(t)
+	for i := 0; i < 300; i++ {
+		if i%5 == 0 {
+			app(&Message{Key: []byte(fmt.Sprintf("want:%03d", i)), Value: []byte("hit")})
+			continue
+		}
+		app(&Message{Key: []byte(fmt.Sprintf("other:%03d", i)), Value: []byte("miss")})
+	}
+	for i := 0; i < 60; i++ {
+		app(&Message{Key: []byte(fmt.Sprintf("pad:%03d", i)), Value: []byte("padpadpadpad")})
+	}
+	want := scanPrefix(t, l, []byte("want:"), l.ActiveSegmentBase()-1)
+	require.NotEmpty(t, want)
+
+	runsFor := func() int64 {
+		before := segmentScans.Load()
+		got, _, err := l.ReadKeyPrefix([]byte("want:"), -1)
+		require.NoError(t, err)
+		requirePrefixEq(t, want, got, "local budget must not change the answer")
+		return segmentScans.Load() - before
+	}
+
+	// Spinning-disk shape: one large window per segment.
+	l.Options.PrefixReadCoalesceBytes = 1 << 30
+	coalesced := runsFor()
+
+	// NVMe shape: split every gap, fan out wide.
+	l.Options.PrefixReadCoalesceBytes = -1
+	l.Options.PrefixReadConcurrency = 64
+	split := runsFor()
+	require.Greater(t, split, coalesced,
+		"a negative local budget must split runs (%d) beyond the coalesced count (%d)", split, coalesced)
+
+	// The TIER budget must not touch local segments, at either extreme.
+	l.Options.PrefixReadCoalesceBytes = 1 << 30
+	for _, tier := range []int64{-1, 1, 1 << 30} {
+		l.Options.PrefixReadTierCoalesceBytes = tier
+		require.Equal(t, coalesced, runsFor(),
+			"tier budget %d changed the read pattern of LOCAL segments", tier)
+	}
+}
+
 func TestCoalesceBudgetResolution(t *testing.T) {
 	// Zero takes the default, as everywhere else in Options.
 	require.Equal(t, int64(4096), coalesceBudget(0, 4096))
