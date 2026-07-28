@@ -34,7 +34,7 @@ func TestNewCommitLog(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 
 	headers := make([]byte, 28)
@@ -68,7 +68,7 @@ func TestAppendMessageSet(t *testing.T) {
 	require.Equal(t, []int64{0, 1, 2, 3, 4}, offsets)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 
 	headers := make([]byte, 28)
@@ -107,7 +107,7 @@ func TestCommitLogRecover(t *testing.T) {
 			// Read them back as a sanity check.
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			r, err := l.NewReader(0, true)
+			r, err := l.NewReader(From(0), Uncommitted(), Follow())
 			require.NoError(t, err)
 
 			headers := make([]byte, 28)
@@ -129,7 +129,7 @@ func TestCommitLogRecover(t *testing.T) {
 
 			ctx, cancel = context.WithCancel(context.Background())
 			defer cancel()
-			r, err = l.NewReader(0, true)
+			r, err = l.NewReader(From(0), Uncommitted(), Follow())
 			require.NoError(t, err)
 			for i, exp := range msgs {
 				msg, offset, timestamp, leaderEpoch, err := r.ReadMessage(ctx, headers)
@@ -698,7 +698,7 @@ func TestSetReadonlyReadToLEO(t *testing.T) {
 
 	_, err := l.Append(msgs)
 	require.NoError(t, err)
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 	l.SetHighWatermark(4)
 
@@ -727,7 +727,7 @@ func TestSetReadonlyDoNotWakeHWLessThanLEO(t *testing.T) {
 
 	_, err := l.Append(msgs)
 	require.NoError(t, err)
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	go func() {
@@ -754,7 +754,7 @@ func TestSetReadonlyWakeHWEqualsLEO(t *testing.T) {
 	defer l.Close()
 	defer cleanup()
 
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	go func() {

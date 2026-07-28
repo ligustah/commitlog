@@ -5,6 +5,101 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.38.0 — 2026-07-28
+
+One reader, configured by options, with a key-prefix filter that reads only the
+records it returns. Every read entry point changes, and two of their defaults
+invert. `docs/read-interface.md` records the reasoning.
+
+- **Breaking**: `NewReader(offset int64, uncommitted bool)` and `NewScanReader`
+  are replaced by `NewReader(opts ...ReadOption)`.
+
+  The two constructors differed in exactly one axis — terminate versus follow —
+  and a third (committed versus uncommitted) was an unlabelled bool at the call
+  site. Adding a key filter and a supersession setting as further constructors
+  would have multiplied out to eight entry points for one read with four
+  independent settings.
+
+  Migration is mechanical:
+
+  ```go
+  NewReader(off, false)  ->  NewReader(From(off), Follow())
+  NewReader(off, true)   ->  NewReader(From(off), Uncommitted(), Follow())
+  NewScanReader(off)     ->  NewReader(From(off), Uncommitted())
+  ```
+
+  Options rather than a spec struct because the zero value of a read setting is
+  meaningful: offset 0 is a real offset, committed-only is a real choice, and a
+  bound has no natural "none" value. That is the opposite conclusion to
+  `CleanSpec`, which is data a transactional layer computes and may want to log
+  — deliberately, and the reasoning is recorded.
+
+- **Breaking**: two defaults invert, and callers that were relying on the old
+  ones will notice at once rather than subtly.
+
+  A reader now **terminates** at the end of the data unless `Follow()` says
+  otherwise, and reads **committed data only** unless `Uncommitted()` says
+  otherwise. The failure modes were never symmetric: a reader that unexpectedly
+  ends returns `io.EOF` and its caller notices, while one that unexpectedly
+  follows blocks forever. That is how `RecoverTail` could hang before v0.18.0.
+
+- **Breaking**: `ReadKeyPrefix` and `PrefixRecord`, added in v0.37.0, are
+  **removed**. They were the wrong shape and lasted one release.
+
+  They promised the latest surviving record per key. But compaction is
+  asynchronous and budgeted, so a key can have several live copies at any
+  moment — every consumer already tolerates duplicates, and one that did not
+  would already be broken. A read has no business promising otherwise.
+
+  Dropping that promise removed the eager whole-range merge, the inability to
+  follow, the clash with offset tracking (a key's surviving record can sit
+  *below* a consumer's resume offset), the `completeThrough` handoff and the
+  snapshot-then-tail protocol around it. What replaces it is an ordinary
+  following reader with a filter.
+
+- **New**: `KeyPrefix(prefix)` returns only records whose key begins with
+  prefix.
+
+  Over sealed segments this is planned from the key digests, so only matching
+  records are read rather than every record being read and tested — one segment
+  scanned for one hit across 60 sealed segments, against 33 with the digests
+  ignored. The active segment holds no digest and is filtered record by record;
+  the acceleration is a property of having a digest, not of the API.
+
+  Unkeyed records cannot match and are dropped. So are control markers, which
+  are keyless — `IncludeControl()` keeps them.
+
+- **New**: `SkipSuperseded()` drops copies of a key that a later copy in the
+  same segment supersedes, taking duplicate reading to O(segments) per key.
+
+  An optimisation, never a guarantee: duplicates still arrive across segments
+  and from the tail. It is decided from the digest alone, with no lookahead,
+  which is why it streams and can follow. One asymmetry is documented rather
+  than engineered away: what counts as superseded depends on where the read
+  began, so a reader resuming mid-segment can return *more* records than one
+  that read the whole segment — never fewer, and never a stale value for a key
+  it reports.
+
+- **New**: `KeyPrefix` with `Uncommitted` is **refused at construction** unless
+  the caller passes `Until` or `IncludeControl`.
+
+  Reading past the commit boundary yields records whose transactions are
+  undecided, and the markers that say which committed are keyless — the filter
+  drops them. The caller would hold records it cannot classify, silently. The
+  log cannot verify that a stated bound really is a commit boundary, having no
+  notion of decidedness, exactly as `CleanSpec.Ceiling` is an input it must
+  trust; it can insist the caller considered the boundary at all. durable_streams
+  shipped precisely this bug and fixed it in `broker/v0.17.0`.
+
+- **Changed**: `PrefixReadTierCoalesceBytes` defaults to 4KB, down from 64KB.
+
+  Now measured rather than argued. At 64KB the budget behaved identically to
+  1MB on every shape tested — coalescing everything — so a default justified on
+  price sat an order of magnitude above the price breakeven
+  (`gap = 1e9 * C_req / C_GB`, ~4.4KB at commonly quoted egress pricing).
+  Deployments reading from inside the same region, where bytes are effectively
+  free, should raise it.
+
 ## v0.37.0 — 2026-07-28
 
 Three parts of the tier surface existed because of how the API grew, not

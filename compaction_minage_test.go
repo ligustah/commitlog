@@ -16,7 +16,7 @@ func countByKey(t *testing.T, l *commitLog) map[string]int {
 	if newest < 0 {
 		return counts
 	}
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 	hdr := make([]byte, 28)
 	for {

@@ -60,44 +60,53 @@ type CommitLog interface {
 	// filesystem.
 	Delete() error
 
-	// NewReader creates a new Reader starting at the given offset. If
-	// uncommitted is true, the Reader will read uncommitted messages from the
-	// log. Otherwise, it will only return committed messages.
-	NewReader(offset int64, uncommitted bool) (*Reader, error)
-
-	// NewScanReader creates a Reader for sweeping a STATIC range: it reads
-	// uncommitted records and returns io.EOF the moment it drains the readable
-	// bytes, rather than parking until an append arrives or the high watermark
-	// advances.
+	// NewReader opens a Reader over the log. With no options it reads every
+	// COMMITTED record from the oldest surviving one and returns io.EOF at the
+	// end of the data. Configure it with From, Until, Follow, Uncommitted,
+	// KeyPrefix, SkipSuperseded and IncludeControl.
 	//
-	// Use it for any pass that must terminate at the tail — an abort scan, a
-	// sequence rebuild, a consistency sweep. The readers from NewReader are
-	// TAILING readers: reaching the end of the data is not an end condition for
-	// them, so a pass that expects to finish there instead blocks forever if
-	// nothing further is ever appended or committed. That is not hypothetical —
-	// it is how RecoverTail could hang before v0.18.0, and a consumer hit the
-	// same shape independently in its own abort scan.
+	// It replaces the previous NewReader(offset, uncommitted) and NewScanReader,
+	// and INVERTS two of their defaults:
 	//
-	// The range is whatever is readable when each read happens; the reader does
-	// not snapshot. Records above the high watermark are visible, so a caller
-	// that cares about the commit boundary must bound the scan itself.
+	//   - it TERMINATES rather than follows. Reaching the end of the data is an
+	//     end condition unless Follow() says otherwise. The failure modes are
+	//     not symmetric: a reader that unexpectedly ends returns io.EOF and its
+	//     caller notices, while one that unexpectedly follows blocks forever.
+	//     That is not hypothetical — it is how RecoverTail could hang before
+	//     v0.18.0, and a consumer hit the same shape in its own abort scan.
+	//   - it reads COMMITTED data only. This was an unlabelled bool at the call
+	//     site, where NewReader(off, false) told a reader nothing.
+	//
+	// Migration is mechanical:
+	//
+	//	NewReader(off, false)  ->  NewReader(From(off), Follow())
+	//	NewReader(off, true)   ->  NewReader(From(off), Uncommitted(), Follow())
+	//	NewScanReader(off)     ->  NewReader(From(off), Uncommitted())
+	//
+	// The read is not a snapshot: the range is whatever is readable when each
+	// read happens. Uncommitted() makes records above the high watermark
+	// visible, so a caller that cares about the commit boundary bounds the read
+	// itself with Until.
 	//
 	// Termination contract, both halves of which callers must handle:
-	//   - the scan ends when ReadMessage returns an error satisfying
+	//   - a read ends when ReadMessage returns an error satisfying
 	//     errors.Is(err, io.EOF). The EOF is WRAPPED, so compare with errors.Is
 	//     and not ==.
 	//   - construction returns ErrSegmentNotFound only when the log holds no
 	//     segments at all. A start offset merely BELOW the oldest surviving
-	//     record clamps up to it, exactly as NewReader does, so sweeping from 0
-	//     over a log that retention has since trimmed is fine and starts at the
-	//     oldest record still present.
+	//     record clamps up to it, so reading from 0 over a log that retention
+	//     has since trimmed is fine and starts at the oldest record present.
 	//
 	// So the single case a caller must handle itself is the empty log. That is
 	// deliberately an error rather than a reader that instantly ends: "there is
 	// nothing here" and "the range you asked for held nothing" are different
 	// answers, and collapsing them would let a sweep report success having
 	// covered no data at all.
-	NewScanReader(offset int64) (*Reader, error)
+	//
+	// KeyPrefix is refused together with Uncommitted unless the caller also
+	// passes Until or IncludeControl — see NewReader's own documentation for
+	// why that combination cannot produce a usable answer.
+	NewReader(opts ...ReadOption) (*Reader, error)
 
 	// Truncate removes all messages from the log starting at the given offset.
 	Truncate(offset int64) error
@@ -298,33 +307,6 @@ type CommitLog interface {
 	// retention has passed carries on from what remains rather than failing.
 	// ErrSegmentNotFound if the log holds no segment at or after offset.
 	ReadMessageSet(offset int64, maxBytes int) ([]byte, error)
-
-	// ReadKeyPrefix returns the latest surviving record for every key beginning
-	// with prefix, in key order, plus the offset that answer is COMPLETE
-	// THROUGH. An empty prefix matches every key.
-	//
-	// It exists for STATE TRANSFER: moving a keyed working set to another
-	// process by shipping compacted state rather than the history that produced
-	// it. It reads the key digests instead of the records, so its cost tracks
-	// the records it returns rather than the records the log holds.
-	//
-	// SEALED SEGMENTS ONLY — never the active one. That is what makes
-	// completeThrough a boundary the caller can tail from rather than a moving
-	// target, and it keeps the active segment (which holds no digest) from
-	// forcing a scan of the tail on every call. upTo bounds the read from
-	// above, so a caller with a commit boundary transfers only what its
-	// consumers can already see; negative means everything sealed.
-	// completeThrough is the lower of upTo and the sealed boundary, and is
-	// returned even when nothing matches.
-	//
-	// TOMBSTONES ARE RETURNED, not omitted, carrying AttrTombstone. A
-	// destination applying this has to DELETE those keys; filtering them out
-	// resurrects deleted data with nothing to report it.
-	//
-	// The answer does NOT depend on the digests existing: a missing, corrupt or
-	// stale sidecar is rebuilt by scanning, and the result is identical. The
-	// digests are how it goes fast, not what it means.
-	ReadKeyPrefix(prefix []byte, upTo int64) (records []PrefixRecord, completeThrough int64, err error)
 
 	// Clean applies retention and compaction rules against the log, if
 	// applicable.

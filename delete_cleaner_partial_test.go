@@ -64,7 +64,7 @@ func TestDeleteCleanerPartialFailure(t *testing.T) {
 	require.Equal(t, after[0].FirstOffset(), l.OldestOffset())
 
 	// Reading from the new oldest offset must work (no deleted file in path).
-	r, err := l.NewReader(l.OldestOffset(), false)
+	r, err := l.NewReader(From(l.OldestOffset()), Follow())
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	_, off, _, _, err := r.ReadMessage(context.Background(), headers)

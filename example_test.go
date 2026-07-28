@@ -43,7 +43,7 @@ func Example() {
 	// replicating elsewhere decides when a record counts as durable.
 	log.SetHighWatermark(offsets[len(offsets)-1])
 
-	r, err := log.NewReader(0, false) // committed reader, from the start
+	r, err := log.NewReader(commitlog.From(0), commitlog.Follow()) // committed reader, from the start
 	if err != nil {
 		panic(err)
 	}

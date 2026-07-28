@@ -146,7 +146,10 @@ func TestPrefixReadCostProfile(t *testing.T) {
 	} {
 		t.Run(density.name, func(t *testing.T) {
 			l, store, bound := costLog(t, 4000, density.every)
-			want := scanPrefix(t, l, []byte("want:"), bound)
+			opts := []ReadOption{KeyPrefix([]byte("want:")), Until(bound)}
+			spec, err := l.resolve(opts)
+			require.NoError(t, err)
+			want := scanFiltered(t, l, spec)
 			require.NotEmpty(t, want)
 
 			// Guard against a vacuous measurement: with at most one hit per
@@ -168,9 +171,9 @@ func TestPrefixReadCostProfile(t *testing.T) {
 			for _, b := range budgets {
 				l.Options.PrefixReadTierCoalesceBytes = b
 				store.reset()
-				got, _, err := l.ReadKeyPrefix([]byte("want:"), -1)
+				r, err := l.NewReader(opts...)
 				require.NoError(t, err)
-				requirePrefixEq(t, want, got, fmt.Sprintf("budget=%d", b))
+				requireRecsEq(t, want, drainReader(t, r), fmt.Sprintf("budget=%d", b))
 				reqs, bytes := store.totals()
 				points = append(points, point{b, reqs, bytes})
 			}

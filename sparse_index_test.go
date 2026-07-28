@@ -82,7 +82,11 @@ func seekEveryOffset(t *testing.T, l *commitLog, want []*Message, uncommitted bo
 	ctx := context.Background()
 	hdr := make([]byte, 28)
 	for target := int64(0); target < int64(len(want)); target++ {
-		r, err := l.NewReader(target, uncommitted)
+		opts := []ReadOption{From(target), Follow()}
+		if uncommitted {
+			opts = append(opts, Uncommitted())
+		}
+		r, err := l.NewReader(opts...)
 		require.NoError(t, err, "new reader at %d", target)
 		msg, offset, _, _, err := r.ReadMessage(ctx, hdr)
 		require.NoError(t, err, "read at target %d", target)
@@ -170,7 +174,7 @@ func TestSparseRecoverySeek(t *testing.T) {
 	ctx := context.Background()
 	hdr := make([]byte, 28)
 	for _, target := range []int64{0, 5, 11, 50, 110, 149, int64(len(want)) - 1} {
-		r, err := l2.NewReader(target, true)
+		r, err := l2.NewReader(From(target), Uncommitted(), Follow())
 		require.NoError(t, err)
 		// Read from target to the end, verifying contiguous offsets/payloads.
 		for off := target; off < int64(len(want)); off++ {

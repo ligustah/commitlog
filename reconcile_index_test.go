@@ -75,7 +75,7 @@ func TestReconcileIndexAheadOfLog(t *testing.T) {
 			}
 
 			// Seek to the reconciled offset agrees with the sequential read.
-			r, err := cl2.NewReader(6, true)
+			r, err := cl2.NewReader(From(6), Uncommitted(), Follow())
 			require.NoError(t, err)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

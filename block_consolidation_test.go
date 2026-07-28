@@ -50,7 +50,7 @@ func TestCleanConsolidatesTinyBlocks(t *testing.T) {
 	readAll := func() map[string]string {
 		// A committed reader BLOCKS at the tail waiting for appends, so read
 		// the exact expected count rather than reading to error.
-		r, err := l.NewReader(0, true)
+		r, err := l.NewReader(From(0), Uncommitted(), Follow())
 		require.NoError(t, err)
 		out := map[string]string{}
 		headers := make([]byte, 28)
@@ -77,7 +77,7 @@ func TestCleanConsolidatesTinyBlocks(t *testing.T) {
 
 	// Random point seeks land correctly through the coarser sparse index.
 	for _, off := range []int64{0, 1, 999, 1500, 2500, 7998} {
-		r, err := l.NewReader(off, true)
+		r, err := l.NewReader(From(off), Uncommitted(), Follow())
 		require.NoError(t, err)
 		headers := make([]byte, 28)
 		msg, gotOff, _, _, err := r.ReadMessage(context.Background(), headers)
@@ -310,7 +310,7 @@ func TestConsolidationOnlyPassForNonCompactedLog(t *testing.T) {
 	require.Greater(t, before, 8000, "need tiny-block debt")
 
 	readN := func() map[int64]string {
-		r, err := l.NewReader(0, true)
+		r, err := l.NewReader(From(0), Uncommitted(), Follow())
 		require.NoError(t, err)
 		out := map[int64]string{}
 		headers := make([]byte, 28)

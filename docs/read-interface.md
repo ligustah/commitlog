@@ -1,7 +1,11 @@
-# The read interface — a proposal
+# The read interface
 
-**Status: PROPOSAL, nothing agreed and nothing built.** `ReadKeyPrefix` exists
-today (`40b4d0d`); this proposal **deletes it**. See "What this replaces".
+**Status: SHIPPED in v0.38.0.** This began as a proposal and is kept in that
+shape deliberately — the arguments are why the API looks like it does, and an
+argument is more useful than a description when the next change comes.
+
+`ReadKeyPrefix`, added in v0.37.0, is gone; it lasted one release. What replaced
+it is below.
 
 ## The premise that decides the design
 
@@ -248,19 +252,41 @@ insist the caller has *thought about the boundary at all*, which is the step tha
 was skipped above. Trusting a stated bound is the established relationship here;
 silently allowing an unstated one is not.
 
-## What this replaces
+## What this replaced
 
-`ReadKeyPrefix` as shipped in `40b4d0d` is the wrong shape under this premise:
-eager, buffered, key-ordered, unable to follow, and built around a
-`completeThrough` seam that stops being necessary. It should be **deleted**, not
-wrapped — its machinery (the digest merge, run planning, per-tier coalescing and
-fan-out) is what survives, moving behind the reader.
+`ReadKeyPrefix` was the wrong shape under this premise: eager, buffered,
+key-ordered, unable to follow, and built around a `completeThrough` seam that
+stopped being necessary. It was **deleted**, not wrapped — its machinery (digest
+planning, run planning, per-tier coalescing and fan-out) survives behind the
+reader.
 
-`PrefixRecord` goes with it: a filtered read returns records through
+`PrefixRecord` went with it: a filtered read returns records through
 `Reader.ReadMessage` like any other, so there is no second record type.
 
-The per-tier fetch tuning added in `40b4d0d` and `a3eaf79` is unaffected and
-carries over unchanged.
+The per-tier fetch tuning is unaffected and carried over unchanged.
+
+## How it is verified
+
+The load-bearing guards were checked by MUTATION, not by passing:
+
+- inverting the per-segment supersession pick (newest → oldest) fails
+  `TestSkipSupersededDropsWithinSegmentOnly` and the differential test;
+- removing the tail filter fails `TestReaderFollowSeesLaterAppends`, which is
+  the only test that exercises filtering where no digest exists;
+- removing the construction-time refusal fails
+  `TestReaderRefusesUnclassifiableCombination`.
+
+Beyond that: a differential test against an independent scan across eight
+prefixes, with and without `SkipSuperseded`, run three times — on freshly built
+digests, on persisted sidecars, and with no sidecars at all; equivalence with
+every sidecar deleted and with every sidecar corrupted; a read over segments
+actually offloaded to a `FileSegmentStore`, tombstone included;
+`TestReaderKeyPrefixSkipsSegmentsWithoutHits` pinning the acceleration itself;
+and `TestPrefixReadTierBudgetGovernsTieredSegments` proving the tier budget
+reshapes tiered reads while the local budget leaves them untouched.
+
+Full suite green under `-race`, and the compaction-recovery and
+offload-retention fuzz targets clean.
 
 ## What does not change
 

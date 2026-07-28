@@ -39,7 +39,7 @@ func appendMsg(t *testing.T, l CommitLog, val string) int64 {
 
 func readVal(t *testing.T, l CommitLog, offset int64) string {
 	t.Helper()
-	r, err := l.NewReader(offset, false)
+	r, err := l.NewReader(From(offset), Follow())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -204,7 +204,7 @@ func readAllVisible(t *testing.T, l CommitLog) map[int64]string {
 	if oldest < 0 {
 		return out
 	}
-	r, err := l.NewReader(oldest, true)
+	r, err := l.NewReader(From(oldest), Uncommitted(), Follow())
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	newest := l.NewestOffset()

@@ -46,7 +46,7 @@ func TestReaderUncommittedStartOffset(t *testing.T) {
 			idx := 4
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			r, err := l.NewReader(int64(idx), true)
+			r, err := l.NewReader(From(int64(idx)), Uncommitted(), Follow())
 			require.NoError(t, err)
 
 			headers := make([]byte, 28)
@@ -72,7 +72,7 @@ func TestReaderUncommittedBlockCancel(t *testing.T) {
 	_, err := l.Append([]*Message{msg})
 	require.NoError(t, err)
 
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 
 	headers := make([]byte, 28)
@@ -103,7 +103,7 @@ func TestReaderUncommittedBlockForSegmentWrite(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	m, offset, timestamp, leaderEpoch, err := r.ReadMessage(ctx, headers)
@@ -149,7 +149,7 @@ func TestReaderUncommittedReadError(t *testing.T) {
 	_, err := l.Append([]*Message{msg})
 	require.NoError(t, err)
 
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 
 	require.NoError(t, l.Close())
@@ -183,7 +183,7 @@ func TestReaderCommittedStartOffset(t *testing.T) {
 			require.NoError(t, err)
 			l.SetHighWatermark(4)
 			idx := 2
-			r, err := l.NewReader(int64(idx), false)
+			r, err := l.NewReader(From(int64(idx)), Follow())
 			require.NoError(t, err)
 
 			headers := make([]byte, 28)
@@ -206,7 +206,7 @@ func TestReaderCommittedBlockCancel(t *testing.T) {
 	defer cleanup()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 	go cancel()
 	headers := make([]byte, 28)
@@ -229,7 +229,7 @@ func TestReaderCommittedReadError(t *testing.T) {
 	require.NoError(t, err)
 	l.SetHighWatermark(0)
 
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	require.NoError(t, l.Close())
@@ -247,7 +247,7 @@ func TestReaderCommittedWaitOnEmptyLog(t *testing.T) {
 	defer l.Close()
 	defer cleanup()
 
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	msg := &Message{
@@ -284,7 +284,7 @@ func TestReaderCommittedWaitOnEmptyLogWithHW(t *testing.T) {
 	l.SetHighWatermark(9)
 	l.segments[0].BaseOffset = 10
 
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	msg := &Message{
@@ -328,7 +328,7 @@ func TestReaderCommittedRead(t *testing.T) {
 			_, err = l.Append(msgs)
 			require.NoError(t, err)
 			l.SetHighWatermark(9)
-			r, err := l.NewReader(0, false)
+			r, err := l.NewReader(From(0), Follow())
 			require.NoError(t, err)
 
 			headers := make([]byte, 28)
@@ -367,7 +367,7 @@ func TestReaderCommittedReadToHW(t *testing.T) {
 			_, err = l.Append(msgs)
 			require.NoError(t, err)
 			l.SetHighWatermark(4)
-			r, err := l.NewReader(0, false)
+			r, err := l.NewReader(From(0), Follow())
 			require.NoError(t, err)
 
 			headers := make([]byte, 28)
@@ -404,7 +404,7 @@ func TestReaderCommittedWaitForHW(t *testing.T) {
 	_, err = l.Append(msgs)
 	require.NoError(t, err)
 	l.SetHighWatermark(4)
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	go func() {
@@ -445,7 +445,7 @@ func TestReaderCommittedCancel(t *testing.T) {
 	require.NoError(t, err)
 	l.SetHighWatermark(4)
 	ctx, cancel := context.WithCancel(context.Background())
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	go func() {
@@ -496,7 +496,7 @@ func TestReaderCommittedCapOffset(t *testing.T) {
 	require.NoError(t, err)
 	l.SetHighWatermark(0)
 
-	r, err := l.NewReader(5, false)
+	r, err := l.NewReader(From(5), Follow())
 	require.NoError(t, err)
 
 	go l.SetHighWatermark(1)
@@ -520,7 +520,7 @@ func TestReaderLogDeleted(t *testing.T) {
 	defer l.Close()
 	defer cleanup()
 
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	// Capture Delete's error on a channel — require.NoError inside a goroutine is
@@ -543,7 +543,7 @@ func TestReaderLogClosed(t *testing.T) {
 	defer l.Close()
 	defer cleanup()
 
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	go func() {

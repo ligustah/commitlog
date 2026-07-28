@@ -92,12 +92,23 @@ delete, not skip. This is the flag the digest already carries.
 **Correctness constraint agreed non-negotiable:** same answer with no digest
 present, falling back to a scan.
 
-## What was built
+## What was built, and what became of it
 
-`ReadKeyPrefix(prefix, upTo) ([]PrefixRecord, completeThrough, error)` in
-`prefix_read.go`. Sealed segments only, latest-per-key within the prefix,
-tombstones returned as tombstones, and the same answer with or without sidecars
-present.
+`ReadKeyPrefix(prefix, upTo) ([]PrefixRecord, completeThrough, error)` shipped
+in v0.37.0: sealed segments only, latest-per-key within the prefix, tombstones
+returned as tombstones, the same answer with or without sidecars.
+
+**It was removed in v0.38.0, one release later.** The premise it rested on —
+that a read should return exactly one record per key — does not survive contact
+with the fact that compaction is asynchronous: a key can have several live
+copies at any moment, so every consumer already tolerates duplicates. Once that
+promise goes, the eager merge, the inability to follow, the clash with offset
+tracking and the `completeThrough` handoff all go with it, and what is left is
+an ordinary following reader with a filter. See `read-interface.md`.
+
+**Everything below this line survived the removal**, because it is about
+getting located records off a device, which is the same problem either way. It
+is kept as the record of why the fetch behaves as it does.
 
 ### Fetching the records is a cost decision, not a correctness one
 
@@ -176,7 +187,7 @@ concurrency setting; a read over segments actually offloaded to a
 to prove the tier budget reshapes tiered reads while the local budget leaves them
 untouched.
 
-`TestReadKeyPrefixDoesNotScanSegmentsWithoutHits` pins the acceleration itself —
+`TestReaderKeyPrefixSkipsSegmentsWithoutHits` pins the acceleration itself —
 one segment scanned for one hit across 60+ sealed segments, against 33 when the
 digests are ignored.
 

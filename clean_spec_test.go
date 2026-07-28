@@ -34,7 +34,7 @@ func readAllMsgs(t *testing.T, l *commitLog) map[int64]SerializedMessage {
 	if oldest < 0 {
 		return out
 	}
-	r, err := l.NewReader(oldest, true)
+	r, err := l.NewReader(From(oldest), Uncommitted(), Follow())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

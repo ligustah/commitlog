@@ -52,7 +52,7 @@ func TestSyncAll(t *testing.T) {
 	defer l2.Close()
 	require.EqualValues(t, last, l2.HighWatermark())
 	require.EqualValues(t, last, l2.NewestOffset())
-	r, err := l2.NewReader(0, false)
+	r, err := l2.NewReader(From(0), Follow())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

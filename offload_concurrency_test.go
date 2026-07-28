@@ -65,7 +65,7 @@ func TestOffloadIndexCacheConcurrentReaders(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for iter := 0; iter < 25; iter++ {
-				r, err := cl.NewReader(cl.OldestOffset(), true)
+				r, err := cl.NewReader(From(cl.OldestOffset()), Uncommitted(), Follow())
 				if err != nil {
 					errCh <- err
 					return

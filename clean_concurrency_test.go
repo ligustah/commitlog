@@ -90,7 +90,7 @@ func TestCleanConcurrentWithTruncateBefore(t *testing.T) {
 	require.Greater(t, newest, oldest)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	r, err := l.NewReader(oldest, true)
+	r, err := l.NewReader(From(oldest), Uncommitted(), Follow())
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	read := 0

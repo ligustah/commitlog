@@ -2,89 +2,131 @@ package commitlog
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// scanPrefix is an INDEPENDENT answer to the same question, computed the dumb
-// way: walk every record in every sealed segment and keep the last one seen per
-// key. It shares no code with the digest merge beyond the scanner itself, so a
-// bug in the merge, the digest, the prefix bounds or the fetch shows up as a
-// disagreement rather than as both sides being wrong together.
-func scanPrefix(t *testing.T, l *commitLog, prefix []byte, bound int64) []PrefixRecord {
+// readRec is one record as a reader returned it.
+type readRec struct {
+	off int64
+	msg SerializedMessage
+}
+
+// drainReader reads until io.EOF (or ctx expiry) and returns everything.
+func drainReader(t *testing.T, r *Reader) []readRec {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var out []readRec
+	headers := make([]byte, 28)
+	for {
+		msg, off, _, _, err := r.ReadMessage(ctx, headers)
+		if err != nil {
+			require.True(t, errors.Is(err, io.EOF), "unexpected read error: %v", err)
+			return out
+		}
+		cp := make(SerializedMessage, len(msg))
+		copy(cp, msg)
+		out = append(out, readRec{off: off, msg: cp})
+	}
+}
+
+// scanFiltered is an INDEPENDENT answer to the same question, computed the dumb
+// way: walk every record in every segment and keep the ones that match. It
+// shares no code with the digest planning, so a bug in the digest, the prefix
+// bounds, the run planning or the fetch shows up as a disagreement rather than
+// as both sides being wrong together.
+func scanFiltered(t *testing.T, l *commitLog, spec readSpec) []readRec {
 	t.Helper()
 	l.mu.RLock()
 	segments := make([]*segment, len(l.segments))
 	copy(segments, l.segments)
 	l.mu.RUnlock()
-	if len(segments) == 0 {
-		return nil
+
+	bound := spec.until
+	if !spec.uncommitted {
+		if hw := l.HighWatermark(); bound < 0 || hw < bound {
+			bound = hw
+		}
 	}
 
-	type win struct {
-		off int64
-		msg SerializedMessage
-	}
-	latest := map[string]win{}
-	for _, seg := range segments[:len(segments)-1] {
+	// Pass 1: every record in range, in offset order.
+	var all []readRec
+	for _, seg := range segments {
 		ss := newSegmentScanner(seg)
 		for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
 			off, msg := ms.Offset(), ms.Message()
-			if off > bound {
-				continue
-			}
-			if msg.Attributes()&AttrControl != 0 {
-				continue
-			}
-			key := msg.Key()
-			if key == nil || !bytes.HasPrefix(key, prefix) {
-				continue
-			}
-			if w, ok := latest[string(key)]; ok && w.off > off {
+			if off < spec.offset || (bound >= 0 && off > bound) {
 				continue
 			}
 			cp := make(SerializedMessage, len(msg))
 			copy(cp, msg)
-			latest[string(key)] = win{off: off, msg: cp}
+			all = append(all, readRec{off: off, msg: cp})
 		}
 		ss.Close() // nolint: errcheck
 	}
 
-	keys := make([]string, 0, len(latest))
-	for k := range latest {
-		keys = append(keys, k)
+	// Pass 2: apply the filter, and the per-segment supersession rule if asked.
+	segOf := func(off int64) int64 {
+		base := int64(-1)
+		for _, s := range segments {
+			if s.BaseOffset <= off {
+				base = s.BaseOffset
+			}
+		}
+		return base
 	}
-	sort.Strings(keys)
-	out := make([]PrefixRecord, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, PrefixRecord{Offset: latest[k].off, Message: latest[k].msg})
+	lastInSeg := map[string]int64{} // segment|key -> highest offset seen
+	if spec.skipSuperseded {
+		for _, rec := range all {
+			if !spec.matchesPrefix(rec.msg) || rec.msg.Key() == nil {
+				continue
+			}
+			k := fmt.Sprintf("%d|%s", segOf(rec.off), rec.msg.Key())
+			if rec.off > lastInSeg[k] {
+				lastInSeg[k] = rec.off
+			}
+		}
+	}
+
+	var out []readRec
+	for _, rec := range all {
+		if !spec.matchesPrefix(rec.msg) {
+			continue
+		}
+		if spec.skipSuperseded && rec.msg.Key() != nil {
+			k := fmt.Sprintf("%d|%s", segOf(rec.off), rec.msg.Key())
+			if lastInSeg[k] != rec.off {
+				continue
+			}
+		}
+		out = append(out, rec)
 	}
 	return out
 }
 
-// requirePrefixEq compares record-for-record, and reports the KEY on failure —
-// an offset alone says nothing about which key was lost.
-func requirePrefixEq(t *testing.T, want, got []PrefixRecord, msg string) {
+func requireRecsEq(t *testing.T, want, got []readRec, msg string) {
 	t.Helper()
-	wantKeys := make([]string, len(want))
+	wantDesc := make([]string, len(want))
 	for i, r := range want {
-		wantKeys[i] = string(r.Message.Key())
+		wantDesc[i] = fmt.Sprintf("%d:%s=%s", r.off, r.msg.Key(), r.msg.Value())
 	}
-	gotKeys := make([]string, len(got))
+	gotDesc := make([]string, len(got))
 	for i, r := range got {
-		gotKeys[i] = string(r.Message.Key())
+		gotDesc[i] = fmt.Sprintf("%d:%s=%s", r.off, r.msg.Key(), r.msg.Value())
 	}
-	require.Equal(t, wantKeys, gotKeys, "%s: keys differ", msg)
+	require.Equal(t, wantDesc, gotDesc, "%s", msg)
 	for i := range want {
-		require.Equal(t, want[i].Offset, got[i].Offset, "%s: offset for key %q", msg, wantKeys[i])
-		require.Equal(t, want[i].Message.Value(), got[i].Message.Value(), "%s: value for key %q", msg, wantKeys[i])
-		require.Equal(t, want[i].Message.Attributes(), got[i].Message.Attributes(),
-			"%s: attributes for key %q (tombstone flag)", msg, wantKeys[i])
+		require.Equal(t, want[i].msg.Attributes(), got[i].msg.Attributes(),
+			"%s: attributes differ for offset %d (tombstone flag)", msg, want[i].off)
 	}
 }
 
@@ -98,261 +140,74 @@ func removeAllDigests(t *testing.T, l *commitLog) int {
 	return len(paths)
 }
 
-// The basic contract: latest-per-key within the prefix, in key order, from
-// sealed segments only, with tombstones present.
-func TestReadKeyPrefixBasics(t *testing.T) {
+// ---- basics ----
+
+// Offset order, every matching copy, unkeyed records and markers dropped.
+func TestReaderKeyPrefixBasics(t *testing.T) {
 	l, app := specLog(t)
 
 	app(&Message{Key: []byte("user:1"), Value: []byte("v1")})
 	app(&Message{Key: []byte("order:1"), Value: []byte("o1")})
-	offUser1 := app(&Message{Key: []byte("user:1"), Value: []byte("v2")}) // supersedes
-	app(&Message{Key: []byte("user:2"), Value: []byte("w1")})
-	offUser2 := app(&Message{Key: []byte("user:2"), Value: []byte("gone"), Attributes: AttrTombstone})
-	offUser3 := app(&Message{Key: []byte("user:3"), Value: []byte("x1")})
-	app(&Message{Key: []byte("zzz"), Value: []byte("pad")}) // active segment
+	app(&Message{Key: []byte("user:1"), Value: []byte("v2")}) // NOT superseded away
+	app(&Message{Value: []byte("unkeyed")})
+	app(&Message{Attributes: AttrControl, Value: []byte("marker")})
+	app(&Message{Key: []byte("user:2"), Value: []byte("gone"), Attributes: AttrTombstone})
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
 
-	got, through, err := l.ReadKeyPrefix([]byte("user:"), -1)
+	r, err := l.NewReader(KeyPrefix([]byte("user:")))
 	require.NoError(t, err)
+	got := drainReader(t, r)
 
-	require.Equal(t, l.ActiveSegmentBase()-1, through,
-		"completeThrough must be the sealed boundary, not the log end")
-
-	keys := make([]string, len(got))
-	for i, r := range got {
-		keys[i] = string(r.Message.Key())
+	var desc []string
+	for _, rec := range got {
+		desc = append(desc, fmt.Sprintf("%s=%s", rec.msg.Key(), rec.msg.Value()))
 	}
-	require.Equal(t, []string{"user:1", "user:2", "user:3"}, keys,
-		"prefix must select its range, in key order, and nothing else")
+	require.Equal(t, []string{"user:1=v1", "user:1=v2", "user:2=gone"}, desc,
+		"every matching copy, in offset order, unkeyed and markers dropped")
 
-	require.Equal(t, offUser1, got[0].Offset, "must return the LATEST copy of user:1")
-	require.Equal(t, "v2", string(got[0].Message.Value()))
-
-	require.Equal(t, offUser2, got[1].Offset)
-	require.NotZero(t, got[1].Message.Attributes()&AttrTombstone,
-		"tombstone must be returned AS a tombstone: the destination has to delete the key")
-
-	require.Equal(t, offUser3, got[2].Offset)
+	for i := 1; i < len(got); i++ {
+		require.Greater(t, got[i].off, got[i-1].off, "must be offset-ordered")
+	}
+	require.NotZero(t, got[2].msg.Attributes()&AttrTombstone,
+		"tombstone must arrive as a tombstone")
 }
 
-// Records in the active segment are never returned, and completeThrough says
-// so. Anything else would make the boundary a moving target.
-func TestReadKeyPrefixExcludesActiveSegment(t *testing.T) {
+// The filter must never change which records exist, only which are returned.
+func TestReaderKeyPrefixMatchesScan(t *testing.T) {
 	l, app := specLog(t)
-
-	offSealed := app(&Message{Key: []byte("k:1"), Value: []byte("sealed")})
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
-	// Whatever lands last is in the active segment.
-	offActive := app(&Message{Key: []byte("k:1"), Value: []byte("active")})
-
-	got, through, err := l.ReadKeyPrefix([]byte("k:"), -1)
-	require.NoError(t, err)
-	require.Less(t, through, offActive, "completeThrough must sit below the active segment")
-	require.Len(t, got, 1)
-	require.Equal(t, offSealed, got[0].Offset,
-		"the active segment's newer copy must not be returned")
-	require.Equal(t, "sealed", string(got[0].Message.Value()))
-}
-
-// upTo is the caller's commit boundary: records above it are invisible, exactly
-// as they would be to a reader stopping there.
-func TestReadKeyPrefixRespectsUpTo(t *testing.T) {
-	l, app := specLog(t)
-
-	offOld := app(&Message{Key: []byte("k:1"), Value: []byte("old")})
-	offNew := app(&Message{Key: []byte("k:1"), Value: []byte("new")})
-	app(&Message{Key: []byte("k:2"), Value: []byte("later")})
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
-
-	got, through, err := l.ReadKeyPrefix([]byte("k:"), offOld)
-	require.NoError(t, err)
-	require.Equal(t, offOld, through)
-	require.Len(t, got, 1, "k:2 is above the bound and must not appear")
-	require.Equal(t, offOld, got[0].Offset, "must return the latest copy AT OR BELOW the bound")
-	require.Equal(t, "old", string(got[0].Message.Value()))
-	require.NotEqual(t, offNew, got[0].Offset)
-}
-
-// An empty prefix means every key.
-func TestReadKeyPrefixEmptyPrefixMatchesAll(t *testing.T) {
-	l, app := specLog(t)
-	app(&Message{Key: []byte("a"), Value: []byte("1")})
-	app(&Message{Key: []byte("b"), Value: []byte("2")})
-	app(&Message{Key: []byte("c"), Value: []byte("3")})
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
-
-	got, _, err := l.ReadKeyPrefix(nil, -1)
-	require.NoError(t, err)
-	requirePrefixEq(t, scanPrefix(t, l, nil, l.ActiveSegmentBase()-1), got, "empty prefix")
-}
-
-// THE constraint: the digests are an optimisation, so the answer must not
-// depend on them existing. Deleting every sidecar must change nothing.
-func TestReadKeyPrefixIdenticalWithoutDigests(t *testing.T) {
-	l, app := specLog(t)
-	for i := 0; i < 40; i++ {
-		app(&Message{Key: []byte(fmt.Sprintf("k:%02d", i%13)), Value: []byte(fmt.Sprintf("v%d", i))})
-	}
-	app(&Message{Key: []byte("k:07"), Value: []byte("del"), Attributes: AttrTombstone})
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
-
-	// Force sidecars to exist: a clean writes one per sealed segment.
-	requireCleanOK(t, l, CleanSpec{Ceiling: l.HighWatermark()})
-	bound := l.ActiveSegmentBase() - 1
-
-	withDigests, through1, err := l.ReadKeyPrefix([]byte("k:"), -1)
-	require.NoError(t, err)
-	require.NotEmpty(t, withDigests)
-
-	n := removeAllDigests(t, l)
-	require.NotZero(t, n, "test is vacuous unless sidecars were actually there")
-
-	withoutDigests, through2, err := l.ReadKeyPrefix([]byte("k:"), -1)
-	require.NoError(t, err)
-
-	require.Equal(t, through1, through2)
-	requirePrefixEq(t, withDigests, withoutDigests, "digest present vs absent")
-	requirePrefixEq(t, scanPrefix(t, l, []byte("k:"), bound), withoutDigests, "scan vs digest-free read")
-}
-
-// A corrupt sidecar must be rebuilt rather than believed. Silently trusting one
-// would ship whatever it happened to say as the destination's state.
-func TestReadKeyPrefixSurvivesCorruptDigest(t *testing.T) {
-	l, app := specLog(t)
-	for i := 0; i < 20; i++ {
-		app(&Message{Key: []byte(fmt.Sprintf("k:%02d", i%7)), Value: []byte(fmt.Sprintf("v%d", i))})
-	}
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
-	requireCleanOK(t, l, CleanSpec{Ceiling: l.HighWatermark()})
-
-	want, _, err := l.ReadKeyPrefix([]byte("k:"), -1)
-	require.NoError(t, err)
-	require.NotEmpty(t, want)
-
-	paths, err := filepath.Glob(filepath.Join(l.Options.Path, "*"+keysSuffix))
-	require.NoError(t, err)
-	require.NotEmpty(t, paths)
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		require.NoError(t, err)
-		data[len(data)/2] ^= 0xFF // break the CRC
-		require.NoError(t, os.WriteFile(p, data, 0666))
-	}
-
-	got, _, err := l.ReadKeyPrefix([]byte("k:"), -1)
-	require.NoError(t, err)
-	requirePrefixEq(t, want, got, "corrupt sidecar must be rebuilt, not believed")
-}
-
-// The two fetch strategies must produce the SAME answer. PrefixReadCoalesceBytes
-// only trades requests against discarded bytes, so it is a cost decision and
-// must never be a correctness one — but it does pick genuinely different code
-// paths (read through the gap vs re-locate through the index), and nothing else
-// here forces the jump: the default gap is megabytes and these segments are
-// bytes, so without this every test takes the skip path.
-func TestReadKeyPrefixCoalesceStrategiesAgree(t *testing.T) {
-	l, app := specLog(t)
-	var wantKeys []string
-	for i := 0; i < 120; i++ {
-		if i%7 == 0 {
-			k := fmt.Sprintf("want:%03d", i)
-			wantKeys = append(wantKeys, k)
-			app(&Message{Key: []byte(k), Value: []byte(fmt.Sprintf("hit%03d", i))})
-			continue
-		}
-		app(&Message{Key: []byte(fmt.Sprintf("other:%03d", i)), Value: []byte("miss")})
-	}
-	app(&Message{Key: []byte("pad"), Value: []byte("padpadpadpad")})
-	bound := l.ActiveSegmentBase() - 1
-	want := scanPrefix(t, l, []byte("want:"), bound)
-	require.NotEmpty(t, want)
-
-	// Set on the open log deliberately: the point is the SAME data read two
-	// ways, which two separately built logs could not guarantee.
-	for _, coalesce := range []int64{1, 1 << 30} {
-		l.Options.PrefixReadCoalesceBytes = coalesce
-		got, _, err := l.ReadKeyPrefix([]byte("want:"), -1)
-		require.NoError(t, err, "coalesce=%d", coalesce)
-		requirePrefixEq(t, want, got, fmt.Sprintf("coalesce=%d", coalesce))
-
-		gotKeys := make([]string, len(got))
-		for i, r := range got {
-			gotKeys[i] = string(r.Message.Key())
-		}
-		require.Equal(t, wantKeys, gotKeys, "coalesce=%d", coalesce)
-	}
-}
-
-// Sparse hits over many segments, with the concurrent per-segment fetch.
-func TestReadKeyPrefixSparseHitsAcrossSegments(t *testing.T) {
-	l, app := specLog(t)
-	// One wanted key buried every 20 records, so consecutive hits are far
-	// enough apart to exceed prefixFetchSkipRecords.
-	var wantKeys []string
-	for i := 0; i < 200; i++ {
-		if i%20 == 0 {
-			k := fmt.Sprintf("want:%03d", i)
-			wantKeys = append(wantKeys, k)
-			app(&Message{Key: []byte(k), Value: []byte("hit")})
-			continue
-		}
-		app(&Message{Key: []byte(fmt.Sprintf("other:%03d", i)), Value: []byte("miss")})
-	}
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
-
-	got, _, err := l.ReadKeyPrefix([]byte("want:"), -1)
-	require.NoError(t, err)
-
-	gotKeys := make([]string, len(got))
-	for i, r := range got {
-		gotKeys[i] = string(r.Message.Key())
-		require.Equal(t, "hit", string(r.Message.Value()), "fetched the wrong record for %q", gotKeys[i])
-	}
-	require.Equal(t, wantKeys, gotKeys)
-	requirePrefixEq(t, scanPrefix(t, l, []byte("want:"), l.ActiveSegmentBase()-1), got, "sparse hits")
-}
-
-// Differential test across many prefixes and shapes: the digest read and an
-// independent scan must agree exactly, with and without sidecars present.
-func TestReadKeyPrefixDifferentialAgainstScan(t *testing.T) {
-	l, app := specLog(t)
-
-	// A key space with shared prefixes, nested prefixes, supersessions,
-	// tombstones, an empty-valued live record and keys either side of the
-	// ranges being asked for.
 	app(&Message{Key: []byte("a"), Value: []byte("bare")})
 	app(&Message{Key: []byte("ab"), Value: []byte("1")})
 	app(&Message{Key: []byte("abc"), Value: []byte("1")})
-	app(&Message{Key: []byte("abc"), Value: []byte("2")}) // supersedes
-	app(&Message{Key: []byte("abd"), Value: nil})         // live, empty value
+	app(&Message{Key: []byte("abc"), Value: []byte("2")})
+	app(&Message{Key: []byte("abd"), Value: nil})
 	app(&Message{Key: []byte("abe"), Value: []byte("x"), Attributes: AttrTombstone})
+	app(&Message{Value: []byte("unkeyed")})
 	app(&Message{Key: []byte("b"), Value: []byte("after")})
-	app(&Message{Key: []byte("ac"), Value: []byte("sibling")})
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 40; i++ {
 		app(&Message{Key: []byte(fmt.Sprintf("ab%02d", i)), Value: []byte(fmt.Sprintf("n%d", i))})
 	}
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
 
 	prefixes := [][]byte{
-		nil, []byte(""), []byte("a"), []byte("ab"), []byte("abc"), []byte("abd"),
-		[]byte("ac"), []byte("b"), []byte("zzz-absent"), []byte("ab0"),
+		{}, []byte("a"), []byte("ab"), []byte("abc"), []byte("abd"),
+		[]byte("b"), []byte("zzz-absent"), []byte("ab0"),
 	}
-	bound := l.ActiveSegmentBase() - 1
-
 	check := func(stage string) {
 		for _, p := range prefixes {
-			got, through, err := l.ReadKeyPrefix(p, -1)
-			require.NoError(t, err, "%s: prefix %q", stage, p)
-			require.Equal(t, bound, through, "%s: prefix %q", stage, p)
-			requirePrefixEq(t, scanPrefix(t, l, p, bound), got,
-				fmt.Sprintf("%s: prefix %q", stage, p))
-		}
-		// Bounded reads must agree too, at every offset in range.
-		for upTo := int64(0); upTo <= bound; upTo++ {
-			got, through, err := l.ReadKeyPrefix([]byte("ab"), upTo)
-			require.NoError(t, err, "%s: upTo %d", stage, upTo)
-			require.Equal(t, upTo, through)
-			requirePrefixEq(t, scanPrefix(t, l, []byte("ab"), upTo), got,
-				fmt.Sprintf("%s: upTo %d", stage, upTo))
+			for _, skip := range []bool{false, true} {
+				opts := []ReadOption{KeyPrefix(p)}
+				if skip {
+					opts = append(opts, SkipSuperseded())
+				}
+				r, err := l.NewReader(opts...)
+				require.NoError(t, err)
+				got := drainReader(t, r)
+
+				spec, err := l.resolve(opts)
+				require.NoError(t, err)
+				requireRecsEq(t, scanFiltered(t, l, spec), got,
+					fmt.Sprintf("%s: prefix %q skipSuperseded=%v", stage, p, skip))
+			}
 		}
 	}
 
@@ -363,159 +218,340 @@ func TestReadKeyPrefixDifferentialAgainstScan(t *testing.T) {
 	check("with no sidecars at all")
 }
 
-// The acceleration itself, not just the answer. Everything else here would
-// still pass if the read scanned every record in the log, so this pins the
-// actual claim: with sidecars present, records are read only from the segments
-// that hold hits.
-func TestReadKeyPrefixDoesNotScanSegmentsWithoutHits(t *testing.T) {
+// THE constraint: digests are an optimisation, so deleting or corrupting them
+// must not change a single record returned.
+func TestReaderKeyPrefixIdenticalWithoutDigests(t *testing.T) {
 	l, app := specLog(t)
-	// Distinct keys throughout, so compaction supersedes nothing and the
-	// segments survive the clean that installs the sidecars.
 	for i := 0; i < 60; i++ {
-		app(&Message{Key: []byte(fmt.Sprintf("other:%03d", i)), Value: []byte("miss")})
+		app(&Message{Key: []byte(fmt.Sprintf("k:%02d", i%13)), Value: []byte(fmt.Sprintf("v%d", i))})
 	}
-	offWant := app(&Message{Key: []byte("want:1"), Value: []byte("hit")})
-	// Enough padding that the hit is definitely SEALED: segments roll on a
-	// byte budget, so one short record does not necessarily close one.
-	for i := 0; i < 4; i++ {
-		app(&Message{Key: []byte(fmt.Sprintf("pad:%d", i)), Value: []byte("padpadpadpad")})
-	}
-	require.Less(t, offWant, l.ActiveSegmentBase(), "the hit must be in a sealed segment")
-
+	app(&Message{Key: []byte("k:07"), Value: []byte("del"), Attributes: AttrTombstone})
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
 	requireCleanOK(t, l, CleanSpec{Ceiling: l.HighWatermark()})
-	sealed := len(l.Segments()) - 1
-	require.Greater(t, sealed, 10, "test is only meaningful with many sealed segments")
 
-	before := segmentScans.Load()
-	got, _, err := l.ReadKeyPrefix([]byte("want:"), -1)
+	read := func() []readRec {
+		r, err := l.NewReader(KeyPrefix([]byte("k:")))
+		require.NoError(t, err)
+		return drainReader(t, r)
+	}
+
+	withDigests := read()
+	require.NotEmpty(t, withDigests)
+
+	// Corrupt every sidecar: must be rebuilt rather than believed.
+	paths, err := filepath.Glob(filepath.Join(l.Options.Path, "*"+keysSuffix))
 	require.NoError(t, err)
-	scans := segmentScans.Load() - before
+	require.NotEmpty(t, paths)
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		require.NoError(t, err)
+		data[len(data)/2] ^= 0xFF
+		require.NoError(t, os.WriteFile(p, data, 0666))
+	}
+	requireRecsEq(t, withDigests, read(), "corrupt sidecars must be rebuilt, not believed")
 
-	require.Len(t, got, 1)
-	require.Equal(t, "hit", string(got[0].Message.Value()))
-	require.LessOrEqual(t, scans, int64(1),
-		"prefix read scanned %d segments for 1 hit across %d sealed segments — "+
-			"the digests are not being used", scans, sealed)
+	n := removeAllDigests(t, l)
+	require.NotZero(t, n)
+	requireRecsEq(t, withDigests, read(), "digest present vs absent")
 }
 
-// denseSegLog rolls segments that hold MANY records, so several wanted records
-// land in one segment — which is the case that distinguishes per-run fan-out
-// from per-segment fan-out. specLog's 64-byte segments cannot show it: there,
-// every record is already its own segment.
-func denseSegLog(t *testing.T) (*commitLog, func(m *Message) int64) {
+// ---- bounds, follow, commit boundary ----
+
+func TestReaderFromAndUntil(t *testing.T) {
+	l, app := specLog(t)
+	var offs []int64
+	for i := 0; i < 12; i++ {
+		offs = append(offs, app(&Message{Key: []byte(fmt.Sprintf("k:%d", i)), Value: []byte("v")}))
+	}
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
+
+	r, err := l.NewReader(From(offs[3]), Until(offs[7]), KeyPrefix([]byte("k:")))
+	require.NoError(t, err)
+	got := drainReader(t, r)
+	require.Len(t, got, 5, "inclusive at both ends")
+	require.Equal(t, offs[3], got[0].off)
+	require.Equal(t, offs[7], got[len(got)-1].off)
+
+	_, err = l.NewReader(From(10), Until(5))
+	require.Error(t, err, "an inverted range must be refused, not silently empty")
+}
+
+// Terminating is the default; Follow is opt-in. A reader that unexpectedly
+// blocks forever is the failure this default prevents.
+func TestReaderTerminatesByDefault(t *testing.T) {
+	l, app := specLog(t)
+	app(&Message{Key: []byte("k:1"), Value: []byte("v")})
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r, err := l.NewReader()
+		require.NoError(t, err)
+		drainReader(t, r)
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("default reader blocked at the end of the log instead of returning io.EOF")
+	}
+}
+
+// Follow picks up records appended after the reader caught up — including
+// through a prefix filter, where the tail has no digest to plan from.
+func TestReaderFollowSeesLaterAppends(t *testing.T) {
+	l, app := specLog(t)
+	app(&Message{Key: []byte("k:1"), Value: []byte("first")})
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
+
+	r, err := l.NewReader(KeyPrefix([]byte("k:")), Follow())
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	headers := make([]byte, 28)
+
+	msg, _, _, _, err := r.ReadMessage(ctx, headers)
+	require.NoError(t, err)
+	require.Equal(t, "first", string(msg.Value()))
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		app(&Message{Key: []byte("other"), Value: []byte("skipped")})
+		app(&Message{Key: []byte("k:2"), Value: []byte("second")})
+	}()
+
+	msg, _, _, _, err = r.ReadMessage(ctx, headers)
+	require.NoError(t, err)
+	require.Equal(t, "second", string(msg.Value()),
+		"a following filtered reader must skip non-matching tail records and return the next match")
+}
+
+// Committed-only is the default; uncommitted must be asked for.
+func TestReaderCommittedByDefault(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 64, Compact: true})
+	defer cleanup()
+
+	offs, err := l.Append([]*Message{{Key: []byte("k:1"), Value: []byte("committed")}})
+	require.NoError(t, err)
+	l.SetHighWatermark(offs[0])
+	_, err = l.Append([]*Message{{Key: []byte("k:2"), Value: []byte("uncommitted")}})
+	require.NoError(t, err)
+
+	r, err := l.NewReader()
+	require.NoError(t, err)
+	got := drainReader(t, r)
+	require.Len(t, got, 1, "the record above the high watermark must not be returned")
+	require.Equal(t, "committed", string(got[0].msg.Value()))
+
+	r, err = l.NewReader(Uncommitted())
+	require.NoError(t, err)
+	require.Len(t, drainReader(t, r), 2, "Uncommitted must reveal it")
+}
+
+// ---- the refused combination ----
+
+func TestReaderRefusesUnclassifiableCombination(t *testing.T) {
+	l, app := specLog(t)
+	app(&Message{Key: []byte("k:1"), Value: []byte("v")})
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
+
+	_, err := l.NewReader(KeyPrefix([]byte("k:")), Uncommitted())
+	require.Error(t, err, "reading past the commit boundary with markers filtered out is unusable")
+	require.Contains(t, err.Error(), "cannot classify")
+
+	// Either escape hatch makes it legal.
+	_, err = l.NewReader(KeyPrefix([]byte("k:")), Uncommitted(), Until(l.HighWatermark()))
+	require.NoError(t, err, "bounding the read at a commit boundary must be accepted")
+	_, err = l.NewReader(KeyPrefix([]byte("k:")), Uncommitted(), IncludeControl())
+	require.NoError(t, err, "taking the markers must be accepted")
+
+	// And neither is needed when the read stays below the boundary.
+	_, err = l.NewReader(KeyPrefix([]byte("k:")))
+	require.NoError(t, err)
+}
+
+func TestReaderIncludeControlReturnsMarkers(t *testing.T) {
+	l, app := specLog(t)
+	app(&Message{Key: []byte("k:1"), Value: []byte("v")})
+	app(&Message{Attributes: AttrControl, Value: []byte("marker")})
+	app(&Message{Key: []byte("k:2"), Value: []byte("w")})
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
+
+	r, err := l.NewReader(KeyPrefix([]byte("k:")))
+	require.NoError(t, err)
+	for _, rec := range drainReader(t, r) {
+		require.Zero(t, rec.msg.Attributes()&AttrControl, "markers are keyless and must be dropped")
+	}
+
+	r, err = l.NewReader(KeyPrefix([]byte("k:")), IncludeControl())
+	require.NoError(t, err)
+	var markers int
+	var offs []int64
+	for _, rec := range drainReader(t, r) {
+		offs = append(offs, rec.off)
+		if rec.msg.Attributes()&AttrControl != 0 {
+			markers++
+		}
+	}
+	require.Equal(t, 1, markers, "IncludeControl must return the marker")
+	for i := 1; i < len(offs); i++ {
+		require.Greater(t, offs[i], offs[i-1], "markers must arrive in offset order with the rest")
+	}
+}
+
+// ---- SkipSuperseded ----
+
+func TestSkipSupersededDropsWithinSegmentOnly(t *testing.T) {
+	// Segments large enough to hold many copies of a key.
 	l, cleanup := setupWithOptions(t, Options{
-		Path:            tempDir(t),
-		MaxSegmentBytes: 2000,
-		Compact:         true,
+		Path: tempDir(t), MaxSegmentBytes: 2000, Compact: true,
 	})
-	t.Cleanup(cleanup)
+	defer cleanup()
 	app := func(m *Message) int64 {
 		offs, err := l.Append([]*Message{m})
 		require.NoError(t, err)
 		l.SetHighWatermark(offs[0])
 		return offs[0]
 	}
-	return l, app
-}
-
-// The fan-out claim: concurrency is bounded by RUNS, not by segments, so hits
-// concentrated in a few segments still parallelise. Without this, nothing here
-// would notice the fetch collapsing back to one request per segment.
-func TestPlanRunsFanOutIsNotCappedBySegmentCount(t *testing.T) {
-	l, app := denseSegLog(t)
-	for i := 0; i < 300; i++ {
-		if i%5 == 0 {
-			app(&Message{Key: []byte(fmt.Sprintf("want:%03d", i)), Value: []byte("hit")})
-			continue
-		}
-		app(&Message{Key: []byte(fmt.Sprintf("other:%03d", i)), Value: []byte("miss")})
+	for i := 0; i < 200; i++ {
+		app(&Message{Key: []byte("k:same"), Value: []byte(fmt.Sprintf("v%03d", i))})
 	}
-	for i := 0; i < 60; i++ { // seal the tail
-		app(&Message{Key: []byte(fmt.Sprintf("pad:%03d", i)), Value: []byte("padpadpadpad")})
+	for i := 0; i < 20; i++ {
+		app(&Message{Key: []byte(fmt.Sprintf("pad:%d", i)), Value: make([]byte, 200)})
 	}
 
-	segs := l.Segments()
-	sealed := segs[:len(segs)-1]
-	require.Greater(t, len(sealed), 2)
-
-	// Collect the wanted offsets per segment the way the read does.
-	hits, err := mergePrefix(digestsFor(t, sealed), []byte("want:"), l.ActiveSegmentBase()-1)
+	plain, err := l.NewReader(KeyPrefix([]byte("k:")))
 	require.NoError(t, err)
-	require.NotEmpty(t, hits)
+	all := drainReader(t, plain)
+	require.Len(t, all, 200)
 
-	bySeg := map[int][]int64{}
-	for _, h := range hits {
-		bySeg[h.segIdx] = append(bySeg[h.segIdx], h.offset)
-	}
-	segsWithHits := len(bySeg)
-	require.Greater(t, len(hits), segsWithHits,
-		"test needs segments holding MORE than one hit to be meaningful")
+	skipped, err := l.NewReader(KeyPrefix([]byte("k:")), SkipSuperseded())
+	require.NoError(t, err)
+	got := drainReader(t, skipped)
 
-	countRuns := func(coalesce int64) int {
-		n := 0
-		for segIdx, offs := range bySeg {
-			sort.Slice(offs, func(i, j int) bool { return offs[i] < offs[j] })
-			runs, err := planRuns(sealed[segIdx], segIdx, offs, coalesce)
-			require.NoError(t, err)
-			n += len(runs)
-		}
-		return n
-	}
+	require.Less(t, len(got), len(all), "supersessions within a segment must be dropped")
+	sealed := len(l.Segments()) - 1
+	require.LessOrEqual(t, len(got), sealed+1,
+		"at most one copy per key per segment: got %d over %d sealed segments", len(got), sealed)
+	require.Equal(t, "v199", string(got[len(got)-1].msg.Value()),
+		"the newest copy must always survive")
 
-	// Cheap requests / expensive bytes: split aggressively, so the fan-out is
-	// far wider than the segment count.
-	split := countRuns(0)
-	require.Greater(t, split, segsWithHits,
-		"per-run planning must exceed the %d-segment ceiling, got %d runs", segsWithHits, split)
-
-	// Expensive requests / cheap bytes: coalesce into one pass per segment.
-	merged := countRuns(1 << 30)
-	require.Equal(t, segsWithHits, merged,
-		"a large coalesce budget must collapse to one run per segment")
+	// It never returns a stale value for a key it reports at all: each returned
+	// copy is the last one in its own segment.
+	spec, err := l.resolve([]ReadOption{KeyPrefix([]byte("k:")), SkipSuperseded()})
+	require.NoError(t, err)
+	requireRecsEq(t, scanFiltered(t, l, spec), got, "skipSuperseded vs independent scan")
 }
 
-// digestsFor is the read's digest step, for tests that drive the merge directly.
-func digestsFor(t *testing.T, segs []*segment) []*keyDigest {
-	t.Helper()
-	out := make([]*keyDigest, len(segs))
-	for i, seg := range segs {
-		if d := loadKeyDigest(seg); d != nil {
-			out[i] = d
-			continue
-		}
-		d, err := buildKeyDigest(seg, newBlockCache())
+// The documented asymmetry: what counts as superseded depends on where the read
+// began, so a resuming reader can return MORE records than one that read the
+// whole segment — never fewer, and never a stale value for a key it reports.
+func TestSkipSupersededResumeReturnsNoFewer(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path: tempDir(t), MaxSegmentBytes: 2000, Compact: true,
+	})
+	defer cleanup()
+	app := func(m *Message) int64 {
+		offs, err := l.Append([]*Message{m})
 		require.NoError(t, err)
-		out[i] = d
+		l.SetHighWatermark(offs[0])
+		return offs[0]
 	}
-	return out
+	var offs []int64
+	for i := 0; i < 120; i++ {
+		offs = append(offs, app(&Message{
+			Key: []byte(fmt.Sprintf("k:%d", i%3)), Value: []byte(fmt.Sprintf("v%03d", i)),
+		}))
+	}
+	for i := 0; i < 20; i++ {
+		app(&Message{Key: []byte(fmt.Sprintf("pad:%d", i)), Value: make([]byte, 200)})
+	}
+
+	full, err := l.NewReader(KeyPrefix([]byte("k:")), SkipSuperseded())
+	require.NoError(t, err)
+	fromStart := drainReader(t, full)
+
+	for _, resume := range []int64{offs[10], offs[50], offs[100]} {
+		r, err := l.NewReader(From(resume), KeyPrefix([]byte("k:")), SkipSuperseded())
+		require.NoError(t, err)
+		got := drainReader(t, r)
+
+		var tailOfFull []readRec
+		for _, rec := range fromStart {
+			if rec.off >= resume {
+				tailOfFull = append(tailOfFull, rec)
+			}
+		}
+		require.GreaterOrEqual(t, len(got), len(tailOfFull),
+			"resuming at %d returned FEWER records than the same suffix of a full read", resume)
+
+		// Every record the full read reported at or after the resume point must
+		// still be there: resuming may add, never remove.
+		have := map[int64]bool{}
+		for _, rec := range got {
+			have[rec.off] = true
+		}
+		for _, rec := range tailOfFull {
+			require.True(t, have[rec.off],
+				"resuming at %d lost offset %d, which a full read returned", resume, rec.off)
+		}
+	}
 }
 
-// Whatever the coalesce budget does to the request pattern, the records must be
-// identical — it is a cost knob, never a correctness one.
-func TestReadKeyPrefixCoalesceIsCostOnlyOnDenseSegments(t *testing.T) {
-	l, app := denseSegLog(t)
-	for i := 0; i < 300; i++ {
-		if i%5 == 0 {
-			app(&Message{Key: []byte(fmt.Sprintf("want:%03d", i)), Value: []byte(fmt.Sprintf("hit%03d", i))})
-			continue
-		}
+// ---- acceleration ----
+
+// The point of the digests: a filtered read must not read records from segments
+// that hold no match. Everything else here would pass if it scanned the log.
+func TestReaderKeyPrefixSkipsSegmentsWithoutHits(t *testing.T) {
+	l, app := specLog(t)
+	for i := 0; i < 60; i++ {
 		app(&Message{Key: []byte(fmt.Sprintf("other:%03d", i)), Value: []byte("miss")})
 	}
-	for i := 0; i < 60; i++ {
-		app(&Message{Key: []byte(fmt.Sprintf("pad:%03d", i)), Value: []byte("padpadpadpad")})
+	offWant := app(&Message{Key: []byte("want:1"), Value: []byte("hit")})
+	for i := 0; i < 4; i++ {
+		app(&Message{Key: []byte(fmt.Sprintf("pad:%d", i)), Value: []byte("padpadpadpad")})
 	}
+	require.Less(t, offWant, l.ActiveSegmentBase())
+	requireCleanOK(t, l, CleanSpec{Ceiling: l.HighWatermark()})
 
-	want := scanPrefix(t, l, []byte("want:"), l.ActiveSegmentBase()-1)
-	require.NotEmpty(t, want)
-	for _, coalesce := range []int64{1, 64, 1 << 12, 1 << 30} {
-		for _, conc := range []int{1, 4, 64} {
-			l.Options.PrefixReadCoalesceBytes = coalesce
-			l.Options.PrefixReadConcurrency = conc
-			got, _, err := l.ReadKeyPrefix([]byte("want:"), -1)
-			require.NoError(t, err)
-			requirePrefixEq(t, want, got, fmt.Sprintf("coalesce=%d conc=%d", coalesce, conc))
+	sealed := len(l.Segments()) - 1
+	require.Greater(t, sealed, 10)
+
+	before := segmentScans.Load()
+	r, err := l.NewReader(KeyPrefix([]byte("want:")), Until(offWant))
+	require.NoError(t, err)
+	got := drainReader(t, r)
+	scans := segmentScans.Load() - before
+
+	require.Len(t, got, 1)
+	require.Equal(t, "hit", string(got[0].msg.Value()))
+	require.LessOrEqual(t, scans, int64(1),
+		"scanned %d segments for 1 hit across %d sealed segments — digests unused", scans, sealed)
+}
+
+// ---- tiered ----
+
+func TestReaderKeyPrefixOverTieredSegments(t *testing.T) {
+	l, bound := offloadedPrefixLog(t)
+	l.Options.PrefixReadConcurrency = 2
+	l.Options.PrefixReadTierConcurrency = 16
+
+	r, err := l.NewReader(KeyPrefix([]byte("want:")), Until(bound))
+	require.NoError(t, err)
+	got := drainReader(t, r)
+
+	spec, err := l.resolve([]ReadOption{KeyPrefix([]byte("want:")), Until(bound)})
+	require.NoError(t, err)
+	requireRecsEq(t, scanFiltered(t, l, spec), got, "tiered segments")
+
+	var sawTomb bool
+	for _, rec := range got {
+		if bytes.Equal(rec.msg.Key(), []byte("want:tomb")) {
+			sawTomb = true
+			require.NotZero(t, rec.msg.Attributes()&AttrTombstone)
 		}
 	}
+	require.True(t, sawTomb, "a tombstone must survive the trip through the store")
 }
 
 // offloadedPrefixLog builds a log whose sealed segments are offloaded to a
@@ -578,62 +614,35 @@ func offloadedPrefixLog(t *testing.T) (*commitLog, int64) {
 	return l, bound
 }
 
-// The read must work against segments whose bytes live in a SegmentStore, which
-// is the case the whole design is aimed at — and nothing else here covers it,
-// since every other test reads local files. Also exercises the reader's claim
-// on a store backing.
-func TestReadKeyPrefixOverTieredSegments(t *testing.T) {
-	l, bound := offloadedPrefixLog(t)
-	l.Options.PrefixReadConcurrency = 2
-	l.Options.PrefixReadTierConcurrency = 16
+// ---- per-tier routing ----
 
-	want := scanPrefix(t, l, []byte("want:"), bound)
-	require.NotEmpty(t, want)
-
-	got, through, err := l.ReadKeyPrefix([]byte("want:"), -1)
-	require.NoError(t, err)
-	require.Equal(t, bound, through)
-	requirePrefixEq(t, want, got, "tiered segments")
-
-	// The tombstone must survive the trip through the store as a tombstone.
-	var sawTomb bool
-	for _, r := range got {
-		if string(r.Message.Key()) == "want:tomb" {
-			sawTomb = true
-			require.NotZero(t, r.Message.Attributes()&AttrTombstone)
-		}
-	}
-	require.True(t, sawTomb, "tombstone must be returned from a tiered segment too")
-}
-
-// The per-tier settings must actually be routed by tier. segmentScans counts
-// one scanner per RUN, so the request pattern is observable: tightening the
-// TIER budget on an offloaded log must split it into more runs, and changing
-// the LOCAL budget must do nothing at all.
+// segmentScans counts one scanner per RUN, so the request pattern is
+// observable: tightening the TIER budget on an offloaded log must split it into
+// more runs, and changing the LOCAL budget must do nothing at all.
 func TestPrefixReadTierBudgetGovernsTieredSegments(t *testing.T) {
 	l, bound := offloadedPrefixLog(t)
-	want := scanPrefix(t, l, []byte("want:"), bound)
+	opts := []ReadOption{KeyPrefix([]byte("want:")), Until(bound)}
+	spec, err := l.resolve(opts)
+	require.NoError(t, err)
+	want := scanFiltered(t, l, spec)
 	require.NotEmpty(t, want)
 
 	runsFor := func() int64 {
 		before := segmentScans.Load()
-		got, _, err := l.ReadKeyPrefix([]byte("want:"), -1)
+		r, err := l.NewReader(opts...)
 		require.NoError(t, err)
-		requirePrefixEq(t, want, got, "tier budget must not change the answer")
+		requireRecsEq(t, want, drainReader(t, r), "tier budget must not change the answer")
 		return segmentScans.Load() - before
 	}
 
-	// One pass per segment: everything coalesced.
 	l.Options.PrefixReadTierCoalesceBytes = 1 << 30
 	coalesced := runsFor()
 
-	// Never coalesce: every isolated record becomes its own request.
 	l.Options.PrefixReadTierCoalesceBytes = -1
 	split := runsFor()
 	require.Greater(t, split, coalesced,
 		"a negative tier budget must split runs (%d) beyond the coalesced count (%d)", split, coalesced)
 
-	// The LOCAL budget must not touch offloaded segments, at either extreme.
 	l.Options.PrefixReadTierCoalesceBytes = 1 << 30
 	for _, local := range []int64{-1, 1, 1 << 30} {
 		l.Options.PrefixReadCoalesceBytes = local
@@ -642,12 +651,61 @@ func TestPrefixReadTierBudgetGovernsTieredSegments(t *testing.T) {
 	}
 }
 
-// The mirror of the tiered case: the LOCAL budget must reshape LOCAL reads, and
-// the tier budget must leave them alone. Together these pin the claim that the
-// four settings are genuinely per tier rather than one knob wearing two names —
-// which is what lets an NVMe be configured like a store (small reads, wide
-// fan-out) instead of like a spinning disk.
-func TestPrefixReadLocalBudgetGovernsLocalSegments(t *testing.T) {
+// Whatever the budgets do to the request pattern, the records must be
+// identical: they are cost knobs, never correctness ones.
+func TestPrefixReadBudgetsAreCostOnly(t *testing.T) {
+	l, app := denseSegLog(t)
+	for i := 0; i < 300; i++ {
+		if i%5 == 0 {
+			app(&Message{Key: []byte(fmt.Sprintf("want:%03d", i)), Value: []byte(fmt.Sprintf("hit%03d", i))})
+			continue
+		}
+		app(&Message{Key: []byte(fmt.Sprintf("other:%03d", i)), Value: []byte("miss")})
+	}
+	for i := 0; i < 60; i++ {
+		app(&Message{Key: []byte(fmt.Sprintf("pad:%03d", i)), Value: []byte("padpadpadpad")})
+	}
+
+	opts := []ReadOption{KeyPrefix([]byte("want:"))}
+	spec, err := l.resolve(opts)
+	require.NoError(t, err)
+	want := scanFiltered(t, l, spec)
+	require.NotEmpty(t, want)
+
+	for _, coalesce := range []int64{-1, 1, 64, 1 << 12, 1 << 30} {
+		for _, conc := range []int{1, 4, 64} {
+			l.Options.PrefixReadCoalesceBytes = coalesce
+			l.Options.PrefixReadConcurrency = conc
+			r, err := l.NewReader(opts...)
+			require.NoError(t, err)
+			requireRecsEq(t, want, drainReader(t, r),
+				fmt.Sprintf("coalesce=%d conc=%d", coalesce, conc))
+		}
+	}
+}
+
+// denseSegLog rolls segments that hold MANY records, so several wanted records
+// land in one segment — the case that distinguishes per-run fan-out from
+// per-segment fan-out.
+func denseSegLog(t *testing.T) (*commitLog, func(m *Message) int64) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 2000,
+		Compact:         true,
+	})
+	t.Cleanup(cleanup)
+	app := func(m *Message) int64 {
+		offs, err := l.Append([]*Message{m})
+		require.NoError(t, err)
+		l.SetHighWatermark(offs[0])
+		return offs[0]
+	}
+	return l, app
+}
+
+// Concurrency is bounded by RUNS, not by segments, so hits concentrated in a
+// few segments still parallelise.
+func TestPlanRunsFanOutIsNotCappedBySegmentCount(t *testing.T) {
 	l, app := denseSegLog(t)
 	for i := 0; i < 300; i++ {
 		if i%5 == 0 {
@@ -659,43 +717,62 @@ func TestPrefixReadLocalBudgetGovernsLocalSegments(t *testing.T) {
 	for i := 0; i < 60; i++ {
 		app(&Message{Key: []byte(fmt.Sprintf("pad:%03d", i)), Value: []byte("padpadpadpad")})
 	}
-	want := scanPrefix(t, l, []byte("want:"), l.ActiveSegmentBase()-1)
-	require.NotEmpty(t, want)
 
-	runsFor := func() int64 {
-		before := segmentScans.Load()
-		got, _, err := l.ReadKeyPrefix([]byte("want:"), -1)
+	segs := l.Segments()
+	sealed := segs[:len(segs)-1]
+	require.Greater(t, len(sealed), 2)
+
+	spec, err := l.resolve([]ReadOption{KeyPrefix([]byte("want:"))})
+	require.NoError(t, err)
+
+	var segsWithHits, totalHits int
+	countRuns := func(coalesce int64) int {
+		n := 0
+		for _, seg := range sealed {
+			d := loadKeyDigest(seg)
+			if d == nil {
+				d, err = buildKeyDigest(seg, newBlockCache())
+				require.NoError(t, err)
+			}
+			hits, err := digestHits(d, spec, 0, -1)
+			require.NoError(t, err)
+			if len(hits) == 0 {
+				continue
+			}
+			runs, err := planRuns(seg, 0, hits, coalesce)
+			require.NoError(t, err)
+			n += len(runs)
+		}
+		return n
+	}
+	for _, seg := range sealed {
+		d := loadKeyDigest(seg)
+		if d == nil {
+			d, err = buildKeyDigest(seg, newBlockCache())
+			require.NoError(t, err)
+		}
+		hits, err := digestHits(d, spec, 0, -1)
 		require.NoError(t, err)
-		requirePrefixEq(t, want, got, "local budget must not change the answer")
-		return segmentScans.Load() - before
+		if len(hits) > 0 {
+			segsWithHits++
+			totalHits += len(hits)
+		}
 	}
+	require.Greater(t, totalHits, segsWithHits,
+		"test needs segments holding MORE than one hit to be meaningful")
 
-	// Spinning-disk shape: one large window per segment.
-	l.Options.PrefixReadCoalesceBytes = 1 << 30
-	coalesced := runsFor()
+	split := countRuns(0)
+	require.Greater(t, split, segsWithHits,
+		"per-run planning must exceed the %d-segment ceiling, got %d runs", segsWithHits, split)
 
-	// NVMe shape: split every gap, fan out wide.
-	l.Options.PrefixReadCoalesceBytes = -1
-	l.Options.PrefixReadConcurrency = 64
-	split := runsFor()
-	require.Greater(t, split, coalesced,
-		"a negative local budget must split runs (%d) beyond the coalesced count (%d)", split, coalesced)
-
-	// The TIER budget must not touch local segments, at either extreme.
-	l.Options.PrefixReadCoalesceBytes = 1 << 30
-	for _, tier := range []int64{-1, 1, 1 << 30} {
-		l.Options.PrefixReadTierCoalesceBytes = tier
-		require.Equal(t, coalesced, runsFor(),
-			"tier budget %d changed the read pattern of LOCAL segments", tier)
-	}
+	merged := countRuns(1 << 30)
+	require.Equal(t, segsWithHits, merged,
+		"a large coalesce budget must collapse to one run per segment")
 }
 
 func TestCoalesceBudgetResolution(t *testing.T) {
-	// Zero takes the default, as everywhere else in Options.
 	require.Equal(t, int64(4096), coalesceBudget(0, 4096))
-	// Negative is the escape hatch: never coalesce.
 	require.Equal(t, int64(0), coalesceBudget(-1, 4096))
-	// Anything positive is taken literally, including a very small budget.
 	require.Equal(t, int64(1), coalesceBudget(1, 4096))
 	require.Equal(t, int64(9999), coalesceBudget(9999, 4096))
 
@@ -709,7 +786,6 @@ func TestPrefixUpperBound(t *testing.T) {
 	require.Nil(t, prefixUpperBound([]byte{}))
 	require.Equal(t, []byte("b"), prefixUpperBound([]byte("a")))
 	require.Equal(t, []byte("ac"), prefixUpperBound([]byte("ab")))
-	// Trailing 0xFF carries: the range runs to the next representable key.
 	require.Equal(t, []byte{'a', 0xFF}, prefixUpperBound([]byte{'a', 0xFE}))
 	require.Equal(t, []byte{'b'}, prefixUpperBound([]byte{'a', 0xFF}))
 	require.Nil(t, prefixUpperBound([]byte{0xFF, 0xFF}), "all-0xFF runs to the end")

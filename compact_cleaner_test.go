@@ -81,7 +81,7 @@ func TestCompactCleaner(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	for _, exp := range expected {
@@ -134,7 +134,7 @@ func TestCompactCleanerHW(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	for _, exp := range expected {
@@ -176,7 +176,7 @@ func TestCompactCleanerNoKeys(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	r, err := l.NewReader(0, true)
+	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	for _, exp := range expected {

@@ -29,7 +29,7 @@ func TestReaderCommittedLargeMessage(t *testing.T) {
 	require.NoError(t, err)
 	l.SetHighWatermark(offsets[len(offsets)-1])
 
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -62,7 +62,7 @@ func TestReaderCommittedLargeMessageMetadata(t *testing.T) {
 	require.NoError(t, err)
 	l.SetHighWatermark(offsets[len(offsets)-1])
 
-	r, err := l.NewReader(0, false)
+	r, err := l.NewReader(From(0), Follow())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -75,7 +75,7 @@ func (e *offloadIndexEnv) appendMsg(l CommitLog, v string) int64 {
 }
 
 func (e *offloadIndexEnv) readVal(l CommitLog, off int64) string {
-	r, err := l.NewReader(off, false)
+	r, err := l.NewReader(From(off), Follow())
 	if err != nil {
 		e.t.Fatal(err)
 	}

@@ -24,37 +24,56 @@ type Reader struct {
 	offset      int64
 	log         *commitLog
 	uncommitted bool
-	noWait      bool // recovery scan: never block for future appends (see newRecoveryReader)
+	noWait      bool // never block for future appends
+	spec        readSpec
+	// prefix serves a KeyPrefix read, skipping past non-matching records over
+	// sealed segments instead of reading them. Nil for an unfiltered read, and
+	// exhausted (then nil) once the read reaches the live tail.
+	prefix *prefixSource
 }
 
-// NewReader creates a new Reader starting at the given offset. If uncommitted
-// is true, the Reader will read uncommitted messages from the log. Otherwise,
-// it will only return committed messages.
-func (l *commitLog) NewReader(offset int64, uncommitted bool) (*Reader, error) {
-	var (
-		ctxReader contextReader
-		err       error
-	)
-	if uncommitted {
-		ctxReader, err = l.newReaderUncommitted(offset, false)
-	} else {
-		ctxReader, err = l.newReaderCommitted(offset)
+// NewReader opens a Reader over the log. With no options it reads every
+// committed record from the oldest surviving one and returns io.EOF at the end
+// of the data; see From, Until, Follow, Uncommitted, KeyPrefix, SkipSuperseded
+// and IncludeControl.
+//
+// Two defaults are the opposite of the constructors this replaces, on purpose.
+// It TERMINATES rather than follows, because a reader that unexpectedly ends is
+// noticed by its caller while one that unexpectedly follows blocks forever. And
+// it reads COMMITTED data only, which was previously an unlabelled bool at the
+// call site.
+//
+// One combination is refused: KeyPrefix with Uncommitted, and neither Until nor
+// IncludeControl. Reading past the commit boundary yields records whose
+// transactions are undecided, and the markers that say which committed are
+// keyless — the filter drops them. The caller would hold records it cannot
+// classify, silently. Bound the read at your commit boundary with Until, or take
+// the markers with IncludeControl.
+func (l *commitLog) NewReader(opts ...ReadOption) (*Reader, error) {
+	spec, err := l.resolve(opts)
+	if err != nil {
+		return nil, err
 	}
-	return &Reader{
-		ctxReader:   ctxReader,
-		offset:      offset,
+	r := &Reader{
+		offset:      spec.offset,
 		log:         l,
-		uncommitted: uncommitted,
-	}, err
+		uncommitted: spec.uncommitted,
+		noWait:      !spec.follow,
+		spec:        spec,
+	}
+	if spec.prefixSet {
+		r.prefix = newPrefixSource(l, spec)
+	}
+	r.ctxReader, err = l.newSourceReader(spec)
+	return r, err
 }
 
-// NewScanReader implements CommitLog.NewScanReader: a reader for sweeping a
-// static range that terminates at the end of the data instead of parking for
-// appends. It is the same reader RecoverTail uses; exported because every
-// caller doing a bounded scan needs it, and hand-rolling it is how a scan ends
-// up hanging on a watermark that never advances.
-func (l *commitLog) NewScanReader(offset int64) (*Reader, error) {
-	return l.newRecoveryReader(offset)
+// newSourceReader builds the underlying sequential reader for a spec.
+func (l *commitLog) newSourceReader(spec readSpec) (contextReader, error) {
+	if spec.uncommitted {
+		return l.newReaderUncommitted(spec.offset, !spec.follow)
+	}
+	return l.newReaderCommitted(spec.offset, !spec.follow)
 }
 
 // newRecoveryReader returns an uncommitted reader that does NOT block waiting
@@ -64,17 +83,7 @@ func (l *commitLog) NewScanReader(offset int64) (*Reader, error) {
 // scan always terminates even if the reconstructed LEO overshoots the log on
 // disk.
 func (l *commitLog) newRecoveryReader(offset int64) (*Reader, error) {
-	cr, err := l.newReaderUncommitted(offset, true)
-	if err != nil {
-		return nil, err
-	}
-	return &Reader{
-		ctxReader:   cr,
-		offset:      offset,
-		log:         l,
-		uncommitted: true,
-		noWait:      true,
-	}, nil
+	return l.NewReader(From(offset), Uncommitted())
 }
 
 // ReadMessage reads a single message from the underlying CommitLog or blocks
@@ -88,6 +97,55 @@ func (l *commitLog) newRecoveryReader(offset int64) (*Reader, error) {
 // TODO: Should this just return a MessageSet directly instead of a Message and
 // the MessageSet header values?
 func (r *Reader) ReadMessage(ctx context.Context, headersBuf []byte) (SerializedMessage, int64, int64, uint64, error) {
+	for {
+		msg, offset, timestamp, leaderEpoch, err := r.readOne(ctx, headersBuf)
+		if err != nil {
+			return nil, 0, 0, 0, err
+		}
+		if r.spec.untilSet && offset > r.spec.until {
+			// Past the caller's bound: end as if the data had run out, so a
+			// bounded read terminates identically whether the bound or the log
+			// end came first.
+			r.offset = offset
+			return nil, 0, 0, 0, io.EOF
+		}
+		// The sealed portion is already filtered by the digest; this catches
+		// the tail, which has no digest to filter with.
+		if !r.spec.matchesPrefix(msg) {
+			continue
+		}
+		return msg, offset, timestamp, leaderEpoch, nil
+	}
+}
+
+// readOne returns the next record from whichever source is live: the planned,
+// digest-driven one while sealed segments remain, then the sequential reader.
+func (r *Reader) readOne(
+	ctx context.Context, headersBuf []byte) (SerializedMessage, int64, int64, uint64, error) {
+
+	if r.prefix != nil {
+		rec, ok, err := r.prefix.pop()
+		if err != nil {
+			return nil, 0, 0, 0, err
+		}
+		if ok {
+			r.offset = rec.offset + 1
+			return rec.msg, rec.offset, rec.ts, rec.epoch, nil
+		}
+		// Sealed segments exhausted: hand over to the sequential reader,
+		// positioned where planning stopped. From here the read is at the live
+		// tail, where records arrive one at a time and there is nothing to
+		// plan from anyway.
+		if r.prefix.next > r.offset {
+			r.offset = r.prefix.next
+		}
+		r.prefix = nil
+		cr, rerr := r.log.newSourceReader(r.specAt(r.offset))
+		if rerr != nil {
+			return nil, 0, 0, 0, pkgErrors.Wrap(rerr, "failed to reposition reader at the tail")
+		}
+		r.ctxReader = cr
+	}
 RETRY:
 	msg, offset, timestamp, leaderEpoch, err := readMessage(ctx, r.ctxReader, headersBuf)
 	if err != nil {
@@ -104,12 +162,7 @@ RETRY:
 			// ErrSegmentReplaced indicates we attempted to read from a log
 			// segment that was replaced due to compaction, so reinitialize the
 			// contextReader and try again to read from the new segment.
-			if r.uncommitted {
-				r.ctxReader, err = r.log.newReaderUncommitted(r.offset, r.noWait)
-			} else {
-				r.ctxReader, err = r.log.newReaderCommitted(r.offset)
-			}
-			if err != nil {
+			if r.ctxReader, err = r.log.newSourceReader(r.specAt(r.offset)); err != nil {
 				return nil, 0, 0, 0, pkgErrors.Wrap(err, "failed to reinitialize reader")
 			}
 			goto RETRY
@@ -119,6 +172,14 @@ RETRY:
 	}
 	r.offset = offset + 1
 	return msg, offset, timestamp, leaderEpoch, err
+}
+
+// specAt is this reader's spec repositioned to offset, for rebuilding the
+// underlying reader without losing follow/committed semantics.
+func (r *Reader) specAt(offset int64) readSpec {
+	s := r.spec
+	s.offset = offset
+	return s
 }
 
 // ReadMessageMetadata reads a single message and returns only its metadata —
@@ -140,12 +201,7 @@ RETRY:
 		} else if pkgErrors.Cause(err) == ErrCommitLogReadonly && r.log.IsReadonly() {
 			return MessageMetadata{}, newBuf, ErrCommitLogReadonly
 		} else if pkgErrors.Cause(err) == ErrSegmentReplaced {
-			if r.uncommitted {
-				r.ctxReader, err = r.log.newReaderUncommitted(r.offset, r.noWait)
-			} else {
-				r.ctxReader, err = r.log.newReaderCommitted(r.offset)
-			}
-			if err != nil {
+			if r.ctxReader, err = r.log.newSourceReader(r.specAt(r.offset)); err != nil {
 				return MessageMetadata{}, newBuf, pkgErrors.Wrap(err, "failed to reinitialize reader")
 			}
 			payloadBuf = newBuf
@@ -298,6 +354,11 @@ type committedReader struct {
 	hwPos int64
 	hw    int64
 	br    bufReader
+	// noWait ends the read at the high watermark instead of parking for it to
+	// advance. This is what a non-Follow committed reader needs: "committed
+	// data ran out" is an end condition for a bounded pass, not something to
+	// wait through.
+	noWait bool
 }
 
 func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error) {
@@ -309,6 +370,9 @@ func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error)
 		offset := r.hw + 1
 		hw := r.cl.HighWatermark()
 		for hw == r.hw {
+			if r.noWait {
+				return 0, io.EOF
+			}
 			err = r.waitForHW(ctx, hw)
 			if err != nil {
 				return
@@ -352,6 +416,10 @@ LOOP:
 			// HW boundary reached — sync.
 			hw := r.cl.HighWatermark()
 			for hw == r.hw {
+				if r.noWait {
+					err = io.EOF
+					break LOOP
+				}
 				err = r.waitForHW(ctx, hw)
 				if err != nil {
 					break LOOP
@@ -449,8 +517,9 @@ func (r *committedReader) waitForHW(ctx context.Context, hw int64) error {
 }
 
 // newReaderCommitted returns a contextReader which reads only committed data
-// from the log starting at the given offset.
-func (l *commitLog) newReaderCommitted(offset int64) (contextReader, error) {
+// from the log starting at the given offset. With noWait it ends at the high
+// watermark instead of parking for it to advance.
+func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader, error) {
 	var (
 		hw       = l.HighWatermark()
 		hwPos    = int64(-1)
@@ -462,12 +531,13 @@ func (l *commitLog) newReaderCommitted(offset int64) (contextReader, error) {
 	// case when the log is empty.
 	if offset > hw || l.OldestOffset() == -1 {
 		return &committedReader{
-			cl:    l,
-			seg:   nil,
-			pos:   -1,
-			hwSeg: hwSeg,
-			hwPos: hwPos,
-			hw:    hw,
+			cl:     l,
+			seg:    nil,
+			pos:    -1,
+			hwSeg:  hwSeg,
+			hwPos:  hwPos,
+			hw:     hw,
+			noWait: noWait,
 		}, nil
 	}
 
@@ -490,13 +560,14 @@ func (l *commitLog) newReaderCommitted(offset int64) (contextReader, error) {
 		position = entry.Position
 	}
 	return &committedReader{
-		cl:    l,
-		seg:   seg,
-		pos:   position,
-		hwSeg: hwSeg,
-		hwPos: hwPos,
-		hw:    hw,
-		br:    bufReader{seg: seg, pos: position, bufStart: position},
+		cl:     l,
+		seg:    seg,
+		pos:    position,
+		hwSeg:  hwSeg,
+		hwPos:  hwPos,
+		hw:     hw,
+		br:     bufReader{seg: seg, pos: position, bufStart: position},
+		noWait: noWait,
 	}, nil
 }
 

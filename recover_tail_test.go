@@ -68,7 +68,7 @@ func TestRecoverTailTruncatesTornSuffix(t *testing.T) {
 	require.NoError(t, l2.(*commitLog).RecoverTail())
 	// All six real records recovered; the garbage did not extend the tail.
 	require.EqualValues(t, 5, l2.HighWatermark())
-	r, err := l2.NewReader(0, true)
+	r, err := l2.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 	headers := make([]byte, 28)
 	for i := 0; i <= 5; i++ {

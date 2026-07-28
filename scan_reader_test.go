@@ -29,7 +29,7 @@ func TestNewScanReaderStopsAtEndOfData(t *testing.T) {
 		}
 	}
 
-	r, err := l.NewScanReader(0)
+	r, err := l.NewReader(From(0), Uncommitted())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -65,7 +65,7 @@ func TestNewScanReaderUnbackedOffsetIsRefused(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 4096})
 	t.Cleanup(cleanup)
 
-	_, err := l.NewScanReader(0)
+	_, err := l.NewReader(From(0), Uncommitted())
 	require.ErrorIs(t, err, ErrSegmentNotFound, "an empty log must refuse the scan, not fake an empty one")
 
 	// With data present the same call succeeds, so the refusal is about the
@@ -74,7 +74,7 @@ func TestNewScanReaderUnbackedOffsetIsRefused(t *testing.T) {
 	require.NoError(t, aerr)
 	l.SetHighWatermark(offs[0])
 
-	r, err := l.NewScanReader(0)
+	r, err := l.NewReader(From(0), Uncommitted())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -106,7 +106,7 @@ func TestNewScanReaderClampsBelowOldest(t *testing.T) {
 	require.NoError(t, l.TruncateBefore(6))
 	require.Equal(t, int64(6), l.OldestOffset())
 
-	r, err := l.NewScanReader(0) // below the oldest survivor
+	r, err := l.NewReader(From(0), Uncommitted()) // below the oldest survivor
 	require.NoError(t, err, "a start below the oldest record must clamp, not fail")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
