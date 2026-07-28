@@ -71,10 +71,13 @@ func TestReplaceOffloadedWritesNewGenerationAndKeepsTheOld(t *testing.T) {
 	newKey := seg.storeKey
 	seg.RUnlock()
 	require.NotEqual(t, oldKey, newKey, "it must not land on the key being read")
-	require.Equal(t, []string{oldKey}, superseded,
-		"the old object must be reported, not silently dropped")
+	require.Len(t, superseded, 1, "the old object must be queued, not silently dropped")
+	require.Equal(t, oldKey, superseded[0].key)
+	require.Same(t, oldBacking, superseded[0].pin,
+		"the entry must carry the backing readers hold, or nothing can tell when "+
+			"the object has come free")
 
-	// Both objects exist: the caller decides when the old one goes.
+	// Both objects exist: the old one goes on a later pass, once unheld.
 	keys, err := store.List()
 	require.NoError(t, err)
 	require.Contains(t, keys, oldKey, "the superseded object must survive the call")

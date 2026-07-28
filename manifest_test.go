@@ -124,10 +124,17 @@ func TestTierManifestFollowsTheTier(t *testing.T) {
 
 	// A compaction pass rewrites offloaded segments onto new objects.
 	hw := l.HighWatermark()
-	_, superseded, err := l.CleanWithSpec(CleanSpec{
+	_, err = l.CleanWithSpec(CleanSpec{
 		Ceiling: hw + 1, TombstoneGCBelow: hw + 1,
 	})
 	require.NoError(t, err)
+
+	l.tierMu.Lock()
+	superseded := make([]string, 0, len(l.reclaim))
+	for _, e := range l.reclaim {
+		superseded = append(superseded, e.key)
+	}
+	l.tierMu.Unlock()
 	require.NotEmpty(t, superseded, "the fixture must have rewritten something")
 
 	after, err := l.TierManifest()
@@ -135,7 +142,8 @@ func TestTierManifestFollowsTheTier(t *testing.T) {
 	require.NotEqual(t, before, after, "the manifest must follow the rewrite")
 
 	// Crucially it names none of the superseded objects — those are exactly
-	// what a reader would fail on.
+	// what a reader would fail on, and it is also what makes them safe to
+	// reclaim on the next pass.
 	for _, o := range after {
 		require.NotContains(t, superseded, o.LogKey)
 		require.NotContains(t, superseded, o.IndexKey)

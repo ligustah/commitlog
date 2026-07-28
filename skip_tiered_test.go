@@ -27,11 +27,11 @@ func (s *writeCountingStore) Delete(key string) error {
 	return s.FileSegmentStore.Delete(key)
 }
 
-// SkipTiered must mean ZERO tier writes, not "fewer". No budget can express
+// A read-only tier must mean ZERO tier writes, not "fewer". No budget can express
 // that — both rewrite budgets guarantee at least one rewrite so debt always
 // drains — and for a replica that does not own tier writes, a single rewrite
 // into shared storage is corruption rather than duplicated work.
-func TestSkipTieredMakesNoTierWrites(t *testing.T) {
+func TestReadOnlyTierMakesNoTierWrites(t *testing.T) {
 	dir := tempDir(t)
 	fs, err := NewFileSegmentStore(filepath.Join(dir, "store"))
 	require.NoError(t, err)
@@ -44,7 +44,7 @@ func TestSkipTieredMakesNoTierWrites(t *testing.T) {
 		SegmentStore:     store,
 		DisableAutoClean: true,
 		// Tier retention that would otherwise reclaim aggressively: a delete is
-		// a tier write too, so SkipTiered has to suppress it as well.
+		// a tier write too, so read-only has to suppress it as well.
 		MaxTierBytes: 1,
 	})
 	defer cleanup()
@@ -87,19 +87,22 @@ func TestSkipTieredMakesNoTierWrites(t *testing.T) {
 
 	store.puts, store.deletes = 0, 0
 
+	l.SetTierReadOnly(true)
 	hw := l.HighWatermark()
-	_, superseded, err := l.CleanWithSpec(CleanSpec{
+	_, err = l.CleanWithSpec(CleanSpec{
 		Ceiling:          hw + 1,
 		TombstoneGCBelow: hw + 1,
-		RewriteBudget:    time.Hour, // generous: only SkipTiered may hold it back
-		SkipTiered:       true,
+		RewriteBudget:    time.Hour, // generous: only the read-only tier may hold it back
 	})
 	require.NoError(t, err)
 
 	require.Zero(t, store.puts, "a skipped tier must take no uploads at all")
 	require.Zero(t, store.deletes,
-		"a retention delete is a tier write too, so it must be suppressed as well")
-	require.Empty(t, superseded, "nothing was superseded, so nothing to hand back")
+		"a retention delete is a tier write too, and so is reclaiming a "+
+			"superseded object, so both must be suppressed as well")
+	l.tierMu.Lock()
+	require.Empty(t, l.reclaim, "nothing was rewritten, so nothing was superseded")
+	l.tierMu.Unlock()
 
 	// No generation moved.
 	l.mu.RLock()
@@ -108,7 +111,7 @@ func TestSkipTieredMakesNoTierWrites(t *testing.T) {
 		if s.store != nil {
 			if before, ok := keysBefore[s.BaseOffset]; ok {
 				require.Equal(t, before, s.storeKey,
-					"segment %d was rewritten despite SkipTiered", s.BaseOffset)
+					"segment %d was rewritten despite a read-only tier", s.BaseOffset)
 			}
 		}
 		s.RUnlock()
@@ -121,7 +124,7 @@ func TestSkipTieredMakesNoTierWrites(t *testing.T) {
 // The point of skipping the tier is that LOCAL compaction still happens — a
 // non-owner wants its own disk reclaimed, it just must not touch shared
 // storage.
-func TestSkipTieredStillCompactsLocalSegments(t *testing.T) {
+func TestReadOnlyTierStillCompactsLocalSegments(t *testing.T) {
 	dir := tempDir(t)
 	store, err := NewFileSegmentStore(filepath.Join(dir, "store"))
 	require.NoError(t, err)
@@ -169,12 +172,12 @@ func TestSkipTieredStillCompactsLocalSegments(t *testing.T) {
 	}
 	l.mu.RUnlock()
 
+	l.SetTierReadOnly(true)
 	hw := l.HighWatermark()
-	_, _, err = l.CleanWithSpec(CleanSpec{
+	_, err = l.CleanWithSpec(CleanSpec{
 		Ceiling:          hw + 1,
 		TombstoneGCBelow: hw + 1,
 		RewriteBudget:    time.Hour,
-		SkipTiered:       true,
 	})
 	require.NoError(t, err)
 

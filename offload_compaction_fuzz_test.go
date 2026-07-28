@@ -56,15 +56,27 @@ func fzOffCompSetup(t *testing.T, s *fzStream) (*commitLog, Options, *fzFaultSto
 
 // fzStoreBaseOffsets returns the base offsets the store currently holds objects
 // for, so a leaked object outlives its segment visibly.
-func fzStoreBaseOffsets(t *testing.T, store *fzFaultStore) map[int64]bool {
+func fzStoreBaseOffsets(t *testing.T, store *fzFaultStore, cl *commitLog) map[int64]bool {
 	t.Helper()
 	keys, err := store.List()
 	require.NoError(t, err)
+
+	// Objects the log has queued for reclamation are expected to outlive their
+	// segment for a while: a rewrite supersedes one, retention may then drop the
+	// segment entirely, and the superseded object waits for a later pass. It is
+	// accounted for rather than lost, which fzNoQueuedLeak proves by draining it.
+	queued := map[string]bool{}
+	cl.tierMu.Lock()
+	for _, e := range cl.reclaim {
+		queued[e.key] = true
+	}
+	cl.tierMu.Unlock()
+
 	out := map[int64]bool{}
 	for _, k := range keys {
 		// The store holds the tier manifest alongside the segment objects; it
 		// describes them rather than being one.
-		if k == manifestKey {
+		if k == manifestKey || queued[k] {
 			continue
 		}
 		stem := k
@@ -76,6 +88,46 @@ func fzStoreBaseOffsets(t *testing.T, store *fzFaultStore) map[int64]bool {
 		out[off] = true
 	}
 	return out
+}
+
+// fzNoQueuedLeak drains the reclamation queue and proves it empties: every
+// object the log deferred is deleted, and no object survives without a segment.
+//
+// The fault store can refuse a delete, and a refused one stays queued by design
+// — so this retries a bounded number of passes rather than demanding the first
+// one succeed.
+func fzNoQueuedLeak(t *testing.T, cl *commitLog, store *fzFaultStore) {
+	t.Helper()
+	queued := func() int {
+		cl.tierMu.Lock()
+		defer cl.tierMu.Unlock()
+		return len(cl.reclaim)
+	}
+	for i := 0; i < 8 && queued() > 0; i++ {
+		hw := cl.HighWatermark()
+		if _, err := cl.CleanWithSpec(CleanSpec{
+			Ceiling: hw + 1, TombstoneGCBelow: hw + 1, TombstoneRetention: time.Hour,
+		}); err != nil {
+			return // an injected fault; the pass's own assertions cover that
+		}
+	}
+	if queued() > 0 {
+		return // still faulting; not this check's business
+	}
+	for base := range fzStoreBaseOffsets(t, store, cl) {
+		found := false
+		cl.mu.RLock()
+		for _, sg := range cl.segments {
+			if sg.BaseOffset == base {
+				found = true
+				break
+			}
+		}
+		cl.mu.RUnlock()
+		require.True(t, found,
+			"after draining, the store still holds an object for base offset %d "+
+				"with no such segment — the deferred reclamation leaked it", base)
+	}
 }
 
 func FuzzOffloadCompactionRetention(f *testing.F) {
@@ -161,21 +213,17 @@ func FuzzOffloadCompactionRetention(f *testing.F) {
 				}
 			case 1: // compact
 				hw := cl.HighWatermark()
-				_, superseded, err := cl.CleanWithSpec(CleanSpec{
+				_, err := cl.CleanWithSpec(CleanSpec{
 					Ceiling:            hw + 1,
 					TombstoneGCBelow:   hw + 1,
 					TombstoneRetention: time.Hour,
 				})
 				require.NoError(t, err)
-				// Deleting the superseded generations is the CALLER's job — a
-				// rewrite hands them back rather than removing them, so a reader
-				// holding the old generation can finish. Ignoring them leaks an
-				// object per rewrite, which the no-orphans assertion below
-				// catches; doing it here is what a real caller does. Safe
-				// immediately in a single-threaded harness with no live reader.
-				for _, k := range superseded {
-					require.NoError(t, store.Delete(k))
-				}
+				// Nothing to delete here. The log reclaims the generations its
+				// own rewrites supersede, on a later pass once no reader holds
+				// them. This harness used to do it by hand, which is precisely
+				// the caller obligation that turned out to be misplaced: the
+				// caller cannot know when a reader has finished, and the log can.
 			case 2: // retain (drop a prefix)
 				if newest > 1 {
 					require.NoError(t, cl.TruncateBefore(int64(1+s.intn(int(newest)))))
@@ -192,7 +240,7 @@ func FuzzOffloadCompactionRetention(f *testing.F) {
 			// removes the log and index objects together, so anything the store
 			// still holds below the oldest surviving offset is a leak.
 			oldest := cl.OldestOffset()
-			for base := range fzStoreBaseOffsets(t, store) {
+			for base := range fzStoreBaseOffsets(t, store, cl) {
 				found := false
 				cl.mu.RLock()
 				for _, sg := range cl.segments {
@@ -207,6 +255,12 @@ func FuzzOffloadCompactionRetention(f *testing.F) {
 					base, oldest)
 			}
 		}
+
+		// The queue is a deferral, not a dustbin. With no reader holding
+		// anything, a pass must drain it completely and leave nothing behind —
+		// which is what makes exempting queued objects above a postponement of
+		// the leak check rather than a hole in it.
+		fzNoQueuedLeak(t, cl, store)
 
 		// Crash and reopen: offloaded segments come back from the store, the
 		// local tail recovers, and the surviving committed state is unchanged.

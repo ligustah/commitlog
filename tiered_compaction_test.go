@@ -64,14 +64,15 @@ func TestCompactionRewritesOffloadedSegments(t *testing.T) {
 	require.NotEmpty(t, keysBefore, "the fixture needs offloaded segments")
 
 	hw := l.HighWatermark()
-	_, superseded, err := l.CleanWithSpec(CleanSpec{
+	_, err = l.CleanWithSpec(CleanSpec{
 		Ceiling:          hw + 1,
 		TombstoneGCBelow: hw + 1,
 	})
 	require.NoError(t, err)
 
 	// At least one offloaded segment must have been rewritten: a new generation,
-	// and its previous objects handed back rather than deleted or leaked.
+	// and its previous objects queued for reclamation rather than deleted under
+	// a live reader or leaked forever.
 	advanced := 0
 	l.mu.RLock()
 	for _, s := range l.segments {
@@ -88,26 +89,47 @@ func TestCompactionRewritesOffloadedSegments(t *testing.T) {
 	require.Positive(t, advanced,
 		"compaction must now reach offloaded segments — that exemption is what "+
 			"froze garbage into the tier permanently")
-	require.NotEmpty(t, superseded,
-		"a rewrite must hand its superseded objects back to the caller")
 
-	// Those objects still exist: deleting them is the caller's decision, because
-	// a reader that opened the segment beforehand is entitled to finish.
+	l.tierMu.Lock()
+	queued := append([]pendingReclaim(nil), l.reclaim...)
+	l.tierMu.Unlock()
+	require.NotEmpty(t, queued, "a rewrite must queue the objects it superseded")
+
+	// They survive the pass that superseded them. A reader that opened the
+	// segment beforehand is still on the old object and is entitled to finish,
+	// and this pass has no way to know it has gone.
 	keys, err := store.List()
 	require.NoError(t, err)
-	for _, k := range superseded {
-		require.Contains(t, keys, k,
-			"a superseded object must survive the pass for the caller to delete")
+	for _, e := range queued {
+		require.Contains(t, keys, e.key,
+			"a superseded object must outlive the pass that superseded it")
 	}
+
+	// A later pass reclaims them. Nothing holds the backings by now, so this one
+	// deletes rather than deferring again — the queue drains on its own instead
+	// of growing until a caller thinks to empty it.
+	_, err = l.CleanWithSpec(CleanSpec{Ceiling: hw + 1, TombstoneGCBelow: hw + 1})
+	require.NoError(t, err)
+
+	keys, err = store.List()
+	require.NoError(t, err)
+	for _, e := range queued {
+		require.NotContains(t, keys, e.key,
+			"a later pass must delete the superseded object: leaving it is the "+
+				"leak that made this the caller's problem in the first place")
+	}
+	l.tierMu.Lock()
+	require.Empty(t, l.reclaim, "a drained entry must leave the queue")
+	l.tierMu.Unlock()
 
 	// And the log still reads correctly across the rewritten tier.
 	got := readFrom(t, l)
 	require.NotEmpty(t, got)
 }
 
-// A log with no SegmentStore must take exactly the path it always did — no
-// superseded keys, no behavioural change from the tiering machinery.
-func TestCompactionWithoutAStoreReportsNoSupersededObjects(t *testing.T) {
+// A log with no SegmentStore must take exactly the path it always did — nothing
+// queued for reclamation, no behavioural change from the tiering machinery.
+func TestCompactionWithoutAStoreQueuesNothingToReclaim(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             tempDir(t),
 		MaxSegmentBytes:  128,
@@ -124,7 +146,9 @@ func TestCompactionWithoutAStoreReportsNoSupersededObjects(t *testing.T) {
 	}
 	l.SetHighWatermark(last)
 
-	_, superseded, err := l.CleanWithSpec(CleanSpec{Ceiling: last + 1})
+	_, err := l.CleanWithSpec(CleanSpec{Ceiling: last + 1})
 	require.NoError(t, err)
-	require.Empty(t, superseded, "no store means nothing can be superseded")
+	l.tierMu.Lock()
+	require.Empty(t, l.reclaim, "no store means nothing can be superseded")
+	l.tierMu.Unlock()
 }

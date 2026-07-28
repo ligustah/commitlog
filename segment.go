@@ -1445,24 +1445,30 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 //     serve pre-rewrite reads.
 //  4. swap in a backing over the new key.
 //
-// The superseded keys are RETURNED rather than deleted here. A reader that
+// The superseded objects are QUEUED rather than deleted here. A reader that
 // opened this segment before the swap holds a backing over the old key and is
 // entitled to finish; deleting underneath it would turn a rewrite into a read
-// error. The caller deletes them once no such reader can remain — which is also
-// why deletion must be explicit rather than implied by the overwrite it
-// replaces: a rewrite that empties a segment leaves the old objects behind with
-// nothing to overwrite them.
-func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]string, error) {
+// error. Each returned entry carries the backing that was serving the object,
+// so the log can tell when the last such reader is gone — see pendingReclaim.
+// That is also why deletion must be explicit rather than implied by the
+// overwrite it replaces: a rewrite that empties a segment leaves the old
+// objects behind with nothing to overwrite them.
+func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]pendingReclaim, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.store == nil {
 		return nil, errors.New("commitlog: segment is not offloaded")
 	}
 
+	// The backing this segment is serving reads from right now. It becomes the
+	// superseded one below, and whoever holds it is why its object cannot be
+	// deleted yet. Read here, under the same lock the swap happens under.
+	oldBacking, _ := s.backing.(*storeBacking)
+
 	var (
 		newKey, freshIndexKey = newStoreKeys(s.BaseOffset)
 		newIndexKey           string
-		superseded            = []string{s.storeKey}
+		superseded            = []pendingReclaim{{key: s.storeKey, pin: oldBacking}}
 	)
 
 	size, err := fresh.backing.Size()
@@ -1481,7 +1487,13 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]s
 		if err := s.store.Put(newIndexKey, r, isize); err != nil {
 			return nil, errors.Wrap(err, "put rewritten index")
 		}
-		superseded = append(superseded, s.indexKey)
+		// No pin: an index object has no long-lived holder to count. It is
+		// fetched whole into indexCache, which is invalidated below, so a reader
+		// either already has its bytes or will fetch the new key. Only a fetch
+		// already in flight can still be reading this object, and what covers
+		// that is the deferral — the entry is not considered for deletion until
+		// a later pass, by which time a single in-flight request is long done.
+		superseded = append(superseded, pendingReclaim{key: s.indexKey})
 	}
 
 	meta := offloadMeta{
@@ -1894,6 +1906,10 @@ type segmentScanner struct {
 	// letting scans hit the segments' own caches instead left each scanned
 	// segment holding one for its lifetime (run 32: ~500MB-1GB transients).
 	cache *blockCache
+	// pin is the claim this scan holds on a tiered backing, released on Close.
+	// Nil for a local segment, which has nothing to reclaim. It is what keeps a
+	// superseded object alive while this scan is still reading it.
+	pin *storeBacking
 }
 
 // segmentScans counts scanner constructions; tests assert on it to prove a
@@ -1912,8 +1928,14 @@ func newSegmentScannerCache(segment *segment, c *blockCache) *segmentScanner {
 	// so reading the field bare races it. The scan then keeps the backing it
 	// started on, which is the same guarantee a rewrite already gives a reader —
 	// the object a reader opened is never the one a rewrite replaces.
+	//
+	// The claim is registered under that SAME lock, not after it. A rewrite
+	// decides an object is unreferenced while holding the write lock; acquiring
+	// outside it lets a scanner take a backing the rewrite has already judged
+	// finished with, and the object is then deleted under a live reader.
 	segment.RLock()
 	backing := segment.backing
+	pin := acquireBacking(backing)
 	segment.RUnlock()
 	// Only where it pays. A nil stream reads straight through to the backing,
 	// so a local scan behaves exactly as it did before streaming existed.
@@ -1925,6 +1947,7 @@ func newSegmentScannerCache(segment *segment, c *blockCache) *segmentScanner {
 		s:      segment,
 		cache:  c,
 		stream: stream,
+		pin:    pin,
 	}
 }
 
@@ -1932,6 +1955,14 @@ func newSegmentScannerCache(segment *segment, c *blockCache) *segmentScanner {
 // whatever the backing handed out — a file descriptor locally, an open HTTP
 // response against an object store.
 func (s *segmentScanner) Close() error {
+	// The pin outlives the stream deliberately. Scan releases the stream as soon
+	// as it hits the end (see there), but the scanner may still read through the
+	// backing afterwards, and the object has to stay until the scan is done with
+	// it — which is here. Cleared so a second Close does not double-release.
+	if s.pin != nil {
+		s.pin.release()
+		s.pin = nil
+	}
 	return s.stream.Close()
 }
 

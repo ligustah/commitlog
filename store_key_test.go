@@ -80,10 +80,11 @@ func TestRewriteDoesNotReuseTheKeyBeingRead(t *testing.T) {
 	seg.RUnlock()
 
 	require.NotEqual(t, before, after, "the rewrite must not land on the live key")
-	require.Equal(t, []string{before}, superseded)
+	require.Len(t, superseded, 1)
+	require.Equal(t, before, superseded[0].key)
 
-	// Both objects exist: removing the old one is the caller's decision, made
-	// once no reader can still be on it.
+	// Both objects exist: the old one is removed by a later pass, once no reader
+	// can still be on it.
 	keys, err := store.List()
 	require.NoError(t, err)
 	require.Contains(t, keys, before)

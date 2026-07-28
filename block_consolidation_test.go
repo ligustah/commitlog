@@ -126,7 +126,7 @@ func TestCleanVerifiedFloor(t *testing.T) {
 	// Strip everything decided: the floor must reach the end of the sealed
 	// prefix and STOP there, even though StripBelow (≈ an LSO at the tip)
 	// reaches into the active segment.
-	floor, _, err := l.CleanWithSpec(CleanSpec{
+	floor, err := l.CleanWithSpec(CleanSpec{
 		Ceiling: hw, StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
 	})
 	require.NoError(t, err)
@@ -134,14 +134,14 @@ func TestCleanVerifiedFloor(t *testing.T) {
 		"floor must cover exactly the sealed prefix (activeBase %d)", activeBase)
 
 	// A converged second pass proves the same floor via digest skips.
-	floor2, _, err := l.CleanWithSpec(CleanSpec{
+	floor2, err := l.CleanWithSpec(CleanSpec{
 		Ceiling: hw, StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, floor, floor2)
 
 	// No strip semantics ⇒ nothing verified.
-	floor3, _, err := l.CleanWithSpec(CleanSpec{Ceiling: hw})
+	floor3, err := l.CleanWithSpec(CleanSpec{Ceiling: hw})
 	require.NoError(t, err)
 	require.Equal(t, int64(-1), floor3)
 }
@@ -262,7 +262,7 @@ func TestIncrementalCleanBudget(t *testing.T) {
 	passes := 0
 	var lastFloor int64 = -2
 	for debt() > 0 && passes < 50 {
-		floor, _, err := l.CleanWithSpec(spec)
+		floor, err := l.CleanWithSpec(spec)
 		require.NoError(t, err)
 		passes++
 		d := debt()
@@ -325,7 +325,7 @@ func TestConsolidationOnlyPassForNonCompactedLog(t *testing.T) {
 
 	// Budgeted passes drain the debt; every record survives verbatim.
 	for pass := 0; pass < 30; pass++ {
-		_, _, err := l.CleanWithSpec(CleanSpec{maxRewrites: 2})
+		_, err := l.CleanWithSpec(CleanSpec{maxRewrites: 2})
 		require.NoError(t, err)
 		if _, n := counts(); n < before/10 {
 			break
@@ -360,7 +360,7 @@ func TestCleanScansLeaveSegmentCachesCold(t *testing.T) {
 	}
 	l.SetHighWatermark(l.NewestOffset())
 
-	_, _, err := l.CleanWithSpec(CleanSpec{Ceiling: l.NewestOffset()})
+	_, err := l.CleanWithSpec(CleanSpec{Ceiling: l.NewestOffset()})
 	require.NoError(t, err)
 
 	l.mu.RLock()

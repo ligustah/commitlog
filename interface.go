@@ -39,6 +39,16 @@ package commitlog
 // deletes data that process is serving. See both methods for the detail; the
 // short version is that "unreferenced by me" is not "unreferenced".
 //
+// A log DOES delete on its own, in one narrow case: an object its own rewrite
+// superseded, which it uploaded, which its markers named, and which nothing it
+// serves reads any more. That is the narrowest claim available — it is not
+// "unreferenced by me", it is "written by me and since replaced by me" — and it
+// only ever happens while this log owns tier writes. A reader in ANOTHER process
+// that adopted the manifest before the rewrite is on the superseded object and
+// must re-read the manifest to follow it, exactly as it always had to; what the
+// log guarantees it is a published manifest naming the replacement, at least one
+// clean pass before the old object goes.
+//
 // tla/MultiWriter.tla models these outcomes. It is evidence for the contract
 // rather than a description of a defence, since the log has none — including
 // the deterministic-key overwrite that keys used to permit and no longer do,
@@ -186,12 +196,16 @@ type CommitLog interface {
 	// DeleteStoreObjects removes objects from the SegmentStore, returning those
 	// it removed. It is refused outright while the tier is read-only.
 	//
-	// This is the counterpart to the keys CleanWithSpec hands back: a rewrite
-	// cannot delete the object it supersedes, because a reader that opened the
-	// segment first is still reading it, so the caller deletes them once no such
-	// reader can remain. Deleting is idempotent — a key that is already gone is
-	// not an error — so a caller retrying after a partial failure does not have
-	// to tell the cases apart.
+	// An OPERATOR TOOL, not part of the normal path: a log reclaims what its own
+	// rewrites supersede (see CleanWithSpec). What is left for this is garbage
+	// this log did not create and cannot reason about — objects orphaned by a
+	// crash, or left on a shared store by a process that is gone. Pair it with
+	// UnreferencedObjects, and read the caveat there about what "unreferenced"
+	// can and cannot mean on a store with more than one writer.
+	//
+	// Deleting is idempotent — a key that is already gone is not an error — so a
+	// caller retrying after a partial failure does not have to tell the cases
+	// apart.
 	DeleteStoreObjects(keys []string) ([]string, error)
 
 	// TierManifest returns what the STORE says its tier holds, read from the
@@ -301,21 +315,15 @@ type CommitLog interface {
 	// one, whose records keep their headers and abort markers even below
 	// the LSO.
 	//
-	// It also returns the SUPERSEDED STORE OBJECTS: when the pass rewrote a
-	// segment whose bytes live in a SegmentStore, the rewrite became a new
-	// objects of that segment, and the keys it stops referencing
-	// are returned here. They are deliberately NOT deleted:
-	//   - a reader that opened the segment before the rewrite holds a backing
-	//     over the old key and is entitled to finish; deleting underneath it
-	//     would turn a rewrite into a read error, and only the caller knows
-	//     when no such reader remains;
-	//   - where replicas share a tier, writes to those objects belong to
-	//     whichever node holds tier-write ownership, which this layer does not
-	//     know about.
-	// Deleting them is therefore the caller's call, and must be explicit — a
-	// rewrite that empties a segment leaves objects with nothing to overwrite
-	// them. Empty for a log with no SegmentStore.
-	CleanWithSpec(spec CleanSpec) (verified int64, superseded []string, err error)
+	// A pass that rewrites a segment whose bytes live in a SegmentStore leaves
+	// the objects it stopped referencing behind, and reclaims them ITSELF: the
+	// log tracks the readers still on a superseded object and deletes it on a
+	// later pass, once none remain and a published manifest has stopped naming
+	// it. Nothing about that is the caller's to drive. A pass whose tier is
+	// read-only reclaims nothing, since deleting is a store write like any
+	// other, and one interrupted by a crash leaves an orphan — costing storage,
+	// not correctness, and reported by UnreferencedObjects.
+	CleanWithSpec(spec CleanSpec) (verified int64, err error)
 
 	// NotifyLEO registers and returns a channel which is closed when messages
 	// past the given log end offset are added to the log. If the given offset

@@ -35,10 +35,10 @@ type compactCleaner struct {
 	cache *RemoteIndexCache
 	// superseded collects the store objects this pass replaced. They are NOT
 	// deleted here: a reader that opened a segment before its rewrite holds a
-	// backing over the old key and is entitled to finish, and in a shared tier
-	// the layer above owns writes to those objects. Handed to the Clean caller
-	// to delete when it knows both are safe.
-	superseded []string
+	// backing over the old key and is entitled to finish. Each entry carries
+	// that backing, and the log queues them for a later pass to reclaim once
+	// nothing holds it — see pendingReclaim and commitLog.drainReclaim.
+	superseded []pendingReclaim
 }
 
 // NewCompactCleaner returns a new cleaner which performs log compaction by
@@ -304,12 +304,12 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		if tiered {
 			b = tierBudget
 		}
-		// SkipTiered is not a budget: no rewrite of a tiered segment happens at
+		// A read-only tier is not a budget: no rewrite of a tiered segment happens at
 		// all, because for a caller that does not own tier writes a single one
 		// is corruption of shared storage rather than wasted work. It still
 		// counts as skipped, so a governor of records left in the tier is not
 		// removed ahead of them.
-		if tiered && spec.SkipTiered {
+		if tiered && spec.skipTiered {
 			skipped = true
 			continue
 		}
@@ -861,11 +861,11 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	// and the segment object itself carries on — so the caller keeps the SAME
 	// segment rather than the working copy, which is only the vehicle.
 	if seg.isOffloaded() {
-		superseded, err := seg.ReplaceOffloaded(cleaned, c.cache)
+		reclaim, err := seg.ReplaceOffloaded(cleaned, c.cache)
 		if err != nil {
 			return nil, removed, nil, err
 		}
-		c.superseded = append(c.superseded, superseded...)
+		c.superseded = append(c.superseded, reclaim...)
 		if err := cleaned.Delete(); err != nil { // the local vehicle is done
 			return nil, removed, nil, err
 		}

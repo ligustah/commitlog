@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pkg/errors"
 )
@@ -280,9 +281,49 @@ type storeBacking struct {
 	key   string
 	size  int64
 
+	// refs counts the readers currently holding this backing — scans that took
+	// it and have not closed. A rewrite swaps the segment onto a new object and
+	// queues this one for reclamation; the object may only be deleted once this
+	// reaches zero, because a reader that took the backing before the swap is
+	// still reading the old object and is entitled to finish.
+	//
+	// Atomic rather than under mu: mu is held across store I/O in refill, and a
+	// reader acquiring a backing has no business waiting behind someone else's
+	// fetch. The ordering that matters is not with reads anyway — it is that the
+	// acquire happens under the SEGMENT lock, so it cannot slip past the swap
+	// that decided this backing was finished with. See segmentScanner.
+	refs atomic.Int64
+
 	mu     sync.Mutex
 	buf    []byte // read-ahead buffer contents
 	bufOff int64  // logical offset of buf[0]; -1 when empty
+}
+
+// acquire registers a reader against this backing. Callers MUST pair it with
+// release, and MUST call it while holding the read lock of the segment they
+// took the backing from — see the field comment on refs.
+func (b *storeBacking) acquire() { b.refs.Add(1) }
+
+// release drops a reader's claim.
+func (b *storeBacking) release() { b.refs.Add(-1) }
+
+// referenced reports whether any reader still holds this backing. Only
+// meaningful for a backing a segment has already swapped away from: while a
+// segment still serves reads from it, a zero here is a lull, not a conclusion.
+func (b *storeBacking) referenced() bool { return b.refs.Load() > 0 }
+
+// acquireBacking registers a reader against b when b is one that can be
+// reclaimed, and returns what to release. A local file backing is not
+// reference-counted: nothing supersedes it out from under a reader, since a
+// local rewrite renames over the source and the reader's file handle stays
+// valid until it closes.
+func acquireBacking(b segmentBacking) *storeBacking {
+	sb, ok := b.(*storeBacking)
+	if !ok {
+		return nil
+	}
+	sb.acquire()
+	return sb
 }
 
 // newStoreBacking opens a read-only backing over key in store. It fetches the

@@ -97,10 +97,17 @@ type commitLog struct {
 	// flipping it.
 	tierMu       sync.RWMutex
 	tierReadOnly bool
-	syncMu       sync.Mutex
-	syncDurable  int64
-	syncFlushing bool
-	syncDone     chan struct{}
+	// reclaim holds store objects a rewrite superseded, waiting for the readers
+	// still on them to finish. Drained at the start of a clean pass.
+	reclaim []pendingReclaim
+	// tierManifestStale records that the last manifest publish did not land, so
+	// the manifest may still name a superseded object. Reclamation stops while
+	// it is set rather than delete something the manifest points at.
+	tierManifestStale bool
+	syncMu            sync.Mutex
+	syncDurable       int64
+	syncFlushing      bool
+	syncDone          chan struct{}
 	// syncWindow is how long the next flush's leader holds the door open for
 	// other committers to join it, set to the previous flush's duration, and
 	// syncJoined counts how many joined the flush in flight.
@@ -555,6 +562,80 @@ func (l *commitLog) SetTierReadOnly(readOnly bool) {
 // does not own.
 var errTierReadOnly = errors.New(
 	"commitlog: this log's tier is read-only — it does not own writes to the store")
+
+// pendingReclaim is one store object a rewrite superseded, waiting to be
+// deleted.
+//
+// pin is the backing that was serving the object at the moment it was
+// superseded, or nil where the object had no long-lived holder. The object is
+// deletable once nothing still holds the pin: a reader that took the backing
+// before the swap is reading the OLD object, and deleting it underneath them
+// turns a rewrite into a read error.
+type pendingReclaim struct {
+	key string
+	pin *storeBacking
+}
+
+// queueReclaim takes ownership of objects a rewrite superseded. They are
+// deleted by a later drainReclaim, never here — see the type doc.
+func (l *commitLog) queueReclaim(entries []pendingReclaim) {
+	if len(entries) == 0 {
+		return
+	}
+	l.tierMu.Lock()
+	l.reclaim = append(l.reclaim, entries...)
+	l.tierMu.Unlock()
+}
+
+// drainReclaim deletes the superseded objects no reader still holds, and keeps
+// the rest for a later pass.
+//
+// Called at the START of a clean pass, which is what makes it safe on two
+// counts that a delete at the point of rewrite cannot satisfy:
+//
+//   - Readers. A scan that took a backing before the rewrite is still on the old
+//     object. By the next pass most are long gone, and one that is not simply
+//     waits another pass — the queue is not a deadline.
+//   - The manifest. Deleting an object the manifest still names leaves a
+//     dangling reference: a reader that trusts the manifest opens a key that is
+//     gone. The pass that queued these entries republished the manifest over the
+//     NEW keys before returning, so by now nothing names them. If that publish
+//     failed the queue is not drained at all (see tierManifestStale) — a crash
+//     or an error between the two leaves an orphan, which UnreferencedObjects
+//     reports and which costs storage rather than correctness.
+//
+// Errors are not returned. A store that refuses a delete has cost this log some
+// space, not its consistency, and failing a clean — which may have just made a
+// retention deadline — because a deletion of already-dead bytes did not land
+// would be the worse trade. The entry stays queued and the next pass retries.
+func (l *commitLog) drainReclaim() {
+	if l.SegmentStore == nil {
+		return
+	}
+	l.tierMu.Lock()
+	if l.tierReadOnly || l.tierManifestStale || len(l.reclaim) == 0 {
+		l.tierMu.Unlock()
+		return
+	}
+	queued := l.reclaim
+	l.reclaim = nil
+	l.tierMu.Unlock()
+
+	kept := make([]pendingReclaim, 0, len(queued))
+	for _, e := range queued {
+		if e.pin != nil && e.pin.referenced() {
+			kept = append(kept, e)
+			continue
+		}
+		if err := l.SegmentStore.Delete(e.key); err != nil {
+			kept = append(kept, e)
+		}
+	}
+
+	l.tierMu.Lock()
+	l.reclaim = append(kept, l.reclaim...)
+	l.tierMu.Unlock()
+}
 
 // DeleteStoreObjects removes objects from the SegmentStore. See the interface
 // doc.
@@ -1575,28 +1656,15 @@ type CleanSpec struct {
 	// Both budgets still guarantee at least one rewrite, so debt in either tier
 	// always drains rather than deadlocking under a small budget.
 	TierRewriteBudget time.Duration
-	// SkipTiered makes the pass leave segments whose bytes live in a
-	// SegmentStore ENTIRELY alone: no rewrite, and no tier retention. Local
-	// segments compact and retain normally.
+	// skipTiered leaves segments whose bytes live in a SegmentStore entirely
+	// alone: no rewrite, and no tier retention. Local segments compact and
+	// retain as usual.
 	//
-	// This exists because no budget can express it. Both rewrite budgets
-	// guarantee at least one rewrite so debt always drains, so
-	// TierRewriteBudget: 0 means "the shared budget", never "none". For a
-	// caller that merely wants to spend less on the tier that guarantee is
-	// right; for one that must not WRITE to the tier at all it is a hole.
-	//
-	// The case it is for: where replicas share a tier, writes to a stream's
-	// objects belong to whichever node holds tier-write ownership. A non-owner
-	// still wants to compact its own local log — it just must not touch shared
-	// storage, and a rewrite there is corruption rather than duplicated work.
-	// Retention is included because deleting a tier's copy is a tier write too.
-	//
-	// Consequence worth knowing: a pass that skips the tier cannot remove a
-	// record that GOVERNS one still in it — an expired tombstone, or a control
-	// marker below StripBelow — because the records it governs were not
-	// rewritten. Those removals wait for a pass that does own the tier. Skipping
-	// is otherwise free: local compaction proceeds exactly as usual.
-	SkipTiered bool
+	// Unexported deliberately. Whether this log may write to its store is a
+	// property of the LOG, not of one pass — see Options.TierReadOnly and
+	// SetTierReadOnly — and offering both invited a caller to set them to
+	// disagree. CleanWithSpec derives this from the log's current mode.
+	skipTiered bool
 	// TierWriter is the identity stamped into any store objects this pass
 	// writes. Set from the log's current value by CleanWithSpec; a caller
 	// setting it directly overrides that for the pass.
@@ -1612,13 +1680,13 @@ func (l *commitLog) Clean() error {
 		spec.TombstoneGCBelow = l.HighWatermark()
 		spec.TombstoneRetention = l.Options.CompactTombstoneRetention
 	}
-	_, _, err := l.CleanWithSpec(spec)
+	_, err := l.CleanWithSpec(spec)
 	return err
 }
 
 // CleanWithSpec applies retention and a transaction-aware compaction pass.
 // See the interface doc for the returned verified floor.
-func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, []string, error) {
+func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.mu.RLock()
@@ -1628,15 +1696,26 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, []string, error) {
 		// A read-only tier is left entirely alone, whatever the spec asked for:
 		// a rewrite and a tier retention delete are both writes to a store this
 		// log does not own. Local compaction proceeds exactly as usual.
-		spec.SkipTiered = true
+		spec.skipTiered = true
 	}
-	// Drained per pass, under cleanMu, so the keys returned belong to this call.
+	// Reclaim what EARLIER passes superseded, before this pass adds to the queue.
+	// Deliberately first: the objects queued below are the ones this pass is
+	// still installing, and the manifest that stops naming them is not written
+	// until the end of it.
+	l.drainReclaim()
+
+	// Collected per pass, under cleanMu, so the entries queued belong to this
+	// call.
 	l.compactCleaner.superseded = nil
 	cleaned, epochCache, verified, cleanErr := l.clean(spec, oldSegments)
 	superseded := l.compactCleaner.superseded
 	l.compactCleaner.superseded = nil
 	if cleaned == nil {
-		return -1, superseded, cleanErr
+		// Nothing was installed, but a rewrite may still have landed new objects
+		// before the pass failed, and the segments it swapped are on them. The
+		// superseded ones are this log's garbage either way.
+		l.queueReclaim(superseded)
+		return -1, cleanErr
 	}
 	l.mu.Lock()
 	newSegments := l.segments
@@ -1662,21 +1741,33 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, []string, error) {
 	// objects and retention can drop others, so the manifest is stale the
 	// moment either happens — and a stale manifest is worse than none, since it
 	// names objects a reader would then fail to open.
-	// Not when the pass skipped the tier: SkipTiered promises ZERO store
+	// Not when the pass skipped the tier: a read-only tier takes ZERO store
 	// writes, and a manifest Put is a store write like any other. Nothing in
 	// the tier changed, so the manifest is still accurate anyway.
-	if !spec.SkipTiered {
-		if manifestErr := l.writeTierManifest(); manifestErr != nil && err == nil && cleanErr == nil {
+	if !spec.skipTiered {
+		manifestErr := l.writeTierManifest()
+		// A manifest that did not land may still name what this pass superseded,
+		// so reclamation holds off until one does. Recorded even when another
+		// error is already being reported: whether the objects are safe to delete
+		// does not depend on which error the caller sees.
+		l.tierMu.Lock()
+		l.tierManifestStale = manifestErr != nil
+		l.tierMu.Unlock()
+		if manifestErr != nil && err == nil && cleanErr == nil {
 			err = manifestErr
 		}
 	}
 
+	// Queued AFTER the manifest, so an entry is only ever considered for
+	// deletion once a published manifest has stopped naming it.
+	l.queueReclaim(superseded)
+
 	// A partial retention failure (cleanErr) still swapped in the surviving
 	// segments above; report it once the read path is consistent.
 	if cleanErr != nil {
-		return -1, superseded, cleanErr
+		return -1, cleanErr
 	}
-	return verified, superseded, err
+	return verified, err
 }
 
 // rebaseSegments adds the segments in from to the end of the slice of segments
@@ -1708,7 +1799,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 	// fresh store objects instead (see ReplaceOffloaded), and
 	// retention is per tier, so their bytes count toward the tier's budget
 	// rather than escaping every limit.
-	cleaned, err := l.deleteCleaner.Clean(segments, spec.SkipTiered)
+	cleaned, err := l.deleteCleaner.Clean(segments, spec.skipTiered)
 	if err != nil {
 		// A partial retention failure still hands back the surviving
 		// segments; propagate them so the caller swaps them in — the deleted

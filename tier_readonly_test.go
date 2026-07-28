@@ -48,11 +48,13 @@ func TestReadOnlyTierWritesNothing(t *testing.T) {
 	require.Zero(t, n, "a read-only tier must not offload")
 
 	hw := l.HighWatermark()
-	_, superseded, err := l.CleanWithSpec(CleanSpec{
+	_, err = l.CleanWithSpec(CleanSpec{
 		Ceiling: hw + 1, TombstoneGCBelow: hw + 1,
 	})
 	require.NoError(t, err)
-	require.Empty(t, superseded)
+	l.tierMu.Lock()
+	require.Empty(t, l.reclaim, "a pass that rewrote nothing supersedes nothing")
+	l.tierMu.Unlock()
 
 	require.NoError(t, l.Clean())
 
