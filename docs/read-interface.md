@@ -109,6 +109,26 @@ never advances" — so the hanging case should be the one you have to ask for.
 safer of the two, and it currently arrives as an unlabelled bool at the call
 site (`NewReader(off, false)` tells a reader nothing).
 
+### The asymmetry inverts for the migration
+
+The argument above says terminating should be the default because a reader that
+unexpectedly ends is noticed while one that unexpectedly follows hangs. The same
+reasoning, applied to the act of migrating, points the other way: the dangerous
+mistake is **adding `Follow()` where it was not wanted**, not omitting it.
+
+A site that loses a `Follow()` it needed fails loudly at `io.EOF`. A site that
+gains one it did not need — an old `NewScanReader` call, which terminated — waits
+forever. Neither fails to compile, because dropping or adding an option is
+always valid Go.
+
+So a migration should check each call site's **intent**, not translate its
+signature. (Observation from durable_streams, migrating nine call sites; worth
+repeating to anyone else doing the same.)
+
+No deprecated shims for the old constructors were kept, deliberately. A clean
+break that is migrated deliberately beats a shim that lets a wrong default
+through quietly.
+
 ## Why there is no latest-per-key mode
 
 It was in the first draft of this sketch and is now gone. Dropping it removes,

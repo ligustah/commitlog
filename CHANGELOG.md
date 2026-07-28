@@ -43,6 +43,18 @@ invert. `docs/read-interface.md` records the reasoning.
   ends returns `io.EOF` and its caller notices, while one that unexpectedly
   follows blocks forever. That is how `RecoverTail` could hang before v0.18.0.
 
+  **Migrating: check each call site's intent, do not translate its signature.**
+  Dropping an option does not fail to compile — it silently changes behaviour,
+  which is the one thing a compiler cannot catch here.
+
+  And that same asymmetry inverts for the migration itself. Because a reader
+  that unexpectedly ends is noticed while one that unexpectedly follows hangs,
+  the dangerous direction of a bad translation is **accidentally adding
+  `Follow()` where it was not wanted** — the old `NewScanReader` sites, which
+  terminated. A site that loses a `Follow()` it needed fails loudly; a site that
+  gains one it did not need waits forever. (Observation from durable_streams,
+  migrating nine call sites.)
+
 - **Breaking**: `ReadKeyPrefix` and `PrefixRecord`, added in v0.37.0, are
   **removed**. They were the wrong shape and lasted one release.
 
