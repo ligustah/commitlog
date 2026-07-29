@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.40.1 — 2026-07-29
+
+Two details this package leaked, reported by durable_streams against v0.40.0.
+
+- **New**: `HeaderBufferLen`, the capacity `Reader.ReadMessage` and
+  `Reader.ReadMessageMetadata` require of their `headersBuf`.
+
+  It was a bare "28" in a doc comment, so a consumer wrote `make([]byte, 28)`
+  against prose. A number copied out of documentation is the same mistake as a
+  magic byte copied into another repo: correct until it isn't, and silent when it
+  stops being.
+
+- **Docs**: `InspectSegment` now states the two things a caller had to guess —
+  that it is NON-MUTATING, and that it takes no `Options`.
+
+  The non-mutation is the point, and the reason `New` cannot serve this purpose:
+  opening a log runs recovery, may adopt a descriptor and may rewrite segments,
+  so aiming it at evidence alters the evidence. Every hand-written mirror this
+  replaced carried a warning to work on a copy of the data directory. This reads
+  one file, once, and writes nothing.
+
+  And nothing about `Path`, `Name`, `Compact` or descriptor adoption is
+  load-bearing: a segment file describes itself, so there is nothing to configure
+  when inspecting a foreign directory.
+
 ## v0.40.0 — 2026-07-29
 
 A layering audit, and the one thing it found that was costing other people time.

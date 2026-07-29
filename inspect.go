@@ -25,6 +25,17 @@ import (
 // Scope is deliberately narrow: read-only, over files nothing is writing, with
 // no index, no compaction and no recovery. It is for looking at bytes that are
 // already on disk — a forensic tool, not a second read path.
+//
+// NON-MUTATING, which is the property a diagnostic most needs and the one that
+// makes New unsuitable for this. Opening a log runs recovery, may adopt a
+// descriptor and may rewrite segments, so pointing it at evidence alters the
+// evidence — which is why the mirrors this replaces all carried a warning to
+// work on a COPY of the data directory. This reads one file, once, and writes
+// nothing, so it can be aimed at the original.
+//
+// It also takes no Options. Nothing about Path, Name, Compact or descriptor
+// adoption is load-bearing here: a segment file describes itself, so a caller
+// inspecting a foreign directory has nothing to configure and nothing to guess.
 
 // BlockInfo describes one physical block in a segment file.
 //

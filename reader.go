@@ -93,7 +93,7 @@ func (l *commitLog) newRecoveryReader(offset int64) (*Reader, error) {
 // the reader was created with the uncommitted flag set to true.
 //
 // ReadMessage should not be called concurrently, and the headersBuf slice
-// should have a capacity of at least 28.
+// must have a capacity of at least HeaderBufferLen.
 //
 // TODO: Should this just return a MessageSet directly instead of a Message and
 // the MessageSet header values?
@@ -184,8 +184,9 @@ func (r *Reader) specAt(offset int64) readSpec {
 }
 
 // ReadMessageMetadata reads a single message and returns its metadata — offset,
-// attributes, and headers. The payloadBuf slice is reused across calls; callers
-// should pass the returned slice back on the next call to avoid per-message
+// attributes, and headers. headersBuf must have a capacity of at least
+// HeaderBufferLen. The payloadBuf slice is reused across calls; callers should
+// pass the returned slice back on the next call to avoid per-message
 // allocations.
 //
 // This is intended for metadata-only scans such as LSO rebuild where only the

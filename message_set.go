@@ -15,6 +15,15 @@ const (
 	msgSetHeaderLen = 28
 )
 
+// HeaderBufferLen is the capacity the headersBuf argument to
+// Reader.ReadMessage and Reader.ReadMessageMetadata must have.
+//
+// Exported because it was previously a bare "28" in a doc comment, and a
+// consumer duly wrote make([]byte, 28) against it. A number copied out of prose
+// is the same mistake as a magic byte copied into another repo: correct until it
+// isn't, and silent when it stops being.
+const HeaderBufferLen = msgSetHeaderLen
+
 type messageSet []byte
 
 func entriesForMessageSet(basePos int64, ms []byte) []*entry {
