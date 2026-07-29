@@ -118,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [FuzzCompactionRecovery, FuzzOffloadCrashConsistency, FuzzOffloadCompactionRetention, FuzzCorruptedRecordIsNeverServedSilently]
+        target: [FuzzCompactionRecovery, FuzzOffloadCrashConsistency, FuzzOffloadCompactionRetention, FuzzCorruptedRecordIsNeverServedSilently, FuzzCorruptDigestNeverChangesTheAnswer]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
