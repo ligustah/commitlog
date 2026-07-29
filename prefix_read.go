@@ -225,9 +225,12 @@ func collectRun(seg *segment, run prefixRun, sc *blockCache) (map[int64]prefixQu
 			// recovered by the caller — it takes the process with it. Refusing
 			// the read reaches the same place without that.
 			if want, got := cp.Crc(), crc32.Checksum(cp[4:], crc32cTable); want != got {
-				return nil, errors.Errorf(
-					"commitlog: prefix read record at offset %d failed CRC: expected 0x%08x, got 0x%08x",
-					off, want, got)
+				// The same sentinel the sequential path returns: which route
+				// found the record is this package's business, not the caller's,
+				// and a caller matching on corruption should not have to know
+				// whether a digest happened to plan the read.
+				return nil, errors.Wrapf(ErrCorruptRecord,
+					"record at offset %d: expected CRC 0x%08x, got 0x%08x", off, want, got)
 			}
 			out[off] = prefixQueued{
 				msg:    cp,

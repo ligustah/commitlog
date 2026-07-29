@@ -41,6 +41,24 @@ var ErrIncorrectOffset = errors.New("incorrect offset")
 // other.
 var ErrTimestampBeforeLog = errors.New("commitlog: timestamp is before the beginning of the log")
 
+// ErrCorruptRecord reports a record whose stored CRC does not match its bytes.
+// The record is NOT returned with it: a caller gets the error instead of the
+// data, never both.
+//
+// This used to be a panic, on the reasoning that corruption on disk leaves "the
+// server in an unrecoverable state". That was true of the server this package
+// was extracted from and is wrong for a library embedded in someone else's
+// process: one bad record took down a host that had a perfectly good answer
+// available — skip the record, fail the read, resync the stream — and a read is
+// exactly where a caller is positioned to choose between them.
+//
+// A sentinel rather than an opaque error because the choice depends on telling
+// corruption apart from an ordinary read failure. The trade is real and worth
+// stating: an error CAN be ignored where a panic cannot, so a caller that checks
+// nothing now proceeds past a record it should not trust. Every caller of
+// ReadMessage already handles an error return, and none can handle a panic.
+var ErrCorruptRecord = errors.New("commitlog: record failed its CRC check")
+
 // ErrBlockFormat reports a segment written in a block format this build
 // does not understand. Callers probe for it at startup (before touching
 // anything) so an incompatible store is refused rather than half-read:

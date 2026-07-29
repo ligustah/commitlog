@@ -88,7 +88,7 @@ func TestKeyPrefixRefusesRecordsThatFailCRC(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a KeyPrefix read SERVED a record that fails its own CRC: %q", string(msg.Value()))
 	}
-	require.Contains(t, err.Error(), "failed CRC")
+	require.ErrorIs(t, err, ErrCorruptRecord)
 	require.Nil(t, msg, "a refused record must not also be handed to the caller")
 }
 
@@ -176,7 +176,7 @@ func TestKeyPrefixRefusesTieredRecordsThatFailCRC(t *testing.T) {
 		t.Fatalf("a tiered KeyPrefix read SERVED a record that fails its own CRC: %q",
 			string(msg.Value()))
 	}
-	require.Contains(t, err.Error(), "failed CRC")
+	require.ErrorIs(t, err, ErrCorruptRecord)
 }
 
 // The neighbours of a corrupt record are still readable: the refusal is of THAT

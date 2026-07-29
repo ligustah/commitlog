@@ -129,12 +129,13 @@ func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (
 		return nil, 0, 0, 0, errors.Wrap(err, "failed to ready message payload")
 	}
 	m := SerializedMessage(buf)
-	// Check the CRC on the message.
+	// Check the CRC on the message. Returned, not panicked: see ErrCorruptRecord
+	// for why a library embedded in someone else's process must not take it down
+	// over a record the caller could have skipped.
 	crc := m.Crc()
 	if c := crc32.Checksum(m[4:], crc32cTable); crc != c {
-		// If the CRC doesn't match, data on disk is corrupted which means the
-		// server is in an unrecoverable state.
-		panic(fmt.Errorf("Read corrupted data, expected CRC: 0x%08x, got: 0x%08x", crc, c))
+		return nil, 0, 0, 0, errors.Wrapf(ErrCorruptRecord,
+			"record at offset %d: expected CRC 0x%08x, got 0x%08x", offset, crc, c)
 	}
 	return m, offset, timestamp, leaderEpoch, nil
 }

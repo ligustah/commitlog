@@ -8,7 +8,30 @@ library from that fork onward.
 ## Unreleased
 
 A filtered read could hand a caller a record it knew nothing about the integrity
-of, because the fast path never asked.
+of, because the fast path never asked. And when the other path did ask and did
+not like the answer, it killed the caller's process.
+
+- **Changed (breaking for anyone relying on the panic)**: a record failing its
+  CRC now returns `ErrCorruptRecord` from `ReadMessage` instead of panicking.
+
+  The panic said "data on disk is corrupted which means the server is in an
+  unrecoverable state". That was true of the server this package was extracted
+  from and is wrong for a library embedded in someone else's process: the host
+  had good answers available — skip the record, fail the read, resync the stream
+  — and the panic took both the choice and the process away. A read is exactly
+  where a caller is positioned to choose.
+
+  Reported by durable_streams, who were recovering the panic at their own
+  boundary to stop one bad record from killing their host.
+
+  A sentinel, because choosing depends on telling corruption from an ordinary
+  read failure. Both routes return the same one: which of them found the record
+  is this package's business, not the caller's.
+
+  The trade, stated rather than buried: an error CAN be ignored where a panic
+  cannot, so a caller that checks nothing now proceeds past a record it should
+  not trust. Every caller of `ReadMessage` already handles an error return, and
+  none could handle a panic.
 
 - **Fix (data integrity)**: a `KeyPrefix` read over SEALED segments returned
   records that fail their own CRC, without an error.
