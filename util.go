@@ -1,10 +1,15 @@
 package commitlog
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
 	"sort"
+	"time"
+
+	atomic_file "github.com/natefinch/atomic"
+	pkgErrors "github.com/pkg/errors"
 )
 
 // findSegment returns the first segment whose next assignable offset is
@@ -96,3 +101,50 @@ func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
+
+func removeAllWithRetry(path string) error {
+	var err error
+	for i := 0; i < 100; i++ {
+		if err = os.RemoveAll(path); err == nil {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return err
+}
+
+// Bound for atomicWriteWithRetry. Long enough to cover a handle that is on its
+// way out (those clear in milliseconds), short enough that a genuinely
+// conflicted write still fails promptly rather than stalling a checkpoint tick.
+const (
+	atomicWriteRetries    = 25
+	atomicWriteRetryDelay = 20 * time.Millisecond
+)
+
+// atomicWriteWithRetry writes a file atomically, retrying briefly. On Windows
+// the underlying ReplaceFile can transiently fail with "Access is denied" when
+// some other handle to the destination has not been released yet — a process
+// that just exited, or a scanner that opened the file after the previous write.
+// The condition clears in milliseconds, while a real conflict (a second live
+// writer, a read-only file) never does, so the bound keeps that case failing
+// instead of hiding it. On Unix rename is atomic and the first attempt always
+// succeeds, so nothing is added there.
+//
+// The payload is buffered up front because a retry has to write the SAME bytes
+// again: atomic_file.WriteFile consumes the reader, so retrying with the
+// original one would replace the file with nothing.
+func atomicWriteWithRetry(path string, r io.Reader) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return pkgErrors.Wrap(err, "failed to buffer atomic write payload")
+	}
+	for i := 0; ; i++ {
+		err = atomic_file.WriteFile(path, bytes.NewReader(data))
+		if err == nil || i >= atomicWriteRetries {
+			return err
+		}
+		time.Sleep(atomicWriteRetryDelay)
+	}
+}
+
+// IsDeleted returns true if the commit log has been deleted.
