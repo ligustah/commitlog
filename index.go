@@ -234,7 +234,7 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 		}
 		err := idx.file.Truncate(newSize)
 		if err != nil {
-			panic(errors.Wrap(err, "failed to expand index file"))
+			return errors.Wrap(err, "failed to expand index file")
 		}
 		idx.size = newSize
 
@@ -260,7 +260,7 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 		idx.mmap, err = mmapFile(idx.file)
 		idx.mapMu.Unlock()
 		if err != nil {
-			panic(errors.Wrap(err, "failed to mmap expanded index file"))
+			return errors.Wrap(err, "failed to mmap expanded index file")
 		}
 	}
 
@@ -371,12 +371,21 @@ func (idx *index) InitializePosition() (*entry, error) {
 	// Find the first empty entry.
 	n := int(idx.size / entryWidth)
 	entry := new(entry)
+	// sort.Search's predicate cannot fail, so the read error is carried out and
+	// checked below — the same shape findSegmentIndexByTimestamp uses. Sorting a
+	// failed read to the right ends the search promptly; the value of i is then
+	// meaningless, which is why nothing uses it before the error is checked.
+	var readErr error
 	i := sort.Search(n, func(i int) bool {
 		if err := idx.ReadEntryAtFileOffset(entry, int64(i*entryWidth)); err != nil {
-			panic(err)
+			readErr = err
+			return true
 		}
 		return entry.Position == 0 && entry.Timestamp == 0 && entry.Size == 0
 	})
+	if readErr != nil {
+		return nil, errors.Wrap(readErr, "failed to read index entry while initializing position")
+	}
 	// Initialize the position.
 	idx.mu.Lock()
 	idx.position = int64(i * entryWidth)

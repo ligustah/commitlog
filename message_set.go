@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"fmt"
 	"hash/crc32"
 
 	"github.com/pkg/errors"
@@ -53,7 +52,9 @@ func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message, concurre
 
 	// When concurrency control is enabled, messages shall be processed on by one
 	if concurrencyControl && len(msgs) > 1 {
-		panic(fmt.Errorf("Concurrency Control is enabled, unable to process a batch of messages"))
+		return nil, nil, errors.Errorf(
+			"commitlog: concurrency control processes one message at a time, got a batch of %d",
+			len(msgs))
 	}
 
 	var (
@@ -64,7 +65,7 @@ func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message, concurre
 	for i, m := range msgs {
 		data, err := encode(m)
 		if err != nil {
-			panic(err)
+			return nil, nil, errors.Wrapf(err, "encode message at index %d", i)
 		}
 		var (
 			len    = int32(len(data))

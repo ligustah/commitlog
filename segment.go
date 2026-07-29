@@ -194,8 +194,15 @@ func newStoreKeys(baseOffset int64) (logKey, indexKey string) {
 func newUploadID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failing is not a condition a log can sensibly continue
-		// through: every key from here would risk colliding with a live object.
+		// UNREACHABLE, and left as a panic on purpose — the one place in this
+		// package where that is still the right answer.
+		//
+		// crypto/rand.Read "never returns an error, and always fills b
+		// entirely"; it crashes the program itself if the OS source fails. So
+		// this branch cannot be taken, and threading an error out of it would
+		// mean changing newUploadID, newStoreKeys and ten call sites to handle a
+		// condition that cannot arise — while the crash it is meant to prevent
+		// would already have happened inside rand.Read.
 		panic("commitlog: cannot generate an upload id: " + err.Error())
 	}
 	return hex.EncodeToString(b[:])
