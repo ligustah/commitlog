@@ -16,6 +16,17 @@ var ErrCommitLogReadonly = errors.New("end of readonly log")
 
 type contextReader interface {
 	Read(context.Context, []byte) (int, error)
+	// segmentBounds reports the offset range [base, next) of the segment this
+	// reader is currently positioned in, and whether it has one yet.
+	//
+	// It is read AFTER a record, never before. A frame never straddles a
+	// segment boundary, so once a record has been read the reader is positioned
+	// in the segment that record came from — and `next` reflects any append that
+	// landed meanwhile. Capturing before the read gets both of those wrong: it
+	// would attribute a record to the previous segment when the read crossed a
+	// boundary, and it would reject a legitimately-new record at the live tail
+	// whose offset had not been assigned when the bounds were taken.
+	segmentBounds() (base, next int64, ok bool)
 }
 
 // Reader reads messages atomically from a CommitLog. Readers should not be
@@ -170,6 +181,23 @@ RETRY:
 		} else {
 			return nil, 0, 0, 0, err
 		}
+	}
+	// The frame header is not covered by any checksum — the CRC spans the
+	// message payload only — so a damaged offset field is served as truth unless
+	// something cross-checks it. A record must carry an offset belonging to the
+	// segment it was found in; anything else is a fabricated identity, and a
+	// caller that resumes from a reported offset resumes from nowhere.
+	//
+	// Bounds are taken AFTER the read, deliberately: see segmentBounds.
+	//
+	// This cannot replace the CRC and does not try to. It catches an offset
+	// outside the segment's range, not one swapped with another record inside it
+	// — the header has no checksum to make that detectable, and adding one would
+	// change the format.
+	if base, next, ok := r.ctxReader.segmentBounds(); ok && (offset < base || offset >= next) {
+		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,
+			"record claims offset %d, outside its segment's range [%d, %d)",
+			offset, base, next)
 	}
 	r.offset = offset + 1
 	return msg, offset, timestamp, leaderEpoch, err
@@ -721,4 +749,26 @@ func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byt
 		Headers:     parseHeadersAfterValue(buf),
 		Raw:         SerializedMessage(buf),
 	}, payloadBuf, nil
+}
+
+// segmentBounds implements contextReader.
+func (r *uncommittedReader) segmentBounds() (int64, int64, bool) {
+	r.mu.Lock()
+	seg := r.seg
+	r.mu.Unlock()
+	if seg == nil {
+		return 0, 0, false
+	}
+	return seg.BaseOffset, seg.NextOffset(), true
+}
+
+// segmentBounds implements contextReader.
+func (r *committedReader) segmentBounds() (int64, int64, bool) {
+	r.mu.Lock()
+	seg := r.seg
+	r.mu.Unlock()
+	if seg == nil {
+		return 0, 0, false
+	}
+	return seg.BaseOffset, seg.NextOffset(), true
 }

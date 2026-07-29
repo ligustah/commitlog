@@ -38,28 +38,17 @@ import (
 // result: the size field is bounded by later reads, and the CRC catches the
 // payload. If it ever fails, the finding is that an unchecksummed field reached a
 // caller as truth.
-// STATUS: this target FAILS on its first seed, and is skipped until the gap it
-// found is closed. It is committed skipped rather than deleted or weakened,
-// because the finding is the valuable part and a scratchpad file would lose it.
+// STATUS: this target FOUND the gap it was written for, and the gap is now
+// closed. It failed on its first seed — a corrupted offset field was served as
+// truth, observed as offsets 72057594037927939 and 71 in a log holding 0..15 —
+// and readOne now cross-checks a record's offset against the range of the
+// segment it was found in.
 //
-// What it found: corrupt the OFFSET field of a frame header and the reader
-// serves that record under an offset that was never written — observed
-// 72057594037927939 and 71 in a log holding offsets 0..15. The value is intact,
-// because the CRC protects it. The identity is fabricated, and nothing detects
-// it. A consumer that resumes from a reported offset resumes from nowhere.
-//
-// Why it is not fixed here. The cheap guard is wrong: rejecting an offset above
-// NewestOffset() would break RecoverTail, which exists precisely to read records
-// beyond the recorded newest offset. The sound invariant is that a frame in
-// segment S must carry an offset within S's range, and enforcing that means
-// giving the read path access to the current segment's bounds — a change to the
-// contextReader contract and every mock of it. That is a read-path design
-// decision, not a guard to bolt on at the end of a long session.
-//
-// Un-skip when it is closed. Do not narrow the assertion to make it pass; the
-// assertion is the point.
+// What that check can and cannot do: it catches an offset outside the segment's
+// range, not one swapped with another record INSIDE it. The header carries no
+// checksum to make that detectable and adding one would change the format, so
+// the remaining exposure is stated rather than implied.
 func FuzzCorruptFrameHeaderIsNeverServedAsTruth(f *testing.F) {
-	f.Skip("known gap: a corrupt frame-header offset is served as truth; see the comment above")
 
 	// Seeds: (which frame, which byte of its 28-byte header, xor mask).
 	f.Add([]byte{3, 0, 0x01})  // offset field, low bit
