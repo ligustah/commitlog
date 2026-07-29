@@ -108,6 +108,24 @@ jobs:
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$(go env GOPATH)/bin/actionlint" -color
 
+  # Does each guard have a test that actually fails without it? Fuzzing explores
+  # INPUTS and cannot answer that, so a test asserting the wrong property reads
+  # as coverage indefinitely — this repo shipped a defect behind exactly such a
+  # test. guardcheck removes each guard and requires its named test to go red.
+  # Cheap: one targeted test run per guard, not the whole suite.
+  guards:
+    name: guard coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+      - name: guardcheck
+        run: hack/guardcheck.sh
+
   # A short active fuzzing sweep on top of the seed corpus (the seeds already run
   # as normal subtests in the `test` job). Bounded so it stays a smoke test; a
   # crasher fails the job and is written to testdata/fuzz for a maintainer to pull.
