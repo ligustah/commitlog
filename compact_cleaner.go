@@ -2,6 +2,7 @@ package commitlog
 
 import (
 	"bytes"
+	"hash/crc32"
 	"log/slog"
 	"math"
 	"sort"
@@ -772,7 +773,10 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		consolidating = seg.needsBlockConsolidation()
 		removed       = 0
 		stripped      = 0
-		stripActive   = spec.StripBelow > 0 && len(spec.StripHeaders) > 0
+		// Records this pass declined to re-sign because they failed their own
+		// CRC. They are carried through untouched, not dropped.
+		corrupt     = 0
+		stripActive = spec.StripBelow > 0 && len(spec.StripHeaders) > 0
 		// Does any surviving record still carry a strip-target header (i.e.
 		// sits at/above StripBelow with one present)? Decides how far the
 		// refreshed digest's strip stamp may reach.
@@ -796,10 +800,29 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		out := []byte(ms)
 		if disp == dispStrip {
 			sf, changed, err := stripFrame(ms, spec.StripHeaders)
-			if err != nil {
+			switch {
+			case errors.Is(err, ErrCorruptRecord):
+				// Copy it verbatim instead, keeping its failing checksum. The
+				// record stays exactly as damaged as it was and every reader
+				// still gets ErrCorruptRecord from it — the honest outcome, and
+				// the one a rewrite would have taken away.
+				//
+				// Not a failed clean, deliberately: the cleaner runs unattended
+				// on a timer, so returning an error here wedges compaction AND
+				// retention behind one bad record until someone intervenes,
+				// turning a single unreadable record into a full disk. Declining
+				// to rewrite it costs nothing by comparison.
+				corrupt++
+				// It keeps its strip-target headers, so the digest's strip stamp
+				// must not go on to claim this segment has none left below the
+				// boundary — a later pass would trust that and skip the scan.
+				residualStrippable = true
+				slog.Warn("record failed its CRC; copied without stripping rather than re-signing it",
+					slog.String("name", c.Name), slog.Int64("offset", offset),
+					slog.String("err", err.Error()))
+			case err != nil:
 				return nil, removed, nil, err
-			}
-			if changed {
+			case changed:
 				out = sf
 				stripped++
 			}
@@ -990,6 +1013,21 @@ func hasAnyHeader(msg SerializedMessage, hdrs []string) bool {
 // (and no allocation) when none of the headers are present.
 func stripFrame(ms messageSet, headers []string) ([]byte, bool, error) {
 	msg := ms.Message()
+	// Verify BEFORE re-encoding. This function recomputes the CRC over whatever
+	// bytes it is handed, so re-encoding a record that is already damaged
+	// LAUNDERS it: the corruption is signed by a fresh, valid checksum, and every
+	// later read — including the CRC-verifying one — reports the record as sound.
+	// The evidence that it was ever damaged is destroyed by the rewrite, and
+	// cannot be recovered afterwards.
+	//
+	// Every other frame the cleaner writes is copied verbatim, so a corrupt
+	// record keeps its failing checksum and stays detectable. This path is the
+	// only one that can certify a lie, which is why the check belongs here rather
+	// than at whatever read eventually trips over it.
+	if want, got := msg.Crc(), crc32.Checksum(msg[4:], crc32cTable); want != got {
+		return nil, false, errors.Wrapf(ErrCorruptRecord,
+			"record at offset %d: expected CRC 0x%08x, got 0x%08x", ms.Offset(), want, got)
+	}
 	have := msg.Headers()
 	found := false
 	for _, h := range headers {
