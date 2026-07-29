@@ -100,6 +100,20 @@ func (m SerializedMessage) Crc() uint32 {
 	return encoding.Uint32(m)
 }
 
+// crcMatches reports whether the message's stored checksum matches its bytes,
+// answering false for a frame too short to hold one rather than indexing past
+// the end.
+//
+// This REPORTS; it does not guard. The read paths keep their own explicit check
+// because they must refuse the record and say why, and because a guard that
+// answers a bool is easy to call and forget to act on. See ErrCorruptRecord.
+func (m SerializedMessage) crcMatches() bool {
+	if len(m) < 4 {
+		return false
+	}
+	return m.Crc() == crc32.Checksum(m[4:], crc32cTable)
+}
+
 // MagicByte returns the byte used for encoding protocol version detection.
 func (m SerializedMessage) MagicByte() int8 {
 	return int8(m[4])
