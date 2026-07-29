@@ -138,6 +138,9 @@ run_guard "reclamation pin" tier_state.go \
   'if e.pin != nil && e.pin.referenced() && false {' \
   '^TestReclamationWaitsForTheReaderHoldingTheOldObject$'
 
+run_guard "append tail-under-lock" commitlog.go   '	l.appendMu.Lock()
+	defer l.appendMu.Unlock()'   '	// BREAK: tail read and write no longer one step'   '^TestConcurrentAppends'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

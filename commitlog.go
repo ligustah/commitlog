@@ -1403,6 +1403,25 @@ func (l *commitLog) split(oldActiveSegment *segment) error {
 	// Do a CAS on the active segment to ensure no other threads have replaced
 	// it already. If this fails, it means another thread has already replaced
 	// it, so delete the new segment and return ErrSegmentExists.
+	//
+	// UNREACHABLE as the code stands, and kept anyway. split has exactly one
+	// caller — checkAndPerformSplit — and every path into it holds appendMu, so
+	// two goroutines cannot both be here and the CAS cannot lose. It is the
+	// residue of the era when a roll could also run on the cleaner's ticker
+	// while an append was in flight, which is the bug appendMu now prevents
+	// outright.
+	//
+	// Retained as a backstop, because it costs one atomic on a rare path and the
+	// failure it catches (two rollers over the same files, the loser's cleanup
+	// unlinking the winner's) was silent and expensive. But it has NO TEST and
+	// cannot honestly have one: reaching it means calling split concurrently,
+	// which means bypassing the lock the caller is required to hold, so a test
+	// would be asserting against a caller that does not exist. Stated here
+	// rather than left as an entry in hack/guardcheck.sh that would sit red
+	// forever.
+	//
+	// If a second caller of split is ever added, this stops being vestigial and
+	// the lock discipline above it needs re-deciding, not this line.
 	if !atomic.CompareAndSwapPointer(
 		(*unsafe.Pointer)(unsafe.Pointer(&l.vActiveSegment)),
 		unsafe.Pointer(oldActiveSegment), unsafe.Pointer(segment)) {
