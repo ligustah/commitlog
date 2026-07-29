@@ -1,6 +1,7 @@
 package commitlog
 
 import (
+	"hash/crc32"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -207,6 +208,27 @@ func collectRun(seg *segment, run prefixRun, sc *blockCache) (map[int64]prefixQu
 			msg := ms.Message()
 			cp := make(SerializedMessage, len(msg))
 			copy(cp, msg)
+			// The CRC, on the way past. Every other route that hands a record to
+			// a caller checks it — readMessage treats a mismatch as unrecoverable
+			// — but this one used to return the bytes unexamined, so a corrupt
+			// record read by KEY PREFIX was served silently while the same record
+			// read sequentially was refused. Serving it is the worst of the three
+			// available answers.
+			//
+			// It is not a real cost here: the copy above already touches every
+			// byte, so this adds a second pass over bytes that are in cache, not
+			// a request or a decode. The digest is what this path optimises away,
+			// and the digest cannot speak for a record's contents.
+			//
+			// An error rather than readMessage's panic, deliberately: this runs
+			// in collectRun's worker goroutines, and a panic there cannot be
+			// recovered by the caller — it takes the process with it. Refusing
+			// the read reaches the same place without that.
+			if want, got := cp.Crc(), crc32.Checksum(cp[4:], crc32cTable); want != got {
+				return nil, errors.Errorf(
+					"commitlog: prefix read record at offset %d failed CRC: expected 0x%08x, got 0x%08x",
+					off, want, got)
+			}
 			out[off] = prefixQueued{
 				msg:    cp,
 				offset: off,
