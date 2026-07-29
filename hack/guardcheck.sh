@@ -118,12 +118,12 @@ run_guard "stripFrame CRC (no laundering)" compact_cleaner.go \
   'if want, got := msg.Crc(), crc32.Checksum(msg[4:], crc32cTable); want != got && false {' \
   '^TestCompactionDoesNotResignCorruptRecords$'
 
-run_guard "readMessage CRC" message_set.go \
+run_guard "readMessage CRC" reader.go \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c {' \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c && false {' \
   '^TestSequentialReadReturnsCorruptRecordRatherThanPanicking$'
 
-run_guard "short-frame refusal" message_set.go \
+run_guard "short-frame refusal" reader.go \
   'if len(m) < 4 {' \
   'if len(m) < 4 && false {' \
   '^FuzzTornLogServesOnlyAPrefix$'
