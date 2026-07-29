@@ -5,6 +5,40 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.39.2 — 2026-07-29
+
+Two ways a log torn mid-write could hurt the process reading it. Both found by a
+new fuzz target within seconds of it existing, one of them by its first seed
+before any fuzzing had started.
+
+- **Fix (panic)**: a frame declaring a payload too short to hold its own checksum
+  panicked out of the caller's process.
+
+  The size field is not covered by any checksum — the CRC lives INSIDE the
+  payload it describes — so a torn frame can declare a length of zero.
+  `readMessage` then took `Crc()` of an empty slice: *"index out of range [3]
+  with length 0"*. Reachable from an ordinary crash, and precisely what a log
+  embedded in someone else's binary must not do. Such frames are now refused as
+  `ErrCorruptRecord`.
+
+- **Fix (out of memory)**: that same unchecksummed size field could declare up to
+  4GiB, and both read paths allocated it BEFORE reading a byte.
+
+  A torn segment therefore handed an out-of-memory kill to the host. The fuzzing
+  worker did not report an assertion — it died outright. Payloads are now read in
+  chunks, and the buffer grows only as bytes actually arrive, so a frame claiming
+  4GiB of a file holding a hundred bytes costs one chunk and an error.
+
+  The same sweep went from dying at 128 executions to surviving 6000, and its
+  rate rose from ~1/sec to ~59/sec: the workers had been thrashing on
+  allocations rather than exploring inputs.
+
+- **Tests**: three fuzz targets now assert the corruption invariants directly —
+  damaged record bytes, a damaged key digest, and a torn log — alongside
+  `hack/guardcheck.sh`, which removes each guard and requires the test named for
+  it to fail. Fuzzing explores inputs and cannot tell whether an assertion bites;
+  this repo shipped a defect behind a test that did not.
+
 ## v0.39.1 — 2026-07-29
 
 - **Fix (data integrity)**: compaction RE-SIGNED corrupt records, certifying the
