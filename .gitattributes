@@ -14,3 +14,9 @@ go.sum text eol=lf
 # Fuzz corpus entries are parsed by `go test`; a CRLF checkout would rewrite
 # seeds git stores with LF and risk them failing to load on Windows.
 testdata/fuzz/** text eol=lf
+
+# Standalone scripts (hack/) run under bash on both Linux CI and a Windows
+# developer's git-bash. A CRLF checkout puts \r at the end of every line, which
+# bash reads as part of the command — the failure is a baffling "$'\r': command
+# not found" rather than anything pointing at line endings.
+*.sh text eol=lf
