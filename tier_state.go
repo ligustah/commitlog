@@ -49,21 +49,6 @@ type TierObject struct {
 	BlockMode bool
 }
 
-func tierObjectFromMeta(baseOffset int64, m offloadMeta) TierObject {
-	return TierObject{
-		BaseOffset:     baseOffset,
-		LogKey:         m.LogKey,
-		IndexKey:       m.IndexKey,
-		FirstOffset:    m.FirstOffset,
-		LastOffset:     m.LastOffset,
-		FirstWriteTime: m.FirstWriteTime,
-		LastWriteTime:  m.LastWriteTime,
-		Position:       m.Position,
-		PhysPosition:   m.PhysPosition,
-		BlockMode:      m.BlockMode,
-	}
-}
-
 func (o TierObject) meta() offloadMeta {
 	return offloadMeta{
 		LogKey:         o.LogKey,
