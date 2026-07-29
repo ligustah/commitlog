@@ -5,11 +5,29 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.39.0 — 2026-07-29
 
 A filtered read could hand a caller a record it knew nothing about the integrity
 of, because the fast path never asked. And when the other path did ask and did
 not like the answer, it killed the caller's process.
+
+- **Changed**: the five reachable panics left in the package now return their
+  errors instead — two in `index.writeAt` (a failed `Truncate` or `mmap` while
+  expanding the index), one in `index.InitializePosition` (a failed index read
+  inside a `sort.Search` predicate, carried out in a variable and checked after
+  the search), and two in `newMessageSetFromProto` (a batch given to a log with
+  concurrency control enabled, which is caller misuse and still not worth
+  killing a process over, and a message that fails to encode).
+
+  All five were already inside functions returning an error, so they were
+  discarding a channel they had. No behaviour change for any caller that was not
+  already dying.
+
+  One panic remains, in `newUploadID`, and it is documented as the place that is
+  right: `crypto/rand.Read` "never returns an error, and always fills b
+  entirely" — it crashes the program itself if the OS source fails — so the
+  branch is unreachable, and threading an error out of it would change ten call
+  sites to handle a condition that cannot arise.
 
 - **Changed (breaking for anyone relying on the panic)**: a record failing its
   CRC now returns `ErrCorruptRecord` from `ReadMessage` instead of panicking.
