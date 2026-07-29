@@ -5,6 +5,54 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+A filtered read could hand a caller a record it knew nothing about the integrity
+of, because the fast path never asked.
+
+- **Fix (data integrity)**: a `KeyPrefix` read over SEALED segments returned
+  records that fail their own CRC, without an error.
+
+  `readOne` serves the digest-planned portion of a filtered read directly from
+  the prefix source, so it never reaches `readMessage` — which held the only
+  verification of a message payload in the package. The same corrupted record
+  read sequentially was refused as unrecoverable; read by key prefix it came back
+  as data. One flipped byte in a sealed segment, both routes over one log:
+
+  ```
+  KeyPrefix path : SERVED "PAYLOAD-Q05-ZZZZZZZZ"
+  sequential path: PANIC (CRC caught it)
+  ```
+
+  The digest earns that path its speed by naming which offsets hold matching
+  KEYS. It cannot vouch for what is stored at them, and planning a read from it
+  does not make a record more trustworthy than one found by walking.
+
+  **Behaviour change for callers**: such a read now fails where it previously
+  returned data. It returns an ERROR rather than `readMessage`'s panic, because
+  this runs in worker goroutines where a panic cannot be recovered by the caller
+  and takes the process with it.
+
+  Verification costs nothing here — the record is already being copied, so it is
+  a second pass over bytes in cache, not a request or a decode.
+
+- **Docs (contract)**: `ReadMessageMetadata` said it returns metadata "without
+  CRC-validating the payload or retaining the value bytes", while the
+  `MessageMetadata.Raw` field beside it advertised "full raw message bytes
+  (Key() + Value() available)".
+
+  Both cannot be true, and the one a caller acts on is the second. `Raw` is
+  BORROWED: it points into the `payloadBuf` the next call overwrites. A caller
+  that reads a batch and decodes afterwards — the shape a reusable buffer invites
+  — gets its values rewritten underneath it. A shorter following record
+  overwrites only the head, so the retained slice keeps its length and still
+  parses with another record's bytes at the front, and nothing errors.
+
+  No behaviour change: the aliasing is the point of the API, and is why an LSO
+  rebuild can scan millions of records without allocating. Both docs now say
+  borrowed rather than owned, and state that the payload is unverified — this
+  path returns a corrupted record as data where `ReadMessage` refuses it.
+
 ## v0.38.2 — 2026-07-28
 
 Concurrent readers and timestamp probes on a LIVE log are supported. They were
