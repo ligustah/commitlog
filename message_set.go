@@ -146,8 +146,13 @@ type MessageMetadata struct {
 	Timestamp   int64
 	LeaderEpoch uint64
 	Attributes  int8
-	Headers     map[string][]byte
-	Raw         SerializedMessage // full raw message bytes (Key() + Value() available)
+	// Headers values are subslices of Raw and share its lifetime.
+	Headers map[string][]byte
+	// Raw is the full message (Key() and Value() work), BORROWED rather than
+	// owned: it points into the payloadBuf passed to ReadMessageMetadata, which
+	// the next call overwrites. Copy anything kept past that call, and note that
+	// these bytes have not been CRC-checked. See ReadMessageMetadata.
+	Raw SerializedMessage
 }
 
 // readMessageMetadata reads a message from the log, parses headers and

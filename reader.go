@@ -182,14 +182,27 @@ func (r *Reader) specAt(offset int64) readSpec {
 	return s
 }
 
-// ReadMessageMetadata reads a single message and returns only its metadata —
-// offset, attributes, and headers — without CRC-validating the payload or
-// retaining the value bytes. The payloadBuf slice is reused across calls;
-// callers should pass the returned slice back on the next call to avoid
-// per-message allocations.
+// ReadMessageMetadata reads a single message and returns its metadata — offset,
+// attributes, and headers. The payloadBuf slice is reused across calls; callers
+// should pass the returned slice back on the next call to avoid per-message
+// allocations.
 //
 // This is intended for metadata-only scans such as LSO rebuild where only the
 // Attributes byte and message headers (producer ID, epoch, sequence) are needed.
+//
+// TWO THINGS IT DOES NOT DO, both of which ReadMessage does:
+//
+//   - It does NOT CRC-validate the payload. A record corrupted on disk is
+//     returned here as data, where ReadMessage refuses it. Reading a value
+//     through this path means reading it unverified.
+//   - It does NOT give you memory you own. Raw — and Key(), Value() and the
+//     Headers values taken from it — point INTO payloadBuf, so the next call
+//     overwrites them in place. Copy anything you keep past that call.
+//
+// The second one is quiet when it bites: a shorter following record overwrites
+// only the HEAD of a retained value and leaves its tail alone, so what you hold
+// is still the right length and still parses, with another record's bytes at the
+// front. Nothing errors. Decode as you go, or copy.
 func (r *Reader) ReadMessageMetadata(ctx context.Context, headersBuf []byte, payloadBuf []byte) (MessageMetadata, []byte, error) {
 RETRY:
 	meta, newBuf, err := readMessageMetadata(ctx, r.ctxReader, headersBuf, payloadBuf)
