@@ -694,6 +694,21 @@ func (l *commitLog) drainReclaim() {
 	l.tierMu.Unlock()
 
 	kept := make([]pendingReclaim, 0, len(queued))
+	// Checked here, deleted on the next line, with no lock spanning the two —
+	// the read-then-act shape that has caused this package's worst bugs. It is
+	// safe, and the reason is worth stating so the next sweep does not re-derive
+	// it: for a SUPERSEDED backing, refs can only fall.
+	//
+	// A reader takes a backing in exactly one place — acquireBacking, called only
+	// by newSegmentScannerCache, under the segment's READ lock. ReplaceOffloaded
+	// swaps s.backing to the new object under the segment's WRITE lock, so no
+	// acquire can interleave with the swap, and afterwards the field names the
+	// new object: nothing can reach the old one to acquire it again. Every entry
+	// in this queue was put there BY that swap.
+	//
+	// So a zero here is not a lull that might end — it is terminal. Whereas
+	// referenced() on a backing a segment is still serving means nothing, which
+	// is what its own doc warns about.
 	for _, e := range queued {
 		if e.pin != nil && e.pin.referenced() {
 			kept = append(kept, e)
