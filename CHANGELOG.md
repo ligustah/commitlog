@@ -5,6 +5,33 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.39.1 — 2026-07-29
+
+- **Fix (data integrity)**: compaction RE-SIGNED corrupt records, certifying the
+  damage.
+
+  `stripFrame` recomputes a record's CRC over whatever bytes it is handed. Handed
+  one that was already damaged, it signed the damage: the rewritten record
+  carried a fresh, valid checksum over wrong bytes, and every later read —
+  including the CRC-verifying one added in v0.39.0 — reported it as sound.
+
+  Worse than serving corruption once. The stored CRC is the only evidence a
+  record is what the writer wrote, and the rewrite destroyed that evidence
+  permanently, leaving verification downstream structurally blind.
+
+  Reported by durable_streams, whose `Clean` always sets `StripHeaders` +
+  `StripBelow`, so every pass took the re-framing path.
+
+  The CRC is now verified before re-encoding, and a record that fails it is
+  copied VERBATIM — keeping its failing checksum, staying exactly as damaged as
+  it was, still returning `ErrCorruptRecord` to readers.
+
+  The clean is **not** failed. The cleaner runs unattended on a timer, so
+  erroring here would wedge compaction and retention behind one bad record until
+  someone intervened, turning an unreadable record into a full disk. The record
+  is logged, counted, and marks the segment residually strippable so the digest's
+  strip stamp cannot claim there is nothing left to strip.
+
 ## v0.39.0 — 2026-07-29
 
 A filtered read could hand a caller a record it knew nothing about the integrity
