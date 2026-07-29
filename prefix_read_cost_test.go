@@ -1,4 +1,4 @@
-﻿package commitlog
+package commitlog
 
 import (
 	"fmt"
@@ -215,4 +215,3 @@ func TestPrefixReadCostProfile(t *testing.T) {
 		})
 	}
 }
-
