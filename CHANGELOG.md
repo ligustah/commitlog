@@ -5,6 +5,44 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.40.0 — 2026-07-29
+
+A layering audit, and the one thing it found that was costing other people time.
+
+- **New**: `InspectSegment` reads a segment `.log` file without opening the log.
+
+  ```go
+  f, err := commitlog.InspectSegment(path)
+  blocks, err := f.Blocks()          // physical block layout
+  err = f.Records(func(r commitlog.RecordInfo) error { … })
+  ```
+
+  Both consumers of this package had already written this themselves, because
+  the package exported no way to read its own format — and both were wrong. One
+  walked block headers a byte short; the other hard-codes the `0xC1` magic and a
+  format version in product code to avoid importing this package. When a
+  corruption report arrived, the two mirrors disagreed with each other and with
+  the log, and the hours spent reconciling them bought nothing: the records were
+  fine and the decoders were not.
+
+  Read-only, over a directory nothing has open. No index, no recovery, no second
+  read path — a forensic tool. It is built on the same internals the log reads
+  with, so it cannot drift from the real framing the way a copy in another repo
+  does.
+
+  A damaged record is REPORTED (`RecordInfo.CRCValid`), not refused: erroring
+  would make it useless for the one job it has. And `Blocks` names the
+  pre-v0.15.0 layout in its error — those segments have a 10-byte header with no
+  version field, so this build reads their codec byte as a version and refuses a
+  zstd block as "format version 3", a version that never existed. That bare
+  message sent someone hunting a phantom writer for hours.
+
+- **Changed (internal)**: `commitlog.go` split from 2,199 to 1,671 lines — tier
+  ownership and reclamation to `tier_state.go`, filesystem retry helpers to
+  `util.go`, clean supervision and `CleanSpec` to a new `clean.go`. The read
+  functions moved out of `message_set.go` into `reader.go`, where the interface
+  they take is defined. Pure moves; no behaviour or signature changes.
+
 ## v0.39.2 — 2026-07-29
 
 Two ways a log torn mid-write could hurt the process reading it. Both found by a
