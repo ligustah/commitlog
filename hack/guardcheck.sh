@@ -133,7 +133,7 @@ run_guard "digest sidecar CRC" keydigest.go \
   'if crc32.ChecksumIEEE(body) != encoding.Uint32(crcBytes) && false {' \
   '^FuzzCorruptDigestNeverChangesTheAnswer$'
 
-run_guard "reclamation pin" commitlog.go \
+run_guard "reclamation pin" tier_state.go \
   'if e.pin != nil && e.pin.referenced() {' \
   'if e.pin != nil && e.pin.referenced() && false {' \
   '^TestReclamationWaitsForTheReaderHoldingTheOldObject$'
