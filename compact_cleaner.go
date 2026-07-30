@@ -1061,6 +1061,11 @@ func stripFrame(ms messageSet, headers []string) ([]byte, bool, error) {
 	encoding.PutUint64(frame[timestampPos:], uint64(ms.Timestamp()))
 	encoding.PutUint64(frame[leaderEpochPos:], ms.LeaderEpoch())
 	encoding.PutUint32(frame[sizePos:], uint32(len(data)))
+	// The header's checksum, over the four fields just written. This is the only
+	// place besides newMessageSetFromProto that builds a frame by hand, and
+	// forgetting it here would write records no reader accepts — the whole suite
+	// went red exactly once for that reason.
+	encoding.PutUint32(frame[headerCrcPos:], headerCrc(frame))
 	copy(frame[msgSetHeaderLen:], data)
 	return frame, true, nil
 }

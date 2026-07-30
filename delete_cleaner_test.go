@@ -53,8 +53,6 @@ func TestDeleteCleanerOneSegment(t *testing.T) {
 // Ensure Clean deletes segments to maintain the bytes limit.
 func TestDeleteCleanerBytes(t *testing.T) {
 	opts := deleteCleanerOptions{Name: "foo"}
-	opts.Retention.Bytes = 100
-	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
 
 	segs := make([]*segment, 5)
@@ -62,6 +60,14 @@ func TestDeleteCleanerBytes(t *testing.T) {
 		segs[i] = createSegment(t, dir, int64(i), 20)
 		writeToSegment(t, segs[i], int64(i), []byte("blah"))
 	}
+	// A limit that admits exactly TWO segments, derived from what a segment
+	// actually occupies rather than hard-coded. The cleaner sums Position(), so
+	// this is its own arithmetic. A literal here silently encoded the frame
+	// header's size and broke when the header grew by four bytes — the test read
+	// as a retention failure when nothing about retention had changed.
+	opts.Retention.Bytes = 2 * segs[0].Position()
+	cleaner := newDeleteCleaner(opts)
+
 	actual, err := cleaner.Clean(segs, false)
 	require.NoError(t, err)
 	require.Len(t, actual, 2)
@@ -153,8 +159,8 @@ func TestDeleteCleanerMessagesBelowLimit(t *testing.T) {
 func TestDeleteCleanerBytesMessages(t *testing.T) {
 	opts := deleteCleanerOptions{Name: "foo"}
 	opts.Retention.Messages = 15
-	opts.Retention.Bytes = 240
-	cleaner := newDeleteCleaner(opts)
+	// Bytes is the BINDING limit here (messages would keep 15), sized to admit
+	// exactly five segments. Derived, for the reason given in TestDeleteCleanerBytes.
 	dir := tempDir(t)
 
 	segs := make([]*segment, 20)
@@ -162,6 +168,8 @@ func TestDeleteCleanerBytesMessages(t *testing.T) {
 		segs[i] = createSegment(t, dir, int64(i), 20)
 		writeToSegment(t, segs[i], int64(i), []byte("blah"))
 	}
+	opts.Retention.Bytes = 5 * segs[0].Position()
+	cleaner := newDeleteCleaner(opts)
 	actual, err := cleaner.Clean(segs, false)
 	require.NoError(t, err)
 	require.Len(t, actual, 5)

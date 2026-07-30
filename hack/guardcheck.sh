@@ -141,6 +141,8 @@ run_guard "reclamation pin" tier_state.go \
 run_guard "append tail-under-lock" commitlog.go   '	l.appendMu.Lock()
 	defer l.appendMu.Unlock()'   '	// BREAK: tail read and write no longer one step'   '^TestConcurrentAppends'
 
+run_guard "frame-header CRC" reader.go   'if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got {'   'if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got && false {'   '^FuzzCorruptFrameHeaderIsNeverServedAsTruth$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

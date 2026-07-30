@@ -680,6 +680,19 @@ func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (
 	if _, err := reader.Read(ctx, headersBuf); err != nil {
 		return nil, 0, 0, 0, pkgErrors.Wrap(err, "failed to read message headers")
 	}
+	// Verify the header before trusting anything in it. offset, timestamp, leader
+	// epoch and size are a record's IDENTITY, and until the header carried its own
+	// checksum a damaged one was reported as fact — see headerCrcPos. The payload
+	// CRC below cannot help: it covers the value, and a swapped offset leaves the
+	// value perfectly intact.
+	//
+	// Checked before `size` is used, because size is one of the fields being
+	// verified: trusting it first is how a corrupt length becomes a bad
+	// allocation.
+	if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got {
+		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,
+			"frame header failed CRC: expected 0x%08x, got 0x%08x", want, got)
+	}
 	var (
 		offset      = int64(encoding.Uint64(headersBuf[offsetPos:]))
 		timestamp   = int64(encoding.Uint64(headersBuf[timestampPos:]))
@@ -727,6 +740,19 @@ func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (
 func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byte, payloadBuf []byte) (MessageMetadata, []byte, error) {
 	if _, err := reader.Read(ctx, hdrBuf); err != nil {
 		return MessageMetadata{}, payloadBuf, pkgErrors.Wrap(err, "failed to read message headers")
+	}
+	// Verify the header before trusting anything in it. offset, timestamp, leader
+	// epoch and size are a record's IDENTITY, and until the header carried its own
+	// checksum a damaged one was reported as fact — see headerCrcPos. The payload
+	// CRC below cannot help: it covers the value, and a swapped offset leaves the
+	// value perfectly intact.
+	//
+	// Checked before `size` is used, because size is one of the fields being
+	// verified: trusting it first is how a corrupt length becomes a bad
+	// allocation.
+	if want, got := storedHeaderCrc(hdrBuf), headerCrc(hdrBuf); want != got {
+		return MessageMetadata{}, payloadBuf, pkgErrors.Wrapf(ErrCorruptRecord,
+			"frame header failed CRC: expected 0x%08x, got 0x%08x", want, got)
 	}
 	var (
 		offset      = int64(encoding.Uint64(hdrBuf[offsetPos:]))

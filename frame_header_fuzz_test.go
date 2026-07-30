@@ -24,18 +24,22 @@ import (
 // length, which desynchronises framing rather than lying within it. Neither
 // rewrites a header field in place and leaves everything else plausible.
 //
-// The invariant is what the reader can actually establish about an
-// unchecksummed field:
+// The invariant, in the strong form the format now supports:
 //
-//	a record is served under an offset belonging to the segment it was found
-//	in, or the read fails — and never by panicking.
+//	a record served at offset N holds the value that was written at offset N,
+//	or the read fails — and never by panicking.
 //
-// That is deliberately WEAKER than "offset N holds the value written at offset
-// N", and the difference is not an oversight. See
-// TestFrameHeaderOffsetSwapWithinASegmentIsUndetectable: a corrupted offset that
-// lands on another offset in the SAME segment is served, because there is no
-// checksum over the header to contradict it. Out of range is catchable; within
-// range is not, without changing the format.
+// This assertion has been weakened and restored once, which is worth recording.
+// It first failed because the header was UNCHECKSUMMED: a corrupted offset
+// landing on another offset in the same segment was served as fact, and no
+// reader could contradict it. That was pinned as a known limitation and the
+// assertion narrowed to "within the segment's range", which was all the code
+// could honestly promise.
+//
+// The header now carries its own CRC (see headerCrcPos), so identity is
+// protected the way the value always was, and the strong form is provable again.
+// The limitation test that pinned the gap has been deleted — as its own comment
+// instructed, since it existed only to fail when this became true.
 // STATUS: this target FOUND the gap it was written for, and the gap is now
 // closed. It failed on its first seed — a corrupted offset field was served as
 // truth, observed as offsets 72057594037927939 and 71 in a log holding 0..15 —
@@ -157,16 +161,17 @@ func FuzzCorruptFrameHeaderIsNeverServedAsTruth(f *testing.F) {
 				if readErr != nil {
 					return
 				}
-				// In range, which the segment-bounds check guarantees. The
-				// value is NOT compared: a corrupted offset landing on another
-				// offset in the same segment serves the wrong record and cannot
-				// be detected here — pinned separately, see the doc comment.
-				if _, known := want[off]; !known {
+				expect, known := want[off]
+				if !known {
 					t.Errorf("served offset %d, which was never written", off)
 					return
 				}
-				// The payload is checksummed, so whatever record this is, its
-				// bytes must be intact.
+				if string(msg.Value()) != string(expect) {
+					t.Errorf(
+						"offset %d served the value written at a DIFFERENT offset: got %q, want %q",
+						off, msg.Value(), expect)
+					return
+				}
 				if !msg.crcMatches() {
 					t.Errorf("offset %d served a record failing its own CRC", off)
 					return

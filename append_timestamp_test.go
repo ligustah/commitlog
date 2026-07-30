@@ -50,5 +50,10 @@ func TestAppendStampsMissingTimestamps(t *testing.T) {
 	l.deleteCleaner.Retention.Age = time.Hour
 	require.NoError(t, l.Clean())
 	require.Equal(t, int64(0), l.OldestOffset(), "fresh segments must survive age retention")
-	require.Len(t, l.Segments(), len(segs)+1, "no segment may be deleted (+1: explicit-ts append may have rolled)")
+	// Nothing DELETED is the claim. Whether the explicit-ts append also rolled a
+	// fresh segment depends on how many bytes a record happens to occupy, which
+	// is not what this test is about — asserting an exact count made it fail when
+	// the frame header grew by four bytes.
+	require.GreaterOrEqual(t, len(l.Segments()), len(segs),
+		"no segment may be deleted by age retention")
 }

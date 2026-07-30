@@ -3,16 +3,30 @@ package commitlog
 import (
 	"bytes"
 	"encoding/binary"
+	"hash/crc32"
 
 	"github.com/pkg/errors"
 )
 
 const (
-	offsetPos       = 0
-	timestampPos    = 8
-	leaderEpochPos  = 16
-	sizePos         = 24
-	msgSetHeaderLen = 28
+	offsetPos      = 0
+	timestampPos   = 8
+	leaderEpochPos = 16
+	sizePos        = 24
+	// headerCrcPos holds a CRC32 over the 28 bytes before it.
+	//
+	// The record's own checksum covers its PAYLOAD, which left the frame header
+	// — a record's identity — unprotected. A damaged offset field was reported as
+	// fact: FuzzCorruptFrameHeaderIsNeverServedAsTruth produced offset 7 carrying
+	// record 0's value, CRC passing, in a log holding 0..15. A reader could
+	// reject an offset outside its segment's range (55a1d11) and nothing more,
+	// because there was no checksum to contradict one inside it.
+	//
+	// Four bytes per record buys identity the same protection the value already
+	// had. This is a FORMAT CHANGE: a segment written before it has 28-byte
+	// headers and will not read.
+	headerCrcPos    = 28
+	msgSetHeaderLen = 32
 )
 
 // HeaderBufferLen is the capacity the headersBuf argument to
@@ -25,6 +39,17 @@ const (
 const HeaderBufferLen = msgSetHeaderLen
 
 type messageSet []byte
+
+// headerCrc is the checksum over a frame header's first 28 bytes — offset,
+// timestamp, leader epoch and payload size.
+func headerCrc(hdr []byte) uint32 {
+	return crc32.Checksum(hdr[:headerCrcPos], crc32cTable)
+}
+
+// storedHeaderCrc reads the checksum a frame header carries.
+func storedHeaderCrc(hdr []byte) uint32 {
+	return encoding.Uint32(hdr[headerCrcPos:])
+}
 
 func entriesForMessageSet(basePos int64, ms []byte) []*entry {
 	entries := []*entry{}
@@ -100,6 +125,15 @@ func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message, concurre
 		}
 		n += 8
 		if err := binary.Write(buf, encoding, uint32(len)); err != nil {
+			return nil, nil, err
+		}
+		n += 4
+		// The header's own checksum, over the 28 bytes just written. Taken from
+		// the buffer rather than recomputed from the locals, so it is a checksum
+		// of what will actually be on disk.
+		framed := buf.Bytes()
+		hdrStart := buf.Len() - headerCrcPos
+		if err := binary.Write(buf, encoding, headerCrc(framed[hdrStart:])); err != nil {
 			return nil, nil, err
 		}
 		n += 4
