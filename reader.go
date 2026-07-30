@@ -363,6 +363,12 @@ func (r *uncommittedReader) waitForData(ctx context.Context, seg *segment) error
 	select {
 	case <-r.cl.closed:
 		seg.removeWaiter(r)
+		// io.EOF here is NOT end-of-data — records past r.pos may well exist. It
+		// survives only because Reader.ReadMessage turns any error into
+		// ErrCommitLogClosed when IsClosed(), and IsClosed() reads this same
+		// channel, so the conversion cannot lose the race. A second consumer of
+		// contextReader that skipped that conversion would inherit a reader that
+		// reports a closed log as a fully drained one.
 		return io.EOF
 	case <-ctx.Done():
 		seg.removeWaiter(r)
@@ -555,6 +561,8 @@ func (r *committedReader) waitForHW(ctx context.Context, hw int64) error {
 	select {
 	case <-r.cl.closed:
 		r.cl.removeHWWaiter(r)
+		// See uncommittedReader.waitForData: end-of-data is the wrong statement
+		// here too, and the same upstream conversion is what makes it safe.
 		return io.EOF
 	case <-ctx.Done():
 		r.cl.removeHWWaiter(r)

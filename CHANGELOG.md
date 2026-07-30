@@ -5,6 +5,40 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.42.1 — 2026-07-30
+
+- **Hardening**: `bufReader` no longer invents `io.EOF`. Three branches returned
+  end-of-data for conditions that were not the end of anything: a reader used
+  before being positioned on a segment, a short copy out of a buffer the guard
+  above had just established was long enough, and a backing that returned no
+  bytes and no error. Each is now an error naming the condition.
+
+  All three were unreachable — both constructors refuse a nil segment, the short
+  copy is impossible given the guard's arithmetic, and every backing here
+  documents `os.File.ReadAt` semantics where the end returns `io.EOF`. That is
+  the reason to fix them rather than leave them: nothing can fail while the
+  condition never arises, so whoever makes one reachable would get a silent
+  truncation instead of a test failure.
+
+  Removing them left `io` unused in the file, which is the finding in one line.
+  `bufReader` has no way to know whether a log ends; an empty buffer is a
+  statement about the buffer. It now only forwards the segment's `io.EOF`.
+
+  Prompted by durable_streams reporting what v0.42.0 fixed for them: two of their
+  scan loops break on `io.EOF` as an ordinary end and ran under a caller's
+  context, so a cancellation made them return **partial results as complete
+  answers**. Their generalisation — an end-of-data signal doubling as a failure
+  signal makes a consumer stop early and report success — is what this sweep
+  applies to the rest of the package.
+
+  The two remaining `io.EOF`-on-close returns in `reader.go` are correct but only
+  because `Reader.ReadMessage` converts them to `ErrCommitLogClosed`, and
+  `IsClosed()` reads the same channel that woke the reader, so the conversion
+  cannot lose the race. Both now say so where the `io.EOF` is returned, because
+  a second consumer of `contextReader` that skipped the conversion would inherit
+  a reader that reports a closed log as a fully drained one. `index.ReadAt` and
+  `collectRun` already made this choice and already explain it.
+
 ## v0.42.0 — 2026-07-30
 
 - **Fix (breaking for anyone matching on io.EOF)**: a cancelled context is no
