@@ -5,6 +5,37 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.41.1 — 2026-07-30
+
+- **Fix (panic)**: a `headersBuf` smaller than `HeaderBufferLen` panicked instead
+  of returning an error.
+
+  Reported by durable_streams within an hour of v0.41.0: 24 call sites across 18
+  files still allocated 28 bytes, and every one panicked inside `storedHeaderCrc`,
+  indexing past the end of its own argument. Their call sites were stale; crashing
+  the host process over it was still this package's fault.
+
+  It could not have been caught downstream either. `Read` fills whatever it is
+  given, so a short buffer quietly consumes a partial header and desynchronises
+  the stream — the header CRC would then report corruption in a log that is
+  perfectly intact.
+
+  Both read paths now check up front and name `HeaderBufferLen` in the error.
+
+### Migration from a pre-v0.41.0 log
+
+Stated plainly, because v0.41.0's note was not loud enough. **v0.41.0 and later
+cannot read segments written before it.** The frame header grew by four bytes and
+carries no version field of its own — the irony is deliberate to name: the header
+was unprotected precisely because nothing in it described itself.
+
+There is no in-place upgrade and no converter today. A deployment with data on
+disk needs a dump-and-reload through the old version. If a rolling upgrade
+matters, say so — a legacy read path is possible (try the 32-byte header, fall
+back to 28 when its CRC fails, which the checksum makes a strong signal) but it is
+not written, and a heuristic that guesses frame layout deserves a decision rather
+than an assumption.
+
 ## v0.41.0 — 2026-07-30
 
 **BREAKING FORMAT CHANGE.** Segments written by an earlier version will not read.
