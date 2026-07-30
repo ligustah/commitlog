@@ -30,11 +30,22 @@ carries no version field of its own — the irony is deliberate to name: the hea
 was unprotected precisely because nothing in it described itself.
 
 There is no in-place upgrade and no converter today. A deployment with data on
-disk needs a dump-and-reload through the old version. If a rolling upgrade
-matters, say so — a legacy read path is possible (try the 32-byte header, fall
-back to 28 when its CRC fails, which the checksum makes a strong signal) but it is
-not written, and a heuristic that guesses frame layout deserves a decision rather
-than an assumption.
+disk needs a dump-and-reload through the old version.
+
+**Do not implement the obvious fallback.** An earlier revision of this section
+suggested trying the 32-byte header and falling back to 28 when its CRC fails.
+That is wrong, and durable_streams was right to say so: a CRC failure means
+EITHER "an old frame" OR "a corrupt new frame", and nothing distinguishes them. A
+genuinely corrupted 32-byte header would fail its checksum, be reinterpreted as a
+plausible 28-byte one, and served as fact — exactly the defect v0.41.0 closed,
+reintroduced on the error path. A checksum failure is the one signal that must
+never be recovered from by guessing.
+
+If a rolling upgrade is needed, the sound shape is a per-SEGMENT version marker.
+A segment is homogeneous — one writer, one format, immutable once sealed — so the
+layout is decided ONCE from a declaration instead of inferred per record, the way
+block framing is already decided by a magic byte. That is unbuilt; ask for it
+rather than assuming it exists.
 
 ## v0.41.0 — 2026-07-30
 
