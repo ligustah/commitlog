@@ -778,12 +778,15 @@ func (l *commitLog) EarliestOffsetAfterTimestamp(timestamp int64) (int64, error)
 
 	// Find the first segment whose base timestamp is greater than the given
 	// timestamp.
+	// findSegmentIndexByTimestamp cannot return io.EOF: it handles the empty
+	// segment itself (see the comment there) and reports anything else as a real
+	// error. There used to be an io.EOF arm here returning the next assignable
+	// offset with a nil error, left behind when that function stopped producing
+	// one. Removed rather than kept as belt-and-braces, because "beyond the end
+	// of the log" is already answered below by the idx == len(segments) path —
+	// so the only thing the arm could still do was convert a future read failure
+	// into a fabricated offset the caller would trust.
 	idx, err := findSegmentIndexByTimestamp(l.segments, timestamp)
-	if err == io.EOF {
-		// EOF indicates there is no such segment, meaning the timestamp is
-		// beyond the end of the log so return the next assignable offset.
-		return l.segments[len(l.segments)-1].NextOffset(), nil
-	}
 	if err != nil {
 		return 0, errors.Wrap(err, "failed to find log segment for timestamp")
 	}
@@ -800,7 +803,11 @@ func (l *commitLog) EarliestOffsetAfterTimestamp(timestamp int64) (int64, error)
 	if err == nil {
 		return entry.Offset, nil
 	}
-	if err != ErrEntryNotFound && err != io.EOF {
+	// ErrEntryNotFound only. io.EOF was accepted here too, which meant a
+	// truncated index — position claiming more entries than are mapped — was
+	// answered with an offset instead of an error. errors.Is, so a wrapped
+	// not-found still reads as one.
+	if !errors.Is(err, ErrEntryNotFound) {
 		return 0, errors.Wrap(err, "failed to find log entry for timestamp")
 	}
 	// This indicates there are no entries in the segment whose timestamp
@@ -857,7 +864,11 @@ func (l *commitLog) LatestOffsetBeforeTimestamp(timestamp int64) (int64, error) 
 		return entry.Offset - 1, nil
 	}
 
-	if err != ErrEntryNotFound && err != io.EOF {
+	// ErrEntryNotFound only — see EarliestOffsetAfterTimestamp. This one is the
+	// sharper of the two: the fallback below answers with the segment's NEWEST
+	// offset, so accepting a read failure here told a caller asking "where was I
+	// at time T" that it was already caught up.
+	if !errors.Is(err, ErrEntryNotFound) {
 		return 0, errors.Wrap(err, "failed to find log entry for timestamp")
 	}
 

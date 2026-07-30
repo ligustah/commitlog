@@ -138,6 +138,18 @@ run_guard "append tail-under-lock" commitlog.go   '	l.appendMu.Lock()
 
 run_guard "frame-header CRC" reader.go   'if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got {'   'if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got && false {'   '^FuzzCorruptFrameHeaderIsNeverServedAsTruth$'
 
+# scanForward must report a failed read rather than calling it "entry not found",
+# because both timestamp lookups turn not-found into a plausible offset. The
+# neutralization keeps errors.Is evaluated (`|| true`) so no import is orphaned.
+run_guard "scanForward read failure" segment.go \
+  'if errors.Is(err, io.EOF) {
+				return nil, ErrEntryNotFound
+			}' \
+  'if errors.Is(err, io.EOF) || true {
+				return nil, ErrEntryNotFound
+			}' \
+  '^TestTimestampLookupsRefuseAFailedReadInsteadOfGuessing$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

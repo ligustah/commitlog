@@ -5,6 +5,50 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.42.2 — 2026-07-30
+
+- **Fix**: an as-of timestamp lookup no longer answers a failed read with an
+  offset. `LatestOffsetBeforeTimestamp` returned the segment's **newest** offset,
+  with a nil error, when the read behind it failed — telling a consumer asking
+  "where was I at time T" that it was already caught up, so every record it had
+  not yet read was skipped. Silently, with nothing to log.
+
+  `scanForward` is the block-mode (compressed segment) path under both
+  `findEntry` and `findEntryByTimestamp`. It has no end bound — it walks frames
+  until a read fails — so `io.EOF` is legitimately its stop condition and
+  `ErrEntryNotFound` its answer. But EVERY other error arrived as
+  `ErrEntryNotFound` too, and both timestamp lookups convert that into a
+  plausible offset. `ErrSegmentReplaced` is the one that matters: compaction
+  produces it routinely, and `Reader.ReadMessage` **retries** it rather than
+  accepting it. `ErrSegmentClosed` and a failed tiered object fetch are the
+  others.
+
+  Now only `io.EOF` ends the scan; everything else is wrapped and returned. The
+  two lookups match `ErrEntryNotFound` with `errors.Is` and no longer also accept
+  `io.EOF`, which had meant a truncated index — `position` claiming more entries
+  than are mapped — was answered with an offset instead of an error.
+
+  `EarliestOffsetAfterTimestamp` was less severe and worth stating precisely: it
+  retries the next segment and propagates that error, so it *failed* — just
+  describing a failed read as "entry not found". It fabricates an offset only
+  when the target lands in the last segment.
+
+  Also removed a dead `io.EOF` arm in `EarliestOffsetAfterTimestamp` that returned
+  the next assignable offset with a nil error. `findSegmentIndexByTimestamp`
+  stopped producing `io.EOF` when the empty-segment case was fixed; the arm's only
+  remaining effect would have been to convert a future read failure into a
+  fabricated offset. "Beyond the end of the log" is already answered by the
+  `idx == len(segments)` path.
+
+  Verified by neutralising the guard: `LatestOffsetBeforeTimestamp` returned
+  offset 23 with a nil error. Added as an eighth guard to `hack/guardcheck.sh`.
+
+  The regression test took two attempts, and the first is the more useful record:
+  it closed the segments to break the read, but that closes their indexes too, so
+  `findSegmentIndexByTimestamp` failed first and the test passed with the fix
+  removed. It now swaps the segment's `segmentBacking` — the data, leaving the
+  index alone — which is what makes the injection land on the code under test.
+
 ## v0.42.1 — 2026-07-30
 
 - **Hardening**: `bufReader` no longer invents `io.EOF`. Three branches returned

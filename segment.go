@@ -1828,7 +1828,25 @@ func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entr
 	pos := start
 	for {
 		if _, err := s.readAtLocked(hdr, pos); err != nil {
-			return nil, ErrEntryNotFound
+			// ONLY the end of the segment means "nothing here matched". This scan
+			// has no end bound — it relies on the read failing to terminate — so
+			// io.EOF is its stop condition and ErrEntryNotFound is the right answer.
+			//
+			// Every OTHER error used to arrive here as ErrEntryNotFound too, and
+			// that was a silent wrong answer rather than a lost one.
+			// ErrSegmentClosed, ErrSegmentReplaced (which compaction produces
+			// routinely, and which Reader.ReadMessage RETRIES rather than accepts),
+			// a corrupt index, a failed store fetch for a tiered segment: each
+			// became "no entry matches your timestamp", and both
+			// LatestOffsetBeforeTimestamp and EarliestOffsetAfterTimestamp turn
+			// that into a plausible offset with a NIL error — the newest offset in
+			// the segment, or one past the end of the log. A consumer resuming
+			// as-of a timestamp would be told it was already at the end and skip
+			// every record it had not read.
+			if errors.Is(err, io.EOF) {
+				return nil, ErrEntryNotFound
+			}
+			return nil, errors.Wrapf(err, "scan for entry at position %d", pos)
 		}
 		m := messageSet(hdr)
 		size := m.Size()
