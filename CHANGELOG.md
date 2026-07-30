@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.41.0 — 2026-07-30
+
+**BREAKING FORMAT CHANGE.** Segments written by an earlier version will not read.
+There is no migration; the header layout changed.
+
+- **Fix (data integrity)**: the frame header is now checksummed, so a record's
+  IDENTITY is protected the way its value already was.
+
+  A record's CRC covers its payload. The 28 bytes in front of it — offset,
+  timestamp, leader epoch, size — carried no checksum, so a damaged offset was
+  reported as fact. `FuzzCorruptFrameHeaderIsNeverServedAsTruth` produced offset
+  7 carrying record 0's value, CRC passing, in a log holding 0..15. v0.39.2's
+  segment-bounds check could reject an offset outside its segment's range and
+  nothing more, because nothing contradicted one inside it.
+
+  The header is now 32 bytes: a CRC32 over the four fields. Verified on both read
+  paths, and BEFORE `size` is used — size is one of the fields being verified,
+  and trusting it first is how a corrupt length becomes a bad allocation.
+
+  Four bytes per record. `HeaderBufferLen` (v0.40.1) already carries the size, so
+  callers using it need no change; callers who copied the literal `28` do.
+
+- **Changed**: `ReadMessage` and `ReadMessageMetadata` return `ErrCorruptRecord`
+  for a header that fails its checksum, the same sentinel a bad payload gets.
+
 ## v0.40.1 — 2026-07-29
 
 Two details this package leaked, reported by durable_streams against v0.40.0.

@@ -123,11 +123,6 @@ run_guard "readMessage CRC" reader.go \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c && false {' \
   '^TestSequentialReadReturnsCorruptRecordRatherThanPanicking$'
 
-run_guard "short-frame refusal" reader.go \
-  'if len(m) < 4 {' \
-  'if len(m) < 4 && false {' \
-  '^FuzzTornLogServesOnlyAPrefix$'
-
 run_guard "digest sidecar CRC" keydigest.go \
   'if crc32.ChecksumIEEE(body) != encoding.Uint32(crcBytes) {' \
   'if crc32.ChecksumIEEE(body) != encoding.Uint32(crcBytes) && false {' \

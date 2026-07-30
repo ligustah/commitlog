@@ -59,6 +59,16 @@ func FuzzCorruptFrameHeaderIsNeverServedAsTruth(f *testing.F) {
 	f.Add([]byte{5, 16, 0x80}) // leader epoch
 	f.Add([]byte{7, 7, 0x40})  // offset field, high byte
 	f.Add([]byte{2, 26, 0x10}) // size field, high half
+	// An IN-RANGE offset swap: frame 0's low offset byte, 0 -> 7, an offset that
+	// genuinely exists in the fixture. This is the case only the header CRC can
+	// catch — the segment-bounds check passes it — so without this seed the
+	// corpus exercises only out-of-range offsets and guardcheck reports the
+	// header CRC as uncovered. It did, which is how this seed came to exist.
+	//
+	// Written as an explicit triple rather than left to the fuzzer because `at`
+	// is taken modulo msgSetHeaderLen: when the header grew from 28 to 32 bytes
+	// the saved corpus entry silently started addressing a different field.
+	f.Add([]byte{0, 7, 0x07})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) < 3 {

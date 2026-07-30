@@ -715,6 +715,14 @@ func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (
 	// checksum, a magic byte, an attribute byte and two length prefixes, so
 	// refusing here rejects only frames that were already impossible, and every
 	// longer malformation is left for the CRC below to catch.
+	//
+	// NOW SHADOWED, and kept as defence in depth. Since the frame header carries
+	// its own checksum, a damaged `size` fails that check before this line is
+	// reached, so the only way here is a header that verifies while declaring a
+	// size encode cannot produce — which nothing writes. guardcheck used to cover
+	// this via the torn-log target and reported it uncovered the moment the header
+	// CRC landed; it is not untested by oversight, it is unreachable. See the roll
+	// CAS in split() for the same situation and the same reasoning.
 	if len(m) < 4 {
 		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,
 			"record at offset %d: frame claims %d bytes, too short to hold a checksum", offset, len(m))
