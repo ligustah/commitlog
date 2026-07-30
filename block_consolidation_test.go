@@ -53,7 +53,7 @@ func TestCleanConsolidatesTinyBlocks(t *testing.T) {
 		r, err := l.NewReader(From(0), Uncommitted(), Follow())
 		require.NoError(t, err)
 		out := map[string]string{}
-		headers := make([]byte, 28)
+		headers := make([]byte, HeaderBufferLen)
 		for i := 0; i < 8000; i++ {
 			msg, _, _, _, err := r.ReadMessage(context.Background(), headers)
 			require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestCleanConsolidatesTinyBlocks(t *testing.T) {
 	for _, off := range []int64{0, 1, 999, 1500, 2500, 7998} {
 		r, err := l.NewReader(From(off), Uncommitted(), Follow())
 		require.NoError(t, err)
-		headers := make([]byte, 28)
+		headers := make([]byte, HeaderBufferLen)
 		msg, gotOff, _, _, err := r.ReadMessage(context.Background(), headers)
 		require.NoError(t, err)
 		require.Equal(t, off, gotOff)
@@ -313,7 +313,7 @@ func TestConsolidationOnlyPassForNonCompactedLog(t *testing.T) {
 		r, err := l.NewReader(From(0), Uncommitted(), Follow())
 		require.NoError(t, err)
 		out := map[int64]string{}
-		headers := make([]byte, 28)
+		headers := make([]byte, HeaderBufferLen)
 		for i := 0; i < 12000; i++ {
 			msg, off, _, _, err := r.ReadMessage(context.Background(), headers)
 			require.NoError(t, err)

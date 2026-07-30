@@ -132,7 +132,7 @@ func FuzzCorruptDigestNeverChangesTheAnswer(f *testing.F) {
 			return // refusing to start is a fine answer
 		}
 		got := make([]readRec, 0, len(want))
-		hdr := make([]byte, 28)
+		hdr := make([]byte, HeaderBufferLen)
 		for i := 0; i < records+16; i++ {
 			msg, off, _, _, readErr := r.ReadMessage(ctx, hdr)
 			if readErr != nil {

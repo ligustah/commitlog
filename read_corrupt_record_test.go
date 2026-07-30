@@ -88,7 +88,7 @@ func TestSequentialReadReturnsCorruptRecordRatherThanPanicking(t *testing.T) {
 	)
 	func() {
 		defer func() { panicked = recover() }()
-		hdr := make([]byte, 28)
+		hdr := make([]byte, HeaderBufferLen)
 		for i := 0; i < 20; i++ {
 			if _, _, _, _, err := r.ReadMessage(ctx, hdr); err != nil {
 				readErr = err

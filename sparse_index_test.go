@@ -80,7 +80,7 @@ func TestSparseIndexRawStillDense(t *testing.T) {
 func seekEveryOffset(t *testing.T, l *commitLog, want []*Message, uncommitted bool) {
 	t.Helper()
 	ctx := context.Background()
-	hdr := make([]byte, 28)
+	hdr := make([]byte, HeaderBufferLen)
 	for target := int64(0); target < int64(len(want)); target++ {
 		opts := []ReadOption{From(target), Follow()}
 		if uncommitted {
@@ -172,7 +172,7 @@ func TestSparseRecoverySeek(t *testing.T) {
 	l2.SetHighWatermark(l2.NewestOffset())
 
 	ctx := context.Background()
-	hdr := make([]byte, 28)
+	hdr := make([]byte, HeaderBufferLen)
 	for _, target := range []int64{0, 5, 11, 50, 110, 149, int64(len(want)) - 1} {
 		r, err := l2.NewReader(From(target), Uncommitted(), Follow())
 		require.NoError(t, err)

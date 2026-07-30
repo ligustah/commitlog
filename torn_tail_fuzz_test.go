@@ -120,7 +120,7 @@ func FuzzTornLogServesOnlyAPrefix(f *testing.F) {
 			return
 		}
 
-		hdr := make([]byte, 28)
+		hdr := make([]byte, HeaderBufferLen)
 		for i := 0; i < records+8; i++ {
 			msg, off, _, _, readErr := r.ReadMessage(ctx, hdr)
 			if readErr != nil {

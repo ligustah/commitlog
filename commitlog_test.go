@@ -37,7 +37,7 @@ func TestNewCommitLog(t *testing.T) {
 	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	for i, exp := range msgs {
 		msg, offset, timestamp, leaderEpoch, err := r.ReadMessage(ctx, headers)
 		require.NoError(t, err)
@@ -71,7 +71,7 @@ func TestAppendMessageSet(t *testing.T) {
 	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
 
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	for i, exp := range msgs {
 		msg, offset, timestamp, leaderEpoch, err := r.ReadMessage(ctx, headers)
 		require.NoError(t, err)
@@ -110,7 +110,7 @@ func TestCommitLogRecover(t *testing.T) {
 			r, err := l.NewReader(From(0), Uncommitted(), Follow())
 			require.NoError(t, err)
 
-			headers := make([]byte, 28)
+			headers := make([]byte, HeaderBufferLen)
 			for i, exp := range msgs {
 				msg, offset, timestamp, leaderEpoch, err := r.ReadMessage(ctx, headers)
 				require.NoError(t, err)
@@ -704,7 +704,7 @@ func TestSetReadonlyReadToLEO(t *testing.T) {
 
 	l.SetReadonly(true)
 
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	for range msgs {
 		_, _, _, _, err := r.ReadMessage(context.Background(), headers)
 		require.NoError(t, err)
@@ -736,7 +736,7 @@ func TestSetReadonlyDoNotWakeHWLessThanLEO(t *testing.T) {
 		l.SetHighWatermark(4)
 	}()
 
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	for range msgs {
 		_, _, _, _, err := r.ReadMessage(context.Background(), headers)
 		require.NoError(t, err)
@@ -762,7 +762,7 @@ func TestSetReadonlyWakeHWEqualsLEO(t *testing.T) {
 		l.SetReadonly(true)
 	}()
 
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	_, _, _, _, err = r.ReadMessage(context.Background(), headers)
 	require.Equal(t, ErrCommitLogReadonly, err)
 }

@@ -220,7 +220,7 @@ func TestCommitLogCompressionE2E(t *testing.T) {
 				ctx := context.Background()
 				r, err := l.NewReader(From(0), Uncommitted(), Follow())
 				require.NoError(t, err)
-				hdr := make([]byte, 28)
+				hdr := make([]byte, HeaderBufferLen)
 				for i, exp := range want {
 					msg, offset, _, _, err := r.ReadMessage(ctx, hdr)
 					require.NoError(t, err, "msg %d", i)
@@ -253,7 +253,7 @@ func TestCommitLogCompressionRecover(t *testing.T) {
 	ctx := context.Background()
 	r, err := l2.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
-	hdr := make([]byte, 28)
+	hdr := make([]byte, HeaderBufferLen)
 	for i, exp := range want {
 		msg, offset, _, _, err := r.ReadMessage(ctx, hdr)
 		require.NoError(t, err, "msg %d", i)
@@ -293,7 +293,7 @@ func TestCommitLogCompressionBackwardCompat(t *testing.T) {
 	ctx := context.Background()
 	r, err := l2.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
-	hdr := make([]byte, 28)
+	hdr := make([]byte, HeaderBufferLen)
 	for i, exp := range all {
 		msg, offset, _, _, err := r.ReadMessage(ctx, hdr)
 		require.NoError(t, err, "msg %d", i)
@@ -397,7 +397,7 @@ func TestCompressionCompaction(t *testing.T) {
 	ctx := context.Background()
 	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
-	hdr := make([]byte, 28)
+	hdr := make([]byte, HeaderBufferLen)
 	for _, exp := range expected {
 		msg, offset, _, _, err := r.ReadMessage(ctx, hdr)
 		require.NoError(t, err)

@@ -137,7 +137,7 @@ func FuzzCorruptedRecordIsNeverServedSilently(f *testing.F) {
 		// that differ from what was written.
 		drain := func(r *Reader) map[string][]byte {
 			got := map[string][]byte{}
-			hdr := make([]byte, 28)
+			hdr := make([]byte, HeaderBufferLen)
 			for i := 0; i < records+5; i++ {
 				msg, _, _, _, rerr := r.ReadMessage(ctx, hdr)
 				if rerr != nil {

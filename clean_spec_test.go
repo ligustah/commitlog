@@ -38,7 +38,7 @@ func readAllMsgs(t *testing.T, l *commitLog) map[int64]SerializedMessage {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	newest := l.NewestOffset()
 	for {
 		msg, off, _, _, err := r.ReadMessage(ctx, headers)

@@ -79,7 +79,7 @@ func (e *offloadIndexEnv) readVal(l CommitLog, off int64) string {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	msg, _, _, _, err := r.ReadMessage(context.Background(), make([]byte, 28))
+	msg, _, _, _, err := r.ReadMessage(context.Background(), make([]byte, HeaderBufferLen))
 	if err != nil {
 		e.t.Fatalf("read offset %d: %v", off, err)
 	}

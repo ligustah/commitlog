@@ -140,7 +140,7 @@ func TestConcurrentReadersAndProbesOnLiveLog(t *testing.T) {
 					return
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				headers := make([]byte, 28)
+				headers := make([]byte, HeaderBufferLen)
 				for i := 0; i < 64; i++ {
 					if _, _, _, _, err := rd.ReadMessage(ctx, headers); err != nil {
 						if errors.Is(err, io.EOF) || errors.Is(err, ErrSegmentNotFound) ||

@@ -70,7 +70,7 @@ func TestRecoverTailTruncatesTornSuffix(t *testing.T) {
 	require.EqualValues(t, 5, l2.HighWatermark())
 	r, err := l2.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	for i := 0; i <= 5; i++ {
 		_, off, _, _, err := r.ReadMessage(context.Background(), headers)
 		require.NoError(t, err)

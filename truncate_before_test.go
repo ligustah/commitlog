@@ -32,7 +32,7 @@ func readAll(t *testing.T, l CommitLog) []int64 {
 	newest := l.NewestOffset()
 	r, err := l.NewReader(From(l.OldestOffset()), Uncommitted(), Follow())
 	require.NoError(t, err)
-	hdr := make([]byte, 28)
+	hdr := make([]byte, HeaderBufferLen)
 	var got []int64
 	for {
 		_, off, _, _, err := r.ReadMessage(context.Background(), hdr)

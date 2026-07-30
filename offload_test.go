@@ -43,7 +43,7 @@ func readVal(t *testing.T, l CommitLog, offset int64) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg, _, _, _, err := r.ReadMessage(context.Background(), make([]byte, 28))
+	msg, _, _, _, err := r.ReadMessage(context.Background(), make([]byte, HeaderBufferLen))
 	if err != nil {
 		t.Fatalf("read offset %d: %v", offset, err)
 	}

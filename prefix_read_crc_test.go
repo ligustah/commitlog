@@ -84,7 +84,7 @@ func TestKeyPrefixRefusesRecordsThatFailCRC(t *testing.T) {
 	r, err := cl2.NewReader(KeyPrefix([]byte("want:005")))
 	require.NoError(t, err)
 
-	msg, _, _, _, err := r.ReadMessage(ctx, make([]byte, 28))
+	msg, _, _, _, err := r.ReadMessage(ctx, make([]byte, HeaderBufferLen))
 	if err == nil {
 		t.Fatalf("a KeyPrefix read SERVED a record that fails its own CRC: %q", string(msg.Value()))
 	}
@@ -171,7 +171,7 @@ func TestKeyPrefixRefusesTieredRecordsThatFailCRC(t *testing.T) {
 	r, err := cl2.NewReader(KeyPrefix([]byte("want:005")), Until(bound))
 	require.NoError(t, err)
 
-	msg, _, _, _, err := r.ReadMessage(ctx, make([]byte, 28))
+	msg, _, _, _, err := r.ReadMessage(ctx, make([]byte, HeaderBufferLen))
 	if err == nil {
 		t.Fatalf("a tiered KeyPrefix read SERVED a record that fails its own CRC: %q",
 			string(msg.Value()))

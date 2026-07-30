@@ -103,7 +103,7 @@ func TestCompactionDoesNotResignCorruptRecords(t *testing.T) {
 	require.NoError(t, err)
 
 	var (
-		hdr        = make([]byte, 28)
+		hdr        = make([]byte, HeaderBufferLen)
 		served     int
 		corruptErr error
 	)

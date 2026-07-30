@@ -18,7 +18,7 @@ func countByKey(t *testing.T, l *commitLog) map[string]int {
 	}
 	r, err := l.NewReader(From(0), Uncommitted(), Follow())
 	require.NoError(t, err)
-	hdr := make([]byte, 28)
+	hdr := make([]byte, HeaderBufferLen)
 	for {
 		msg, off, _, _, err := r.ReadMessage(context.Background(), hdr)
 		if err != nil {

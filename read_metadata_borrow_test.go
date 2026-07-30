@@ -42,7 +42,7 @@ func TestReadMessageMetadataLendsItsBuffer(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	var payload []byte
 
 	meta, payload, err := r.ReadMessageMetadata(ctx, headers, payload)

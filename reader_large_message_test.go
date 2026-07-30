@@ -34,7 +34,7 @@ func TestReaderCommittedLargeMessage(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	for i, want := range msgs {
 		msg, offset, _, _, err := r.ReadMessage(ctx, headers)
 		require.NoError(t, err, "message %d", i)
@@ -67,7 +67,7 @@ func TestReaderCommittedLargeMessageMetadata(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	var payload []byte
 	for i, want := range msgs {
 		meta, newBuf, err := r.ReadMessageMetadata(ctx, headers, payload)

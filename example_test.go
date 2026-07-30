@@ -48,7 +48,7 @@ func Example() {
 		panic(err)
 	}
 
-	hdr := make([]byte, 28)
+	hdr := make([]byte, commitlog.HeaderBufferLen)
 	for range offsets {
 		msg, offset, _, _, err := r.ReadMessage(context.Background(), hdr)
 		if err != nil {

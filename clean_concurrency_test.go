@@ -92,7 +92,7 @@ func TestCleanConcurrentWithTruncateBefore(t *testing.T) {
 	defer cancel()
 	r, err := l.NewReader(From(oldest), Uncommitted(), Follow())
 	require.NoError(t, err)
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	read := 0
 	for {
 		_, offset, _, _, err := r.ReadMessage(ctx, headers)

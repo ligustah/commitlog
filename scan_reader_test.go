@@ -35,7 +35,7 @@ func TestNewScanReaderStopsAtEndOfData(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	hdr := make([]byte, 28)
+	hdr := make([]byte, HeaderBufferLen)
 	read := 0
 	for {
 		_, _, _, _, err := r.ReadMessage(ctx, hdr)
@@ -79,7 +79,7 @@ func TestNewScanReaderUnbackedOffsetIsRefused(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, off, _, _, rerr := r.ReadMessage(ctx, make([]byte, 28))
+	_, off, _, _, rerr := r.ReadMessage(ctx, make([]byte, HeaderBufferLen))
 	require.NoError(t, rerr)
 	require.Equal(t, int64(0), off)
 }
@@ -111,7 +111,7 @@ func TestNewScanReaderClampsBelowOldest(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, off, _, _, rerr := r.ReadMessage(ctx, make([]byte, 28))
+	_, off, _, _, rerr := r.ReadMessage(ctx, make([]byte, HeaderBufferLen))
 	require.NoError(t, rerr)
 	require.Equal(t, int64(6), off, "scan must start at the oldest surviving record")
 }

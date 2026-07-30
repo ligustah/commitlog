@@ -39,7 +39,7 @@ func TestAppendStampsMissingTimestamps(t *testing.T) {
 	l.SetHighWatermark(offsets[0])
 	r, err := l.NewReader(From(offsets[0]), Uncommitted(), Follow())
 	require.NoError(t, err)
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	_, _, ts, _, err := r.ReadMessage(context.Background(), headers)
 	require.NoError(t, err)
 	require.Equal(t, explicit, ts)

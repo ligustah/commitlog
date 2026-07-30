@@ -26,7 +26,7 @@ func drainReader(t *testing.T, r *Reader) []readRec {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var out []readRec
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 	for {
 		msg, off, _, _, err := r.ReadMessage(ctx, headers)
 		if err != nil {
@@ -308,7 +308,7 @@ func TestReaderFollowSeesLaterAppends(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	headers := make([]byte, 28)
+	headers := make([]byte, HeaderBufferLen)
 
 	msg, _, _, _, err := r.ReadMessage(ctx, headers)
 	require.NoError(t, err)
