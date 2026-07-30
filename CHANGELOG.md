@@ -41,11 +41,18 @@ plausible 28-byte one, and served as fact — exactly the defect v0.41.0 closed,
 reintroduced on the error path. A checksum failure is the one signal that must
 never be recovered from by guessing.
 
-If a rolling upgrade is needed, the sound shape is a per-SEGMENT version marker.
-A segment is homogeneous — one writer, one format, immutable once sealed — so the
-layout is decided ONCE from a declaration instead of inferred per record, the way
-block framing is already decided by a magic byte. That is unbuilt; ask for it
-rather than assuming it exists.
+**Decided: there will be no migration path.** This is a clean break, taken
+deliberately while the cost is small, not an omission to be fixed later. Do not
+open this again expecting a converter.
+
+Recorded for whoever needs it anyway: the sound shape would be a per-SEGMENT
+version marker — a segment is homogeneous (one writer, one format, immutable once
+sealed), so the layout is decided ONCE from a declaration rather than inferred per
+record, the way block framing is already decided by its magic byte. A per-LOG
+marker cannot serve, because a rolling upgrade is exactly the moment one directory
+holds both formats. The cheapest form would be a sidecar beside `.keys` and
+`.offloaded`, absent meaning legacy; a preamble inside the `.log` would shift every
+byte position, and the index stores file offsets.
 
 ## v0.41.0 — 2026-07-30
 
