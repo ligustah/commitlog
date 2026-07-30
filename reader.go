@@ -677,6 +677,25 @@ func readPayload(ctx context.Context, reader contextReader, size int, reuse []by
 // leader epoch. This may return uncommitted messages if the reader was created
 // with the uncommitted flag set to true.
 func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (SerializedMessage, int64, int64, uint64, error) {
+	// A buffer too small to hold a frame header cannot be read into, and must not
+	// be indexed past. Reported by durable_streams: 24 of their call sites still
+	// allocated 28 bytes, and on v0.41.0 every one PANICKED inside
+	// storedHeaderCrc — an index past the end of the caller's slice.
+	//
+	// That is a caller mistake and still not something to crash their process
+	// over, which is the whole point of ErrCorruptRecord replacing a panic
+	// earlier. It also cannot be left to the Read below: Read fills whatever it
+	// is given, so a short buffer silently consumes a partial header and
+	// desynchronises the stream, and the failure then surfaces somewhere else
+	// entirely.
+	//
+	// The error names HeaderBufferLen rather than a number, so the fix is
+	// copy-pasteable and stays correct if the header changes again.
+	if len(headersBuf) < msgSetHeaderLen {
+		return nil, 0, 0, 0, pkgErrors.Errorf(
+			"commitlog: headersBuf is %d bytes, need at least HeaderBufferLen (%d)",
+			len(headersBuf), msgSetHeaderLen)
+	}
 	if _, err := reader.Read(ctx, headersBuf); err != nil {
 		return nil, 0, 0, 0, pkgErrors.Wrap(err, "failed to read message headers")
 	}
@@ -746,6 +765,12 @@ func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (
 // This is intended for metadata-only scans (LSO rebuild, offset tracking)
 // where the value bytes are not needed and full deserialization is wasteful.
 func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byte, payloadBuf []byte) (MessageMetadata, []byte, error) {
+	// See readMessage: a short header buffer is a caller mistake, not a panic.
+	if len(hdrBuf) < msgSetHeaderLen {
+		return MessageMetadata{}, payloadBuf, pkgErrors.Errorf(
+			"commitlog: headersBuf is %d bytes, need at least HeaderBufferLen (%d)",
+			len(hdrBuf), msgSetHeaderLen)
+	}
 	if _, err := reader.Read(ctx, hdrBuf); err != nil {
 		return MessageMetadata{}, payloadBuf, pkgErrors.Wrap(err, "failed to read message headers")
 	}
