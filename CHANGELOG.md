@@ -5,6 +5,32 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.42.0 — 2026-07-30
+
+- **Fix (breaking for anyone matching on io.EOF)**: a cancelled context is no
+  longer reported as end-of-data. Reads now return `context.Canceled` /
+  `context.DeadlineExceeded` when the CALLER gave up.
+
+  `io.EOF` is this package's documented end-of-read signal — `NewReader`'s
+  contract says a read ends when `errors.Is(err, io.EOF)`. Both readers returned
+  exactly that when the caller's context finished, so a timeout was
+  indistinguishable from "the log ended". A consumer reading with a per-read
+  deadline — an ordinary pattern — would stop tailing and believe it had caught
+  up, silently, at the tail.
+
+  Three tests asserted the old behaviour, which pinned the defect rather than a
+  property. They now assert the cancellation.
+
+- **Tests**: live tailing is covered. Nothing here previously parked a reader at
+  the TRUE end of the log and then appended: `TestReaderFollow` wakes a reader by
+  advancing the high watermark over records that already existed on disk, so a log
+  that stopped delivering the moment a reader genuinely caught up would have
+  passed. Added the post-drain wake-up, repeated wake-ups, and a filtered reader
+  that must not be satisfied by a tail record its prefix rejects.
+
+  Prompted by durable_streams tracing a live-tail stall and noting that their
+  suite only ever appended before consuming. This one was nearly the same.
+
 ## v0.41.1 — 2026-07-30
 
 - **Fix (panic)**: a `headersBuf` smaller than `HeaderBufferLen` panicked instead

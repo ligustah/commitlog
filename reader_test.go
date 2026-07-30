@@ -2,12 +2,10 @@ package commitlog
 
 import (
 	"context"
-	"io"
 	"strconv"
 	"testing"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,7 +80,12 @@ func TestReaderUncommittedBlockCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go cancel()
 	_, _, _, _, err = r.ReadMessage(ctx, headers)
-	require.Equal(t, io.EOF, errors.Cause(err))
+	// context.Canceled, NOT io.EOF. This used to assert EOF, which pinned a
+	// defect rather than a property: io.EOF is this package's documented
+	// end-of-read signal, so reporting a cancellation as EOF told the caller
+	// the log had ended when only its own context had. A consumer reading with
+	// a per-read deadline would stop tailing and believe it had caught up.
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestReaderUncommittedBlockForSegmentWrite(t *testing.T) {
@@ -211,7 +214,12 @@ func TestReaderCommittedBlockCancel(t *testing.T) {
 	go cancel()
 	headers := make([]byte, HeaderBufferLen)
 	_, _, _, _, err = r.ReadMessage(ctx, headers)
-	require.Equal(t, io.EOF, errors.Cause(err))
+	// context.Canceled, NOT io.EOF. This used to assert EOF, which pinned a
+	// defect rather than a property: io.EOF is this package's documented
+	// end-of-read signal, so reporting a cancellation as EOF told the caller
+	// the log had ended when only its own context had. A consumer reading with
+	// a per-read deadline would stop tailing and believe it had caught up.
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestReaderCommittedReadError(t *testing.T) {
@@ -465,7 +473,8 @@ func TestReaderCommittedCancel(t *testing.T) {
 			compareMessages(t, msg, m)
 			count++
 		} else {
-			require.Equal(t, io.EOF, errors.Cause(err))
+			// A cancellation is not end-of-data — see TestReaderCommittedBlockCancel.
+			require.ErrorIs(t, err, context.Canceled)
 		}
 	}
 	require.Equal(t, 5, count)

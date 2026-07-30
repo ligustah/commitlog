@@ -312,8 +312,8 @@ LOOP:
 			}
 			// Otherwise, wait for segment to be written to (or split).
 			waiting = true
-			if !r.waitForData(ctx, r.seg) {
-				err = io.EOF
+			if werr := r.waitForData(ctx, r.seg); werr != nil {
+				err = werr
 				break
 			}
 			// The segment may have more data now. Refill buffer.
@@ -329,8 +329,8 @@ LOOP:
 		// If there are not enough segments to read, wait for new segment to be
 		// appended or the context to be canceled.
 		for nextSeg == nil {
-			if !r.waitForData(ctx, r.seg) {
-				err = io.EOF
+			if werr := r.waitForData(ctx, r.seg); werr != nil {
+				err = werr
 				break LOOP
 			}
 			segments = r.cl.Segments()
@@ -345,22 +345,30 @@ LOOP:
 	return n, err
 }
 
-func (r *uncommittedReader) waitForData(ctx context.Context, seg *segment) bool {
+// waitForData parks until the segment has more bytes. It returns nil when there
+// may be more to read, and otherwise the reason there is not — io.EOF for a
+// genuine end, or the context's error when the CALLER gave up.
+//
+// Those two were one answer (a bool) and the caller turned false into io.EOF, so
+// a cancellation arrived at the caller as end-of-data. See
+// committedReader.waitForHW for why that is the wrong thing to tell someone
+// tailing a log.
+func (r *uncommittedReader) waitForData(ctx context.Context, seg *segment) error {
 	if r.noWait {
 		// Recovery scan: the readable bytes are drained and no more are coming.
 		// Return end-of-data instead of parking for appends that never arrive.
-		return false
+		return io.EOF
 	}
 	wait := seg.WaitForData(r, r.pos)
 	select {
 	case <-r.cl.closed:
 		seg.removeWaiter(r)
-		return false
+		return io.EOF
 	case <-ctx.Done():
 		seg.removeWaiter(r)
-		return false
+		return ctx.Err()
 	case <-wait:
-		return true
+		return nil
 	}
 }
 
@@ -550,7 +558,13 @@ func (r *committedReader) waitForHW(ctx context.Context, hw int64) error {
 		return io.EOF
 	case <-ctx.Done():
 		r.cl.removeHWWaiter(r)
-		return io.EOF
+		// The CALLER's context, not the log's state. Returning io.EOF here made a
+		// cancellation indistinguishable from "the data ran out" — and io.EOF is
+		// this package's documented end-of-read signal, so a caller reading with a
+		// per-read deadline would treat a timeout as end-of-stream and stop
+		// consuming, silently, at the tail. Whether more data is coming is not
+		// something a cancelled context says anything about.
+		return ctx.Err()
 	case readonly := <-wait:
 		if readonly {
 			return ErrCommitLogReadonly

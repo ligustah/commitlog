@@ -105,3 +105,55 @@ func TestFollowReaderKeepsWakingAcrossManyAppends(t *testing.T) {
 		require.Equal(t, string(want), string(msg.Value()))
 	}
 }
+
+// A filtered reader must not be satisfied by a tail record it filters out.
+//
+// The analogue of the bug durable_streams spent hours on: their wait was
+// expressed against an offset watermark, but commit markers occupy offsets and
+// reads skip them — so the condition became satisfiable when no READABLE record
+// existed, and the loop woke to find nothing.
+//
+// The same state is reachable here through a KeyPrefix read, which is the only
+// read that filters: the watermark advances for a record the filter rejects. The
+// reader must stay parked, not return early and not spin.
+//
+// TestReaderFollowSeesLaterAppends is close but appends the non-matching and
+// matching records together, so it never observes the log in the state where
+// only an unreadable record has arrived. This isolates it.
+func TestFilteredFollowReaderIgnoresANonMatchingTailRecord(t *testing.T) {
+	l, app := specLog(t)
+	app(&Message{Key: []byte("k:1"), Value: []byte("first")})
+	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
+
+	r, err := l.NewReader(KeyPrefix([]byte("k:")), Follow())
+	require.NoError(t, err)
+	hdr := make([]byte, HeaderBufferLen)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	msg, _, _, _, err := r.ReadMessage(ctx, hdr)
+	require.NoError(t, err)
+	require.Equal(t, "first", string(msg.Value()))
+
+	// Advance the log with a record the filter REJECTS, and nothing else.
+	app(&Message{Key: []byte("other"), Value: []byte("skipped")})
+
+	// The reader must still be waiting: a short deadline expiring is the
+	// assertion. Returning a record here would mean serving something the filter
+	// excludes; returning nil early would mean ending a Follow read at a
+	// watermark rather than at data.
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	_, _, _, _, err = r.ReadMessage(shortCtx, hdr)
+	shortCancel()
+	// DeadlineExceeded specifically, not merely "an error": a bare require.Error
+	// would also accept a genuine fault and report it as correct waiting.
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"a non-matching tail record must not satisfy a filtered read — and the read must be WAITING, not failing")
+
+	// And a matching record still gets through afterwards, so the reader parked
+	// rather than breaking.
+	app(&Message{Key: []byte("k:2"), Value: []byte("second")})
+	msg, _, _, _, err = r.ReadMessage(ctx, hdr)
+	require.NoError(t, err, "the reader stopped delivering after skipping a tail record")
+	require.Equal(t, "second", string(msg.Value()))
+}
