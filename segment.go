@@ -79,6 +79,10 @@ type segment struct {
 	sealed         bool
 	closed         bool
 	replaced       bool
+	// gone marks a segment whose files have been removed (Delete). Distinct from
+	// closed, which a segment can also be while its files are intact. See
+	// current(). Guarded by the segment lock.
+	gone bool
 	// replacement is the segment that superseded this one, set by Replace. See
 	// current(): it exists because a compaction pass closes each source segment
 	// as it rewrites it but does not publish the rewritten list until the whole
@@ -1683,22 +1687,23 @@ const replacementDepth = 64
 // It exists because a pass mutates segments long before the log publishes the
 // result. Installing a rewrite renames the new files over the source's and
 // CLOSES the source (Replace); a segment whose every record was superseded is
-// deleted outright (cleanupEmptySegment). Neither leaves l.segments — that list
+// deleted outright (cleanupEmptySegment); and retention deletes the segments
+// over its limit as it walks them. None of that leaves l.segments — that list
 // is swapped once, at the very end of the pass — so for the whole of it the log
 // hands out segments that are closed or gone, and resolving an offset through
 // one fails with ErrSegmentClosed for a record that is either sitting in the
 // replacement or legitimately no longer anywhere. The symptom was an ordinary
-// Read against a compacting log failing at random with "segment has been
+// Read against a maintaining log failing at random with "segment has been
 // closed".
 //
-// The two cases are told apart by the link, not by the flag: replaced with a
-// replacement is a redirect, replaced without one is a removal. A removed
-// segment reports ok=false and findSegment moves on to the next one, which is
-// what retention already leaves readers doing.
+// The cases are told apart by the link, not by the flags: a replacement is a
+// redirect, and anything else that is gone — deleted by retention, or rewritten
+// to nothing — reports ok=false so findSegment moves on to the next segment,
+// which is what a reader already does after retention has run to completion.
 func (s *segment) current() (*segment, bool) {
 	for range replacementDepth {
 		s.RLock()
-		next, gone := s.replacement, s.replaced
+		next, gone := s.replacement, s.replaced || s.gone
 		s.RUnlock()
 		if next == nil {
 			return s, !gone
@@ -1966,6 +1971,15 @@ func (s *segment) Delete() error {
 	if s.suffix == "" {
 		removeKeyDigest(s)
 	}
+	// The files are gone, so nothing may resolve an offset through this segment
+	// again. It matters because a retention pass, exactly like a compaction one,
+	// deletes as it goes and does not publish the surviving list until the pass
+	// ends — so a deleted segment stays in l.segments, and findSegment would
+	// hand it to a reader that then failed with ErrSegmentClosed for offsets
+	// retention had lawfully collected. Marked here rather than at the cleaner
+	// because every path that deletes a segment owes this, including the ones
+	// that do it outside a pass.
+	s.gone = true
 	return nil
 }
 

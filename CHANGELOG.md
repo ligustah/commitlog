@@ -5,6 +5,26 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.3 — 2026-08-02
+
+- **Fixed**: the same defect as v0.43.1, with RETENTION as the mutator instead
+  of compaction. A delete pass removes segments as it walks them and publishes
+  the survivors only at the end, so a reader resolving an offset mid-pass landed
+  on a segment whose files were already gone and failed with `segment has been
+  closed` — for offsets retention had lawfully collected, where the correct
+  answer is simply to start at the next surviving segment.
+
+  It was missed the first time because the two cleaners close a segment by
+  different routes: compaction's `Replace` leaves a link to a successor, and
+  retention's `Delete` leaves nothing, so the redirect had nothing to follow and
+  no flag saying the segment was gone rather than merely closed. `Delete` now
+  marks it, in `Delete` rather than in the cleaner, because every path that
+  removes a segment owes this — including the ones outside a pass.
+
+  Found by a chaos test that ran both cleaners at once. Neither of the two
+  existing ones could have: one runs retention with compaction off, the other
+  runs compaction with no retention limits at all.
+
 ## v0.43.2 — 2026-08-02
 
 - **Fixed**: a read that crossed a segment being compacted failed with `failed

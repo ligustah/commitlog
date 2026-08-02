@@ -25,12 +25,32 @@ import (
 // replaced. Compaction has to be driven for the window to exist at all, which is
 // the whole difference between the two tests.
 func TestOpeningAReaderWhileCompactionReplacesSegments(t *testing.T) {
-	l, cleanup := setupWithOptions(t, Options{
+	openWhileMaintaining(t, Options{
 		Path:             tempDir(t),
 		MaxSegmentBytes:  256, // roll constantly, so a pass always has work
 		Compact:          true,
 		DisableAutoClean: true, // driven below, not left to the interval
 	})
+}
+
+// The same race with RETENTION as the mutator. A delete pass removes segments
+// as it walks them and publishes the survivors only at the end, exactly like a
+// compaction pass — so a reader resolving an offset mid-pass lands on a segment
+// whose files are already gone. Separate from the compaction case because the
+// mechanism that closes the segment is different (Delete, not Replace) and
+// nothing links it to a successor.
+func TestOpeningAReaderWhileRetentionDeletesSegments(t *testing.T) {
+	openWhileMaintaining(t, Options{
+		Path:             tempDir(t),
+		MaxSegmentBytes:  256,
+		MaxLogMessages:   40, // tight: every pass wants to delete
+		DisableAutoClean: true,
+	})
+}
+
+func openWhileMaintaining(t *testing.T, opts Options) {
+	t.Helper()
+	l, cleanup := setupWithOptions(t, opts)
 	defer cleanup()
 
 	var (
