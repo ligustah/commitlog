@@ -562,6 +562,16 @@ func (s *segment) setupIndex() (err error) {
 	if err != nil {
 		return err
 	}
+	if lastEntry != nil && s.indexOvershootsLog(lastEntry) {
+		// The rebuild sets firstOffset/lastOffset and their timestamps as it
+		// walks, so there is nothing left for the code below to read back out.
+		// Re-running InitializePosition here would not work anyway: it reads
+		// through ReadAt, which is gated on the index's position, and newIndex
+		// seeds that to the whole file where a rebuilt index holds only what the
+		// log actually contains.
+		return errors.Wrap(s.rebuildIndexFromLog(),
+			"rebuild index over rewritten log failed")
+	}
 	// If lastEntry is nil, the index is empty.
 	if lastEntry == nil {
 		return nil
@@ -599,6 +609,43 @@ func (s *segment) setupIndex() (err error) {
 	s.firstOffset = firstEntry.Offset
 	s.firstWriteTime = firstEntry.Timestamp
 	return nil
+}
+
+// indexOvershootsLog reports an index that cannot describe the log beside it,
+// because its last entry ends past where the log ends.
+//
+// This is the signature a crash mid-install leaves. Replacing a segment with its
+// rewrite is TWO renames — the log file, then the index file — and stopping
+// between them pairs the compacted log with the SOURCE's index, every position
+// in which was computed against a strictly larger file (a rewrite only ever
+// drops records). Nothing else on disk marks it: both files are individually
+// well formed, and only their relationship is wrong.
+//
+// The direction is what makes this safe to act on. An index BEHIND its log is
+// ordinary — the append path writes the frame before the entry, so a crash
+// there leaves a short index, and reconcileIndexTail fills it in. An index AHEAD
+// of its log describes a file that no longer exists.
+func (s *segment) indexOvershootsLog(last *entry) bool {
+	if s.blockMode {
+		// Entries are block anchors, whose Size spans a frame inside the block
+		// rather than the block itself; only the start position is comparable.
+		return last.Position >= s.position
+	}
+	return last.Position+int64(last.Size) > s.position
+}
+
+// rebuildIndexFromLog throws the index away and reconstructs it by walking the
+// log. Sound because the log is the record and the index is only a lookup table
+// over it: everything an entry holds is recoverable from the frame it points at.
+func (s *segment) rebuildIndexFromLog() error {
+	if err := s.Index.reset(); err != nil {
+		return err
+	}
+	s.firstOffset, s.lastOffset = -1, -1
+	s.firstWriteTime, s.lastWriteTime = 0, 0
+	// reconcileIndexTail resumes after the last indexed entry; over an emptied
+	// index that means walking the whole log from the start.
+	return s.reconcileIndexTail()
 }
 
 // lastFrameInBlock scans message frames starting at logical position start

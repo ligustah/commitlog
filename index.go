@@ -343,6 +343,28 @@ func (idx *index) Close() error {
 	return nil
 }
 
+// reset discards every entry, leaving an empty index over the same file. The
+// caller is expected to rebuild it from the log immediately; an index nobody
+// refills answers every lookup with not-found.
+//
+// Zeroing rather than truncating, because an empty entry IS how the end of the
+// index is found — InitializePosition binary-searches for the first all-zero
+// one, so leaving stale bytes past the new position would resurrect them.
+func (idx *index) reset() error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if idx.closed {
+		return ErrSegmentClosed
+	}
+	n := idx.position
+	if mapped := int64(len(idx.mmap)); n > mapped {
+		n = mapped
+	}
+	clear(idx.mmap[:n])
+	idx.position = 0
+	return nil
+}
+
 // Shrink truncates the memory-mapped index file to the size of its contents.
 // Uses a write lock because the Windows implementation remaps idx.mmap.
 func (idx *index) Shrink() error {

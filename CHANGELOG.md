@@ -5,6 +5,29 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.6 — 2026-08-02
+
+- **Fixed**: a log that lost power midway through installing a compacted segment
+  came back permanently unable to serve that segment by offset. Installing a
+  rewrite is two renames — the log file, then the index file — and stopping
+  between them pairs the compacted log with the SOURCE's index, whose every
+  position was computed against a strictly larger file (a rewrite only ever drops
+  records).
+
+  Nothing detected it. Both files are individually well formed; only their
+  relationship is wrong, and nothing on disk marks that. A forward scan still
+  worked, because it walks positions rather than looking them up — so the log
+  would hand out a record from a scan and then fail to serve that same offset
+  directly, landing inside a record and reporting a CRC failure. Permanently:
+  no pass rebuilds an index, and the next compaction of that segment starts from
+  the same mismatched pair.
+
+  An index whose last entry ends past the end of its log cannot describe that
+  log, and that is now checked when a segment opens; such an index is discarded
+  and rebuilt by walking the log. The direction is what makes this safe to act
+  on — an index BEHIND its log is ordinary, since the append path writes the
+  frame before the entry, and `reconcileIndexTail` has always filled that in.
+
 ## v0.43.5 — 2026-08-02
 
 - **Added**: `TestChaosAFollowerNeverSeesTheSequenceGoBackwards`, covering the
