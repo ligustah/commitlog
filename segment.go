@@ -1025,7 +1025,12 @@ func (s *segment) ReadAt(p []byte, off int64) (n int, err error) {
 // are not reentrant in the presence of a waiting writer).
 func (s *segment) readAtLocked(p []byte, off int64) (n int, err error) {
 	if s.closed {
-		if s.replaced {
+		// gone counts as replaced: both mean this segment has left the log and
+		// the caller should re-resolve against the current one, which is what
+		// the reader does with ErrSegmentReplaced. Only ErrSegmentClosed says
+		// "this handle is shut" — a claim about the segment, not about the log —
+		// and a reader has nowhere to go with it.
+		if s.replaced || s.gone {
 			return 0, ErrSegmentReplaced
 		}
 		return 0, ErrSegmentClosed
@@ -1148,7 +1153,12 @@ func (s *segment) scanReadAt(c *blockCache, st *scanStream, p []byte, off int64)
 	s.RLock()
 	defer s.RUnlock()
 	if s.closed {
-		if s.replaced {
+		// gone counts as replaced: both mean this segment has left the log and
+		// the caller should re-resolve against the current one, which is what
+		// the reader does with ErrSegmentReplaced. Only ErrSegmentClosed says
+		// "this handle is shut" — a claim about the segment, not about the log —
+		// and a reader has nowhere to go with it.
+		if s.replaced || s.gone {
 			return 0, ErrSegmentReplaced
 		}
 		return 0, ErrSegmentClosed
@@ -1723,6 +1733,14 @@ func (s *segment) current() (*segment, bool) {
 func (s *segment) findEntry(offset int64) (*entry, error) {
 	s.RLock()
 	defer s.RUnlock()
+	// A segment that has left the log answers "re-resolve", not "closed". The
+	// index only knows it is shut, so without this a lookup on a segment a pass
+	// had already swapped or deleted came back as ErrSegmentClosed — which a
+	// reader can do nothing with, where ErrSegmentReplaced sends it to the
+	// segment list for the live one.
+	if s.replaced || s.gone {
+		return nil, ErrSegmentReplaced
+	}
 	if s.blockMode {
 		anchor, err := s.anchorPositionForOffset(offset)
 		if err != nil {
@@ -1767,6 +1785,14 @@ func (s *segment) findEntry(offset int64) (*entry, error) {
 func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
 	s.RLock()
 	defer s.RUnlock()
+	// A segment that has left the log answers "re-resolve", not "closed". The
+	// index only knows it is shut, so without this a lookup on a segment a pass
+	// had already swapped or deleted came back as ErrSegmentClosed — which a
+	// reader can do nothing with, where ErrSegmentReplaced sends it to the
+	// segment list for the live one.
+	if s.replaced || s.gone {
+		return nil, ErrSegmentReplaced
+	}
 	if s.blockMode {
 		anchor, err := s.anchorPositionForTimestamp(timestamp)
 		if err != nil {
@@ -1935,11 +1961,27 @@ func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entr
 // naming the SAME object, neither could safely delete it whatever stamp it
 // carried, so the fence would not have saved that topology either.
 func (s *segment) Delete() error {
-	if err := s.Close(); err != nil {
-		return err
-	}
 	s.Lock()
 	defer s.Unlock()
+	if err := s.close(); err != nil {
+		return err
+	}
+	// Nothing may resolve an offset through this segment again. It matters
+	// because a retention pass, exactly like a compaction one, deletes as it goes
+	// and does not publish the surviving list until the pass ends — so a deleted
+	// segment stays in l.segments, and findSegment would hand it to a reader that
+	// then failed for offsets retention had lawfully collected. Marked here
+	// rather than at the cleaner because every path that deletes a segment owes
+	// this, including the ones that do it outside a pass.
+	//
+	// Closing and marking gone are ONE step, under one hold of the lock. Closing
+	// first and marking at the end left a window where the segment was closed but
+	// not yet gone, and a reader that resolved into it there got the raw
+	// ErrSegmentClosed the flag exists to turn into a redirect. Marking before the
+	// removal below can only mean a segment whose files survive a failed delete is
+	// skipped rather than errored on — and it is closed either way, so skipping is
+	// the better of the two answers.
+	s.gone = true
 	if s.isOffloaded() {
 		if err := s.store.Delete(s.storeKey); err != nil {
 			return errors.Wrap(err, "delete offloaded object")
@@ -1971,15 +2013,6 @@ func (s *segment) Delete() error {
 	if s.suffix == "" {
 		removeKeyDigest(s)
 	}
-	// The files are gone, so nothing may resolve an offset through this segment
-	// again. It matters because a retention pass, exactly like a compaction one,
-	// deletes as it goes and does not publish the surviving list until the pass
-	// ends — so a deleted segment stays in l.segments, and findSegment would
-	// hand it to a reader that then failed with ErrSegmentClosed for offsets
-	// retention had lawfully collected. Marked here rather than at the cleaner
-	// because every path that deletes a segment owes this, including the ones
-	// that do it outside a pass.
-	s.gone = true
 	return nil
 }
 

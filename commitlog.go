@@ -767,7 +767,18 @@ func (l *commitLog) ActiveSegmentBase() int64 {
 func (l *commitLog) OldestOffset() int64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return l.segments[0].FirstOffset()
+	// The first SURVIVING segment, not the first entry. A retention pass deletes
+	// as it walks and does not publish the survivors until it ends, so during
+	// one the head of this list is a segment whose files are gone — and
+	// answering with its base offset tells a caller the log starts somewhere a
+	// read from that offset will not reach. A reader that trusted it saw records
+	// "disappear" between the offset it was told and the first one it got back.
+	for _, s := range l.segments {
+		if seg, ok := s.current(); ok {
+			return seg.FirstOffset()
+		}
+	}
+	return l.segments[len(l.segments)-1].FirstOffset()
 }
 
 // EarliestOffsetAfterTimestamp returns the earliest offset whose timestamp is

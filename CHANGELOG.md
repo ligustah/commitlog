@@ -5,6 +5,35 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.4 — 2026-08-02
+
+- **Fixed**: the last three ways a maintenance pass could still surface a raw
+  `segment has been closed` to a reader. v0.43.3 gave `Delete` a `gone` flag so
+  a departed segment redirects instead of erroring; these are the places that
+  did not consult it.
+
+  `Delete` set the flag at the END of the function, after `Close` had already
+  returned and released the lock. In that window the segment was closed but not
+  yet gone, and a reader that resolved into it got exactly the error the flag
+  exists to prevent. Closing and marking are now one step under one hold of the
+  lock — which also means a segment whose file removal fails is skipped rather
+  than errored on, and it is closed either way, so skipping is the better of the
+  two answers.
+
+  The read path itself only checked `replaced`, never `gone`: `readAtLocked` and
+  `scanReadAt` reported a deleted segment as closed mid-scan, and `findEntry` and
+  `findEntryByTimestamp` did not check at all — the index knows only that it is
+  shut. All four now answer `ErrSegmentReplaced`, which sends the reader back to
+  the segment list; `ErrSegmentClosed` is a claim about a handle, and a reader
+  can do nothing with it.
+
+- **Fixed**: `OldestOffset` reported the base offset of a segment retention had
+  already deleted, because it answered from `segments[0]` and a pass does not
+  publish the survivors until it ends. A caller that started a read there got
+  records back from further along, which reads as history disappearing between
+  the offset it was told and the first one it received. It now answers with the
+  first SURVIVING segment.
+
 ## v0.43.3 — 2026-08-02
 
 - **Fixed**: the same defect as v0.43.1, with RETENTION as the mutator instead
