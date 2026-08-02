@@ -5,6 +5,42 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.1 — 2026-08-02
+
+- **Fixed**: a read against a compacting log failed, at random, with `segment
+  has been closed` — for an offset that was valid and whose record was on disk
+  the whole time.
+
+  A compaction pass mutates segments long before the log publishes the result.
+  Installing a rewrite renames the new files over the source's and CLOSES the
+  source; a segment whose every record was superseded is deleted outright.
+  Neither leaves `l.segments` — that list is swapped once, at the very end of
+  the pass — so for the whole duration of a pass the log hands out segments that
+  are closed or gone, and resolving an offset through one fails.
+
+  A segment now carries a link to what superseded it, and `findSegment` follows
+  it: a replaced segment resolves to its replacement, a removed one is skipped
+  the way retention already leaves readers skipping. The window closes for every
+  lookup at once — readers, the high-watermark position, the timestamp probes —
+  rather than for whichever call path happened to be reported.
+
+  Retrying the resolve is NOT what fixes this, and was the first attempt: the
+  stale segment stays published for the rest of the pass, so a retry re-resolves
+  to the same closed segment. It is kept, bounded, for the much smaller window
+  inside `Replace` itself, where the source is closed a few instructions before
+  the link to its replacement is set.
+
+  `getHWPos` returns the segment rather than its index, because all four callers
+  used the index to re-read the raw slice — which would have reinstated exactly
+  the closed segment the redirect exists to avoid.
+
+  Reachable by any caller that reads while compaction runs. Found by a chaos
+  test in `durable_streams` that raced reads against a maintenance loop; it
+  reproduced in 0.16s. `TestConcurrentReadersAndProbesOnLiveLog` looks like it
+  should have covered this and does not: it sets `Compact` but never RUNS a
+  pass, leaving compaction to a background cleaner whose interval is minutes, so
+  in a five-second test no segment is ever replaced.
+
 ## v0.43.0 — 2026-08-02
 
 - **Added**: `CleanSpec.RetentionFloor` — a bound on what RETENTION may delete.

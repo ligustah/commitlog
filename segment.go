@@ -79,6 +79,12 @@ type segment struct {
 	sealed         bool
 	closed         bool
 	replaced       bool
+	// replacement is the segment that superseded this one, set by Replace. See
+	// current(): it exists because a compaction pass closes each source segment
+	// as it rewrites it but does not publish the rewritten list until the whole
+	// pass ends, so for that whole window the log's segment list hands out
+	// segments that are closed. Guarded by the segment lock.
+	replacement *segment
 	// dirtyData and dirtyIndex report whether the log file and the index have
 	// been written since each was last fsynced, so a durability pass can skip
 	// what is already on stable storage instead of paying an fsync per segment
@@ -1659,10 +1665,47 @@ func (s *segment) Replace(old *segment) error {
 	s.backing = backing
 	s.closed = false
 	old.replaced = true
+	old.replacement = s
 	if err := s.initPositions(); err != nil {
 		return err
 	}
 	return s.setupIndex()
+}
+
+// replacementDepth bounds how far current() follows the chain. A stale pointer
+// gains one link per compaction pass that touches it, so any real chain is one
+// or two long; the bound only stops a corrupted cycle from hanging a reader.
+const replacementDepth = 64
+
+// current resolves s to the segment a reader should actually use: s itself, the
+// segment that superseded it, or nothing at all when compaction removed it.
+//
+// It exists because a pass mutates segments long before the log publishes the
+// result. Installing a rewrite renames the new files over the source's and
+// CLOSES the source (Replace); a segment whose every record was superseded is
+// deleted outright (cleanupEmptySegment). Neither leaves l.segments — that list
+// is swapped once, at the very end of the pass — so for the whole of it the log
+// hands out segments that are closed or gone, and resolving an offset through
+// one fails with ErrSegmentClosed for a record that is either sitting in the
+// replacement or legitimately no longer anywhere. The symptom was an ordinary
+// Read against a compacting log failing at random with "segment has been
+// closed".
+//
+// The two cases are told apart by the link, not by the flag: replaced with a
+// replacement is a redirect, replaced without one is a removal. A removed
+// segment reports ok=false and findSegment moves on to the next one, which is
+// what retention already leaves readers doing.
+func (s *segment) current() (*segment, bool) {
+	for range replacementDepth {
+		s.RLock()
+		next, gone := s.replacement, s.replaced
+		s.RUnlock()
+		if next == nil {
+			return s, !gone
+		}
+		s = next
+	}
+	return s, true
 }
 
 // findEntry returns the first entry whose offset is greater than or equal to

@@ -80,12 +80,56 @@ func (l *commitLog) NewReader(opts ...ReadOption) (*Reader, error) {
 	return r, err
 }
 
+// readerResolveAttempts bounds how many times building a reader re-resolves
+// against a fresh segment snapshot. One compaction swap costs one retry, so this
+// is generous; it exists so a log tearing itself down cannot spin here.
+const readerResolveAttempts = 8
+
 // newSourceReader builds the underlying sequential reader for a spec.
+//
+// Building one means two steps: find the segment holding the offset, then look
+// the offset up in that segment's index. Compaction can replace the segment
+// between them, and Replace CLOSES the old one — so the lookup fails with
+// ErrSegmentClosed for an offset that is entirely valid and whose record is
+// sitting in the replacement, already on disk.
+//
+// The scan path has always handled this: readOne re-resolves on
+// ErrSegmentReplaced and reads on. Construction never learned to, and handed the
+// raw error back as though the read were impossible — so an ordinary Read
+// against a compacting log failed, at random, with "segment has been closed".
+// Retrying here rather than at each call site is the point: every caller would
+// otherwise need to know that a storage-level swap is not a read failure.
 func (l *commitLog) newSourceReader(spec readSpec) (contextReader, error) {
-	if spec.uncommitted {
-		return l.newReaderUncommitted(spec.offset, !spec.follow)
+	var err error
+	for range readerResolveAttempts {
+		var cr contextReader
+		if spec.uncommitted {
+			cr, err = l.newReaderUncommitted(spec.offset, !spec.follow)
+		} else {
+			cr, err = l.newReaderCommitted(spec.offset, !spec.follow)
+		}
+		// Each attempt takes its own Segments() snapshot, so a retry is
+		// resolving against the post-swap log rather than repeating the same
+		// lookup. A log that is closing or gone reports that instead: there is
+		// no replacement coming, and spinning would turn a clean shutdown into a
+		// hang.
+		if err == nil || !segmentSwapped(err) || l.IsClosed() || l.IsDeleted() {
+			return cr, err
+		}
 	}
-	return l.newReaderCommitted(spec.offset, !spec.follow)
+	return nil, err
+}
+
+// segmentSwapped reports whether err is the storage layer saying the segment we
+// resolved against was replaced underneath us. Both spellings count: the index
+// answers a closed segment with ErrSegmentClosed and the log path answers a
+// replaced one with ErrSegmentReplaced, and Replace produces BOTH states on the
+// same segment — which one surfaces depends only on where the caller happened to
+// touch it.
+func segmentSwapped(err error) bool {
+	cause := pkgErrors.Cause(err)
+	return cause == ErrSegmentClosed || cause == ErrSegmentReplaced ||
+		errors.Is(err, ErrSegmentClosed) || errors.Is(err, ErrSegmentReplaced)
 }
 
 // newRecoveryReader returns an uncommitted reader that does NOT block waiting
@@ -438,11 +482,11 @@ func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error)
 		}
 		r.hw = hw
 		segments = r.cl.Segments()
-		hwIdx, hwPos, err := getHWPos(segments, r.hw)
+		hwSeg, hwPos, err := getHWPos(segments, r.hw)
 		if err != nil {
 			return 0, err
 		}
-		r.hwSeg = segments[hwIdx]
+		r.hwSeg = hwSeg
 		r.hwPos = hwPos
 		r.seg, _ = findSegment(segments, offset)
 		if r.seg == nil {
@@ -485,12 +529,12 @@ LOOP:
 			}
 			r.hw = hw
 			segments = r.cl.Segments()
-			hwIdx, hwPos, err := getHWPos(segments, r.hw)
+			hwSeg, hwPos, err := getHWPos(segments, r.hw)
 			if err != nil {
 				break
 			}
 			r.hwPos = hwPos
-			r.hwSeg = segments[hwIdx]
+			r.hwSeg = hwSeg
 			continue
 		}
 
@@ -545,12 +589,12 @@ LOOP:
 		}
 		r.hw = hw
 		segments = r.cl.Segments()
-		hwIdx, hwPos, err := getHWPos(segments, r.hw)
+		hwSeg, hwPos, err := getHWPos(segments, r.hw)
 		if err != nil {
 			break
 		}
 		r.hwPos = hwPos
-		r.hwSeg = segments[hwIdx]
+		r.hwSeg = hwSeg
 	}
 
 	return n, err
@@ -607,12 +651,12 @@ func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader
 	}
 
 	if hw != -1 {
-		hwIdx, hwPosition, err := getHWPos(segments, hw)
+		seg, hwPosition, err := getHWPos(segments, hw)
 		if err != nil {
 			return nil, err
 		}
 		hwPos = hwPosition
-		hwSeg = segments[hwIdx]
+		hwSeg = seg
 	}
 
 	position := int64(0)
@@ -636,16 +680,23 @@ func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader
 	}, nil
 }
 
-func getHWPos(segments []*segment, hw int64) (int, int64, error) {
-	hwSeg, hwIdx := findSegment(segments, hw)
+// getHWPos returns the segment holding the high watermark and the byte position
+// just past it.
+//
+// It hands back the SEGMENT rather than its index on purpose. findSegment
+// redirects a mid-compaction source segment to its replacement, and every caller
+// used to throw that away by re-indexing the raw slice — reinstating the closed
+// segment the redirect exists to avoid.
+func getHWPos(segments []*segment, hw int64) (*segment, int64, error) {
+	hwSeg, _ := findSegment(segments, hw)
 	if hwSeg == nil {
-		return 0, 0, ErrSegmentNotFound
+		return nil, 0, ErrSegmentNotFound
 	}
 	hwEntry, err := hwSeg.findEntry(hw)
 	if err != nil {
-		return 0, 0, err
+		return nil, 0, err
 	}
-	return hwIdx, hwEntry.Position + int64(hwEntry.Size), nil
+	return hwSeg, hwEntry.Position + int64(hwEntry.Size), nil
 }
 
 // maxPayloadChunk bounds how far a frame's declared size is TRUSTED before any

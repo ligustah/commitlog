@@ -20,10 +20,22 @@ func findSegment(segments []*segment, offset int64) (*segment, int) {
 	idx := sort.Search(n, func(i int) bool {
 		return segments[i].NextOffset() > offset
 	})
-	if idx == n {
-		return nil, idx
+	// current(), not the slice entry: a compaction pass in flight has already
+	// rewritten or removed the segments it has processed so far, and the log
+	// does not publish the result until the pass ends. Skipping forward over the
+	// removed ones is the same thing a reader does after retention — the offsets
+	// are gone, and the next segment holds the next surviving records.
+	//
+	// The index still refers to the SLICE, so a caller using it to walk or
+	// splice segments is unaffected; only the segment handed back is the live
+	// one. The two can differ solely mid-pass, and anything holding cleanMu sees
+	// them identical.
+	for ; idx < n; idx++ {
+		if seg, ok := segments[idx].current(); ok {
+			return seg, idx
+		}
 	}
-	return segments[idx], idx
+	return nil, n
 }
 
 // findSegmentContains returns the first segment whose next assignable offset
