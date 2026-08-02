@@ -241,14 +241,14 @@ func (c *deleteCleaner) cleanTier(segments []*segment, maxTierDrop int) ([]*segm
 				break
 			}
 		}
-		dropped := len(segments)
+		before := len(segments)
 		if segments, err = dropOldestPrefix(segments, idx, maxTierDrop); err != nil {
 			return segments, err
 		}
 		// Spent, not recomputed: unlike the local half, the tier's allowance was
 		// measured against the full log and cannot be re-derived from this slice
 		// alone once its own prefix is gone.
-		maxTierDrop -= dropped - len(segments)
+		maxTierDrop -= before - len(segments)
 	}
 	if c.Retention.TierMessages > 0 {
 		before := len(segments)
