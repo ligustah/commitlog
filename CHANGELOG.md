@@ -5,6 +5,13 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.8 — 2026-08-03
+
+- **Retracted v0.43.6.** The warning in the v0.43.7 note was only a note, which
+  does nothing for a resolver; `retract` is what actually keeps the version out
+  of a build. Under v0.43.6 a log with a torn tail — any unclean shutdown
+  mid-append — reads back empty.
+
 ## v0.43.7 — 2026-08-02
 
 - **Fixed**: v0.43.6 regressed torn-write recovery. Its test for "this index
