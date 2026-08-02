@@ -5,6 +5,26 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.7 — 2026-08-02
+
+- **Fixed**: v0.43.6 regressed torn-write recovery. Its test for "this index
+  cannot describe this log" was that the index reaches past the log's end — but
+  a torn write produces exactly that too, and there the index is the SOUND half:
+  it describes this log, which merely lost its tail, and the surviving entries
+  are all correct. Rebuilding in that case ran ahead of the tail truncation that
+  makes the segment consistent and left it looking empty, so a reopened log
+  served nothing at all where it had served every intact record.
+
+  The two are now told apart before anything is discarded, by checking the
+  deepest index entry that still fits inside the log against the frame it points
+  at. A torn write leaves that entry exactly right; a crash between the two
+  renames leaves it pointing at a record that is no longer there, because the
+  rewrite dropped records and shifted everything after them. One frame read,
+  only on the abnormal path.
+
+  **v0.43.6 should not be used.** A log with a torn tail — any unclean shutdown
+  mid-append — reads back empty under it.
+
 ## v0.43.6 — 2026-08-02
 
 - **Fixed**: a log that lost power midway through installing a compacted segment

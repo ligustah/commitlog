@@ -562,7 +562,7 @@ func (s *segment) setupIndex() (err error) {
 	if err != nil {
 		return err
 	}
-	if lastEntry != nil && s.indexOvershootsLog(lastEntry) {
+	if lastEntry != nil && s.indexOvershootsLog(lastEntry) && !s.indexDescribesLog() {
 		// The rebuild sets firstOffset/lastOffset and their timestamps as it
 		// walks, so there is nothing left for the code below to read back out.
 		// Re-running InitializePosition here would not work anyway: it reads
@@ -632,6 +632,67 @@ func (s *segment) indexOvershootsLog(last *entry) bool {
 		return last.Position >= s.position
 	}
 	return last.Position+int64(last.Size) > s.position
+}
+
+// indexDescribesLog asks whether the index belongs to the log beside it, by
+// checking the deepest entry that still fits inside the log against the frame
+// that entry points at.
+//
+// Overshooting alone does not say which of two things happened, and they want
+// opposite treatment:
+//
+//   - A TORN WRITE cut the log's tail. The index describes this log; it simply
+//     covers records the log no longer ends with. Existing recovery trims that,
+//     and the surviving entries are exactly right — rebuilding would be
+//     needless work and would run before the tail truncation that makes the
+//     segment consistent.
+//   - A CRASH BETWEEN Replace's TWO RENAMES left the source's index over the
+//     rewrite. Every entry is wrong, including the ones that happen to fit,
+//     because the rewrite dropped records and shifted everything after them.
+//
+// One frame read tells them apart. The deepest fitting entry is used rather
+// than the first, because drift accumulates: an early entry can still land on
+// the right frame by coincidence when the first dropped record is further in.
+func (s *segment) indexDescribesLog() bool {
+	for i := s.Index.numEntries() - 1; i >= 0; i-- {
+		var e entry
+		if err := s.Index.ReadEntryAtFileOffset(&e, i*entryWidth); err != nil {
+			return false
+		}
+		if e.Position+int64(e.Size) > s.position {
+			continue // past the log's end: says nothing about which log this is
+		}
+		got, ok := s.frameOffsetAt(e.Position)
+		return ok && got == e.Offset
+	}
+	// Not one entry fits inside the log. Whatever this index describes, it is
+	// not this.
+	return false
+}
+
+// frameOffsetAt reads the offset out of the message-set frame at a logical
+// position, without going through the read path's locking or caches — this runs
+// during open, before the segment is reachable.
+func (s *segment) frameOffsetAt(pos int64) (int64, bool) {
+	hdr := make([]byte, msgSetHeaderLen)
+	if s.blockMode {
+		blk := s.findBlock(pos)
+		if blk == nil {
+			return 0, false
+		}
+		_, data, err := s.decodeBlock(nil, *blk, nil, nil)
+		if err != nil {
+			return 0, false
+		}
+		at := pos - blk.logicalStart
+		if at < 0 || at+msgSetHeaderLen > int64(len(data)) {
+			return 0, false
+		}
+		copy(hdr, data[at:])
+	} else if _, err := s.backing.ReadAt(hdr, pos); err != nil {
+		return 0, false
+	}
+	return messageSet(hdr).Offset(), true
 }
 
 // rebuildIndexFromLog throws the index away and reconstructs it by walking the
