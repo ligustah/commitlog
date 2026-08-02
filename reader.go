@@ -648,13 +648,6 @@ func getHWPos(segments []*segment, hw int64) (int, int64, error) {
 	return hwIdx, hwEntry.Position + int64(hwEntry.Size), nil
 }
 
-func min(x, y int64) int64 {
-	if x < y {
-		return x
-	}
-	return y
-}
-
 // maxPayloadChunk bounds how far a frame's declared size is TRUSTED before any
 // of it has been read.
 //

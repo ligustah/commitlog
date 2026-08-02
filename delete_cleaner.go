@@ -20,19 +20,51 @@ var deleteSegment = func(s *segment) error {
 	return s.Delete()
 }
 
-// dropOldestPrefix deletes the drop segments OLDEST FIRST and returns the
-// surviving log: keep on full success, or — if a deletion fails — the failed
-// segment plus everything newer, alongside the error. Deleting in ascending
-// order means a partial failure removes a pure prefix of the log: the
-// surviving slice is always contiguous (no holes for readers to fall into),
-// and every deleted segment is gone from the returned read path.
-func dropOldestPrefix(drop, keep []*segment) ([]*segment, error) {
+// dropOldestPrefix deletes the oldest idx segments — CLAMPED to maxDrop, what
+// the retention floor permits — and returns the surviving log: the untouched
+// suffix on full success, or, if a deletion fails, the failed segment plus
+// everything newer, alongside the error. Deleting in ascending order means a
+// partial failure removes a pure prefix of the log: the surviving slice is
+// always contiguous (no holes for readers to fall into), and every deleted
+// segment is gone from the returned read path.
+//
+// The clamp is here rather than at each limit because there are four of them
+// and they compute their prefix in different ways; one of them forgetting the
+// floor would delete records a caller is still using, and the failure would
+// surface far from the limit that caused it.
+func dropOldestPrefix(segments []*segment, idx, maxDrop int) ([]*segment, error) {
+	if idx > maxDrop {
+		idx = maxDrop
+	}
+	drop, keep := segments[:idx], segments[idx:]
 	for j, s := range drop {
 		if err := deleteSegment(s); err != nil {
 			return append(drop[j:], keep...), err
 		}
 	}
 	return keep, nil
+}
+
+// deletablePrefix is how many of the OLDEST segments retention may delete without
+// removing a record at or above the floor: all of them when there is none.
+//
+// A segment is eligible only if the whole of it lies below the floor, which is
+// to say the NEXT segment starts at or below it — deletion happens at segment
+// granularity, so a segment holding one protected record is protected entire.
+// The last segment is never eligible, which costs nothing: every local limit
+// already retains it as the active one.
+func deletablePrefix(segments []*segment, floor *int64) int {
+	if floor == nil {
+		return len(segments)
+	}
+	n := 0
+	for i := 1; i < len(segments); i++ {
+		if segments[i].BaseOffset > *floor {
+			break
+		}
+		n = i
+	}
+	return n
 }
 
 // deleteCleanerOptions contains configuration settings for the DeleteCleaner.
@@ -73,7 +105,7 @@ func newDeleteCleaner(opts deleteCleanerOptions) *deleteCleaner {
 // Deletion only occurs at the segment granularity.
 // skipTiered leaves the tier untouched: no tier retention, because deleting a
 // tier's copy is a write to storage that may be shared with other replicas.
-func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool) ([]*segment, error) {
+func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool, floor *int64) ([]*segment, error) {
 	var err error
 	if len(segments) == 0 || (c.noRetentionLimits() && c.noTierLimits()) {
 		return segments, nil
@@ -89,7 +121,12 @@ func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool) ([]*segment,
 	// reclaimed — the budget it belongs to is the tier's.
 	tiered, local := splitOffloadedPrefix(segments)
 	if len(tiered) > 0 && !skipTiered && !c.noTierLimits() {
-		tiered, err = c.cleanTier(tiered)
+		// The tier's eligibility is computed against the FULL log, then capped
+		// at the half: the last tiered segment's records run up to the first
+		// local one's base, and a floor inside the local half leaves every
+		// tiered segment eligible. Measuring the half alone would either lose
+		// that boundary or protect an object nothing is using.
+		tiered, err = c.cleanTier(tiered, min(deletablePrefix(segments, floor), len(tiered)))
 		if err != nil {
 			return joinTiers(tiered, local), errors.Wrap(err, "failed to apply tier retention limit")
 		}
@@ -97,13 +134,13 @@ func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool) ([]*segment,
 	if c.noRetentionLimits() {
 		return joinTiers(tiered, local), nil
 	}
-	local, err = c.cleanLocal(local)
+	local, err = c.cleanLocal(local, floor)
 	return joinTiers(tiered, local), err
 }
 
 // cleanLocal applies the local-disk retention limits, which is what Clean did
 // in full before retention became per-tier.
-func (c *deleteCleaner) cleanLocal(segments []*segment) ([]*segment, error) {
+func (c *deleteCleaner) cleanLocal(segments []*segment, floor *int64) ([]*segment, error) {
 	var err error
 
 	slog.Debug(
@@ -118,9 +155,14 @@ func (c *deleteCleaner) cleanLocal(segments []*segment) ([]*segment, error) {
 	// suffix): the caller MUST swap them in even on error, or its read path
 	// keeps referencing deleted files.
 
+	// maxDrop is recomputed for each limit rather than carried as a remaining
+	// budget: the slice shrinks as a limit deletes, so an index from before is
+	// an index into a different log. Recomputing is a walk over a handful of
+	// base offsets and cannot drift.
+
 	// Limit by age first.
 	if c.Retention.Age > 0 {
-		segments, err = c.applyAgeLimit(segments)
+		segments, err = c.applyAgeLimit(segments, deletablePrefix(segments, floor))
 		if err != nil {
 			return segments, errors.Wrap(err, "failed to apply age retention limit")
 		}
@@ -128,7 +170,7 @@ func (c *deleteCleaner) cleanLocal(segments []*segment) ([]*segment, error) {
 
 	// Next limit by number of messages.
 	if c.Retention.Messages > 0 {
-		segments, err = c.applyMessagesLimit(segments)
+		segments, err = c.applyMessagesLimit(segments, deletablePrefix(segments, floor))
 		if err != nil {
 			return segments, errors.Wrap(err, "failed to apply message retention limit")
 		}
@@ -136,7 +178,7 @@ func (c *deleteCleaner) cleanLocal(segments []*segment) ([]*segment, error) {
 
 	// Lastly limit by number of bytes.
 	if c.Retention.Bytes > 0 {
-		segments, err = c.applyBytesLimit(segments)
+		segments, err = c.applyBytesLimit(segments, deletablePrefix(segments, floor))
 		if err != nil {
 			return segments, errors.Wrap(err, "failed to apply bytes retention limit")
 		}
@@ -185,7 +227,7 @@ func joinTiers(tiered, local []*segment) []*segment {
 // must always retain the last segment because it is the one being appended to;
 // a tier has no such thing, and forcing it to keep one would mean the oldest
 // object could never be reclaimed.
-func (c *deleteCleaner) cleanTier(segments []*segment) ([]*segment, error) {
+func (c *deleteCleaner) cleanTier(segments []*segment, maxTierDrop int) ([]*segment, error) {
 	var err error
 	if c.Retention.TierAge > 0 {
 		ttl := computeTTL(c.Retention.TierAge)
@@ -199,20 +241,27 @@ func (c *deleteCleaner) cleanTier(segments []*segment) ([]*segment, error) {
 				break
 			}
 		}
-		if segments, err = dropOldestPrefix(segments[:idx], segments[idx:]); err != nil {
+		dropped := len(segments)
+		if segments, err = dropOldestPrefix(segments, idx, maxTierDrop); err != nil {
 			return segments, err
 		}
+		// Spent, not recomputed: unlike the local half, the tier's allowance was
+		// measured against the full log and cannot be re-derived from this slice
+		// alone once its own prefix is gone.
+		maxTierDrop -= dropped - len(segments)
 	}
 	if c.Retention.TierMessages > 0 {
+		before := len(segments)
 		segments, err = c.applyTierLimit(segments, c.Retention.TierMessages,
-			(*segment).MessageCount)
+			(*segment).MessageCount, maxTierDrop)
+		maxTierDrop -= before - len(segments)
 		if err != nil {
 			return segments, err
 		}
 	}
 	if c.Retention.TierBytes > 0 {
 		segments, err = c.applyTierLimit(segments, c.Retention.TierBytes,
-			(*segment).Position)
+			(*segment).Position, maxTierDrop)
 	}
 	return segments, err
 }
@@ -220,19 +269,19 @@ func (c *deleteCleaner) cleanTier(segments []*segment) ([]*segment, error) {
 // applyTierLimit keeps the newest segments whose total, by the given measure,
 // fits the limit, and drops the older prefix.
 func (c *deleteCleaner) applyTierLimit(segments []*segment, limit int64,
-	measure func(*segment) int64) ([]*segment, error) {
+	measure func(*segment) int64, maxTierDrop int) ([]*segment, error) {
 
 	total := int64(0)
 	for i := len(segments) - 1; i >= 0; i-- {
 		total += measure(segments[i])
 		if total > limit {
-			return dropOldestPrefix(segments[:i+1], segments[i+1:])
+			return dropOldestPrefix(segments, i+1, maxTierDrop)
 		}
 	}
 	return segments, nil
 }
 
-func (c *deleteCleaner) applyMessagesLimit(segments []*segment) ([]*segment, error) {
+func (c *deleteCleaner) applyMessagesLimit(segments []*segment, maxDrop int) ([]*segment, error) {
 	// We must retain at least the active segment.
 	if len(segments) <= 1 {
 		return segments, nil
@@ -240,25 +289,19 @@ func (c *deleteCleaner) applyMessagesLimit(segments []*segment) ([]*segment, err
 
 	// We start at the most recent segment and work our way backwards until we
 	// meet the retention size.
-	var (
-		lastSeg         = segments[len(segments)-1]
-		cleanedSegments = []*segment{lastSeg}
-		totalMessages   = lastSeg.MessageCount()
-	)
+	totalMessages := segments[len(segments)-1].MessageCount()
 
 	var i int
 	for i = len(segments) - 2; i > -1; i-- {
-		s := segments[i]
-		totalMessages += s.MessageCount()
+		totalMessages += segments[i].MessageCount()
 		if totalMessages > c.Retention.Messages {
 			break
 		}
-		cleanedSegments = append([]*segment{s}, cleanedSegments...)
 	}
-	return dropOldestPrefix(segments[:i+1], cleanedSegments)
+	return dropOldestPrefix(segments, i+1, maxDrop)
 }
 
-func (c *deleteCleaner) applyBytesLimit(segments []*segment) ([]*segment, error) {
+func (c *deleteCleaner) applyBytesLimit(segments []*segment, maxDrop int) ([]*segment, error) {
 	// We must retain at least the active segment.
 	if len(segments) <= 1 {
 		return segments, nil
@@ -266,25 +309,19 @@ func (c *deleteCleaner) applyBytesLimit(segments []*segment) ([]*segment, error)
 
 	// We start at the most recent segment and work our way backwards until we
 	// meet the retention size.
-	var (
-		lastSeg         = segments[len(segments)-1]
-		cleanedSegments = []*segment{lastSeg}
-		totalBytes      = lastSeg.Position()
-	)
+	totalBytes := segments[len(segments)-1].Position()
 
 	var i int
 	for i = len(segments) - 2; i > -1; i-- {
-		s := segments[i]
-		totalBytes += s.Position()
+		totalBytes += segments[i].Position()
 		if totalBytes > c.Retention.Bytes {
 			break
 		}
-		cleanedSegments = append([]*segment{s}, cleanedSegments...)
 	}
-	return dropOldestPrefix(segments[:i+1], cleanedSegments)
+	return dropOldestPrefix(segments, i+1, maxDrop)
 }
 
-func (c *deleteCleaner) applyAgeLimit(segments []*segment) ([]*segment, error) {
+func (c *deleteCleaner) applyAgeLimit(segments []*segment, maxDrop int) ([]*segment, error) {
 	// We must retain at least the active segment.
 	if len(segments) <= 1 {
 		return segments, nil
@@ -309,5 +346,5 @@ func (c *deleteCleaner) applyAgeLimit(segments []*segment) ([]*segment, error) {
 			break
 		}
 	}
-	return dropOldestPrefix(segments[:idx], segments[idx:])
+	return dropOldestPrefix(segments, idx, maxDrop)
 }

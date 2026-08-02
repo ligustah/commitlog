@@ -133,6 +133,29 @@ type CleanSpec struct {
 	// writes. Set from the log's current value by CleanWithSpec; a caller
 	// setting it directly overrides that for the pass.
 	TierWriter string
+	// RetentionFloor is the lowest offset RETENTION may not delete: a segment
+	// is eligible for deletion only if every record in it lies strictly below
+	// it. Nil — the zero value — means no floor, which is what every caller had
+	// before this existed.
+	//
+	// It bounds the DELETE cleaner only. Compaction is already bounded by
+	// Ceiling, and a caller's floor is at or above its ceiling by construction:
+	// the records this protects are precisely the ones not yet decided.
+	//
+	// The reason it exists is that retention and settlement answer different
+	// questions. A transactional caller's staged records sit in the log for as
+	// long as its transaction is open, and nothing about a segment's age, bytes
+	// or message count knows that — so a long transaction over a small
+	// retention limit had its own staged records collected out from under it,
+	// and its commit then referred to offsets that no longer existed.
+	//
+	// A POINTER rather than a sentinel, deliberately. Every obvious sentinel is
+	// a real floor: 0 protects the whole log, which is exactly what a
+	// transaction that began at offset 0 needs, and a caller writing
+	// `RetentionFloor: floor` from a tracker that returns 0 for that case would
+	// silently get "no protection" from an int64 field whose zero value had to
+	// mean unset. Nil cannot be confused with an offset.
+	RetentionFloor *int64
 }
 
 // Clean applies retention and compaction rules against the log, if applicable.
@@ -263,7 +286,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 	// fresh store objects instead (see ReplaceOffloaded), and
 	// retention is per tier, so their bytes count toward the tier's budget
 	// rather than escaping every limit.
-	cleaned, err := l.deleteCleaner.Clean(segments, spec.skipTiered)
+	cleaned, err := l.deleteCleaner.Clean(segments, spec.skipTiered, spec.RetentionFloor)
 	if err != nil {
 		// A partial retention failure still hands back the surviving
 		// segments; propagate them so the caller swaps them in — the deleted

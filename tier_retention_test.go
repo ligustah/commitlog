@@ -50,7 +50,7 @@ func TestLocalRetentionIgnoresOffloadedSegments(t *testing.T) {
 	// A byte budget far below the total. With no tier limit set, the offloaded
 	// prefix must survive it untouched.
 	c := tierCleaner(t, func(o *deleteCleanerOptions) { o.Retention.Bytes = 1 })
-	out, err := c.Clean(segs, false)
+	out, err := c.Clean(segs, false, nil)
 	require.NoError(t, err)
 
 	require.False(t, deleted[segs[0].BaseOffset], "an offloaded segment is not on local disk")
@@ -86,7 +86,7 @@ func TestTierRetentionDropsOffloadedSegments(t *testing.T) {
 	c := tierCleaner(t, func(o *deleteCleanerOptions) {
 		o.Retention.TierBytes = segs[2].Position()
 	})
-	out, err := c.Clean(segs, false)
+	out, err := c.Clean(segs, false, nil)
 	require.NoError(t, err)
 
 	require.True(t, deleted[segs[0].BaseOffset], "the oldest tiered segment must go first")
@@ -119,7 +119,7 @@ func TestTierRetentionByAgeCanEmptyTheTier(t *testing.T) {
 	defer func() { deleteSegment = restore }()
 
 	c := tierCleaner(t, func(o *deleteCleanerOptions) { o.Retention.TierAge = time.Nanosecond })
-	out, err := c.Clean(segs, false)
+	out, err := c.Clean(segs, false, nil)
 	require.NoError(t, err)
 
 	require.True(t, deleted[segs[0].BaseOffset])
@@ -150,7 +150,7 @@ func TestRetentionUnchangedWithoutATier(t *testing.T) {
 	c := tierCleaner(t, func(o *deleteCleanerOptions) {
 		o.Retention.Bytes = segs[3].Position()
 	})
-	out, err := c.Clean(segs, false)
+	out, err := c.Clean(segs, false, nil)
 	require.NoError(t, err)
 
 	require.True(t, deleted[segs[0].BaseOffset])

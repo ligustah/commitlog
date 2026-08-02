@@ -313,7 +313,11 @@ type CommitLog interface {
 	Clean() error
 
 	// CleanWithSpec applies retention and a transaction-aware compaction
-	// pass parameterized by the caller (see CleanSpec). It returns the
+	// pass parameterized by the caller (see CleanSpec). RETENTION is
+	// parameterized too: CleanSpec.RetentionFloor holds the age, bytes and
+	// message limits off a prefix the caller is still using, which is the
+	// only way a caller can stop them collecting records its own open
+	// transactions staged. It returns the
 	// pass's VERIFIED FLOOR: the highest offset at or below which the log
 	// now provably holds no transactional headers, no control markers and
 	// no aborted records — the prefix an open-time LSO/seq/abort rebuild

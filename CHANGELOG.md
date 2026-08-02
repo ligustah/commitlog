@@ -5,6 +5,42 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.0 — 2026-08-02
+
+- **Added**: `CleanSpec.RetentionFloor` — a bound on what RETENTION may delete.
+  A segment is eligible only if the whole of it lies strictly below the floor;
+  deletion is per segment, so a segment holding one protected record is
+  protected entire. Nil, the zero value, means no floor, which is what every
+  caller had before this existed.
+
+  Retention and settlement answer different questions, and only this side of the
+  boundary could tell them apart. Age, bytes and message count know nothing
+  about a caller still USING the records they collect — and a transactional
+  caller's staged records sit in the log for as long as its transaction is open.
+  A limit reached in the meantime deleted them out from under it, and the commit
+  that followed referred to offsets that no longer existed. There was no way to
+  express the protection from above: `TruncateBefore` deletes, and a caller that
+  skipped its own maintenance pass to avoid the loss stopped collecting
+  everything else too.
+
+  It bounds the DELETE cleaner only; compaction is already bounded by `Ceiling`,
+  and a caller's floor is at or above its ceiling by construction — the records
+  it protects are precisely the ones not yet decided. The clamp lives in the one
+  function all four limits (age, messages, bytes, tier) delete through, rather
+  than in each of them, because one limit forgetting the floor would surface far
+  from the limit that caused it.
+
+  A POINTER rather than a sentinel, deliberately. Every obvious sentinel is a
+  real floor: 0 protects the whole log, which is exactly what a transaction that
+  began at offset 0 needs — the first transaction a fresh log ever sees — and an
+  `int64` field whose zero value had to mean "unset" would silently give that
+  caller no protection at all.
+
+- **Removed**: the package-private `min(int64, int64) int64` in `reader.go`,
+  which shadowed the builtin for the whole package. Every call site passed
+  int64s, so the builtin is a drop-in; what it cost was that a new call passing
+  ints failed to compile with a type error naming int64 out of nowhere.
+
 ## v0.42.2 — 2026-07-30
 
 - **Fix**: an as-of timestamp lookup no longer answers a failed read with an

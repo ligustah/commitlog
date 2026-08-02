@@ -20,7 +20,7 @@ func TestDeleteCleanerNoSegments(t *testing.T) {
 	opts := deleteCleanerOptions{Name: "foo"}
 	opts.Retention.Bytes = 100
 	cleaner := newDeleteCleaner(opts)
-	segments, err := cleaner.Clean(nil, false)
+	segments, err := cleaner.Clean(nil, false, nil)
 	require.NoError(t, err)
 	require.Nil(t, segments)
 }
@@ -32,7 +32,7 @@ func TestDeleteCleanerNoRetentionSet(t *testing.T) {
 	dir := tempDir(t)
 
 	expected := []*segment{createSegment(t, dir, 0, 100)}
-	actual, err := cleaner.Clean(expected, false)
+	actual, err := cleaner.Clean(expected, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
 }
@@ -45,7 +45,7 @@ func TestDeleteCleanerOneSegment(t *testing.T) {
 	dir := tempDir(t)
 
 	expected := []*segment{createSegment(t, dir, 0, 100)}
-	actual, err := cleaner.Clean(expected, false)
+	actual, err := cleaner.Clean(expected, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
 }
@@ -68,7 +68,7 @@ func TestDeleteCleanerBytes(t *testing.T) {
 	opts.Retention.Bytes = 2 * segs[0].Position()
 	cleaner := newDeleteCleaner(opts)
 
-	actual, err := cleaner.Clean(segs, false)
+	actual, err := cleaner.Clean(segs, false, nil)
 	require.NoError(t, err)
 	require.Len(t, actual, 2)
 	require.Equal(t, int64(3), actual[0].BaseOffset)
@@ -87,7 +87,7 @@ func TestDeleteCleanerBytesBelowLimit(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		expected[i] = createSegment(t, dir, int64(i), 20)
 	}
-	actual, err := cleaner.Clean(expected, false)
+	actual, err := cleaner.Clean(expected, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
 }
@@ -104,7 +104,7 @@ func TestDeleteCleanerMessages(t *testing.T) {
 		segs[i] = createSegment(t, dir, int64(i), 20)
 		writeToSegment(t, segs[i], int64(i), []byte("blah"))
 	}
-	actual, err := cleaner.Clean(segs, false)
+	actual, err := cleaner.Clean(segs, false, nil)
 	require.NoError(t, err)
 	require.Len(t, actual, 10)
 	for i := 0; i < 10; i++ {
@@ -132,7 +132,7 @@ func TestDeleteCleanerMessagesKeepActiveSegment(t *testing.T) {
 		}
 	}
 
-	actual, err := cleaner.Clean(segs, false)
+	actual, err := cleaner.Clean(segs, false, nil)
 	require.NoError(t, err)
 	require.Len(t, actual, 1)
 	require.Equal(t, int64(10), actual[0].BaseOffset)
@@ -150,7 +150,7 @@ func TestDeleteCleanerMessagesBelowLimit(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		expected[i] = createSegment(t, dir, int64(i), 20)
 	}
-	actual, err := cleaner.Clean(expected, false)
+	actual, err := cleaner.Clean(expected, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
 }
@@ -170,7 +170,7 @@ func TestDeleteCleanerBytesMessages(t *testing.T) {
 	}
 	opts.Retention.Bytes = 5 * segs[0].Position()
 	cleaner := newDeleteCleaner(opts)
-	actual, err := cleaner.Clean(segs, false)
+	actual, err := cleaner.Clean(segs, false, nil)
 	require.NoError(t, err)
 	require.Len(t, actual, 5)
 	for i := 0; i < 5; i++ {
@@ -201,7 +201,7 @@ func TestDeleteCleanerAge(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, segs[i].WriteMessageSet(ms, entries))
 	}
-	actual, err := cleaner.Clean(segs, false)
+	actual, err := cleaner.Clean(segs, false, nil)
 	require.NoError(t, err)
 	require.Len(t, actual, 10)
 	for i := 0; i < 10; i++ {
@@ -233,7 +233,7 @@ func TestDeleteCleanerMessagesBelowAgeLimit(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, expected[i].WriteMessageSet(ms, entries))
 	}
-	actual, err := cleaner.Clean(expected, false)
+	actual, err := cleaner.Clean(expected, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, expected, actual)
 }
@@ -258,7 +258,7 @@ func TestDeleteCleanerMessagesCompacted(t *testing.T) {
 	writeToSegment(t, seg2, 15, []byte("blah"))
 
 	segs := []*segment{seg1, seg2}
-	actual, err := cleaner.Clean(segs, false)
+	actual, err := cleaner.Clean(segs, false, nil)
 
 	require.NoError(t, err)
 	require.Len(t, actual, 2)
