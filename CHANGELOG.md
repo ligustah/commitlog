@@ -5,6 +5,19 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.5 — 2026-08-02
+
+- **Added**: `TestChaosAFollowerNeverSeesTheSequenceGoBackwards`, covering the
+  one part of the read path that had nothing on it. Every other test that reads
+  a maintaining log opens a reader, reads, and closes it — which exercises reader
+  CONSTRUCTION, where two of this week's defects were, but never the scan's own
+  segment jump, because a short read finishes inside the segment it started in.
+  A follower held open across hundreds of passes crosses a boundary in place
+  several hundred times per run.
+
+  No new defect: the read path is clean under it, and it never once had to
+  surface a maintenance error to the follower. Test-only release.
+
 ## v0.43.4 — 2026-08-02
 
 - **Fixed**: the last three ways a maintenance pass could still surface a raw
