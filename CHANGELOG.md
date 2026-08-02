@@ -5,6 +5,20 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.43.2 — 2026-08-02
+
+- **Fixed**: a read that crossed a segment being compacted failed with `failed
+  to reinitialize reader: entry not found`. The other half of v0.43.1, and only
+  reachable because of it.
+
+  A rewrite drops superseded records, so a replacement segment can END BELOW
+  where its source did. Redirecting a lookup to it without re-checking that it
+  still reaches the offset resolved the reader into a segment whose records all
+  sit below where it was — for an offset that belongs to the NEXT segment.
+  `findSegment` now re-applies its own search predicate to the resolved segment
+  and moves on when it no longer holds the offset, which is the same thing it
+  does for a segment the pass removed.
+
 ## v0.43.1 — 2026-08-02
 
 - **Fixed**: a read against a compacting log failed, at random, with `segment

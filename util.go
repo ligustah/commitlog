@@ -31,9 +31,19 @@ func findSegment(segments []*segment, offset int64) (*segment, int) {
 	// one. The two can differ solely mid-pass, and anything holding cleanMu sees
 	// them identical.
 	for ; idx < n; idx++ {
-		if seg, ok := segments[idx].current(); ok {
-			return seg, idx
+		seg, ok := segments[idx].current()
+		if !ok {
+			continue // removed by the pass in flight
 		}
+		// Re-apply the search predicate to the RESOLVED segment. A rewrite drops
+		// superseded records, so a replacement can end below where its source
+		// did — and an offset in the gap belongs to the next segment, not to a
+		// segment that no longer reaches it. Without this the reader resolved to
+		// the replacement and failed with "entry not found".
+		if seg.NextOffset() <= offset {
+			continue
+		}
+		return seg, idx
 	}
 	return nil, n
 }
