@@ -1458,6 +1458,22 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 	return l.leaderEpochCache.ClearEarliest(minOffset)
 }
 
+// Segments returns the log's segment slice. It returns the slice HEADER, not a
+// copy — deliberately, because this is on the path of every read and copying
+// here would allocate per call.
+//
+// That choice puts an obligation on the other side, and it is the one thing to
+// know before changing the segment set: callers index the returned slice WITHOUT
+// holding l.mu, so whoever changes the set publishes a NEW array rather than
+// writing into the one readers are already indexing. Assigning l.segments is
+// fine. Writing l.segments[i] = x is a data race against every reader holding a
+// snapshot, whatever lock is held while doing it — TruncateBefore did exactly
+// that and shipped it (fixed in v0.44.2).
+//
+// Appending is safe, and worth spelling out since it looks like a write into
+// the shared array: append can only touch indices at or past len(l.segments),
+// and a snapshot's length is fixed when it is taken, so no reader ever indexes
+// there.
 func (l *commitLog) Segments() []*segment {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
