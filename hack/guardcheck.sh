@@ -299,14 +299,14 @@ run_guard "roll refuses a closed log" commitlog.go \
 
 # Copy-on-write, not a conditional: Segments() hands out the slice HEADER, so
 # writing an element in place races every lock-free reader holding a snapshot.
+# The neutralization aliases the old backing array instead of building a fresh
+# one, and the `survivors[0] = trimmed` two lines down then writes into it.
 # Needs -race — without it the neutralized version passes, which is the whole
 # reason this runner learned the flag.
 run_guard "TruncateBefore copy-on-write" commitlog.go \
-  '	// whatever a reader is already holding immutable.
-	segments := make([]*segment, len(l.segments))
-	copy(segments, l.segments)' \
-  '	// whatever a reader is already holding immutable.
-	segments := l.segments' \
+  '	survivors := make([]*segment, 0, len(newSegments)-firstKept)
+	survivors = append(survivors, oldSegments[firstKept:]...)' \
+  '	survivors := oldSegments[firstKept:]' \
   '^TestRetentionNeverWritesIntoASliceAReaderIsHolding$' race
 
 # A truncation that cuts below the watermark must bring the watermark down with
@@ -331,7 +331,13 @@ run_guard "clean raises the epoch floor" clean.go   '	err := l.leaderEpochCache.
 # Without the link a reader already resolved into it reads a segment that is gone
 # with no replacement -- the retention case -- and skips to the NEXT segment, past
 # the very records the trim preserved.
-run_guard "trimmed boundary redirects" commitlog.go   '				boundary.SupersededBy(trimmed)'   '				_ = trimmed'   '^TestChaosAReadFromThePublishedFloorStartsAtIt$'
+#
+# Named for a deterministic test, not for the chaos test that first caught this.
+# Truncation now publishes the new segment list BEFORE it unlinks, so a reader
+# that re-resolves finds the trim already published and never reaches the
+# boundary; only a snapshot older than the publish does, and chaos cannot
+# manufacture one on demand. The hazard is unchanged, the window is narrower.
+run_guard "trimmed boundary redirects" commitlog.go   '			boundary.SupersededBy(trimmed)'   '			_ = trimmed'   '^TestAStaleSegmentSnapshotFollowsATrimmedBoundary$'
 
 # Two segments describing the same records is the state a crash inside
 # TruncateBefore leaves -- the trim renamed into place, the source it was

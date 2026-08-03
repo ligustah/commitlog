@@ -207,3 +207,60 @@ func TestATruncationDoesNotLoseASegmentRolledUnderIt(t *testing.T) {
 			"segment %d does not start where %d ends", i, i-1)
 	}
 }
+
+// A boundary segment trimmed at a new base offset must point readers at the
+// trim, and this asserts it against a SNAPSHOT rather than by timing.
+//
+// findSegment resolves through the slice a reader is holding, not through
+// l.segments, and Segments() hands out the header — so a reader that took its
+// snapshot before a truncation published still reaches the boundary after the
+// truncation has unlinked it. Without the link that segment is gone with no
+// replacement, which reads as "retention collected these", and findSegment
+// skips to the NEXT segment: past the very records the trim preserved.
+//
+// TestChaosAReadFromThePublishedFloorStartsAtIt used to cover this and no
+// longer does. That is not the hazard going away, it is the window narrowing:
+// truncation now publishes the new list BEFORE it unlinks, so a reader that
+// re-resolves finds the trim in the published list and never consults the
+// boundary at all. Only a snapshot older than the publish still gets there, and
+// the chaos test cannot reliably manufacture one. This can.
+func TestAStaleSegmentSnapshotFollowsATrimmedBoundary(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path:             tempDir(t),
+		MaxSegmentBytes:  256,
+		DisableAutoClean: true,
+	})
+	defer cleanup()
+
+	var last int64
+	for n := 0; n < 200; n++ {
+		offs, err := l.Append([]*Message{{
+			Key:   []byte("k" + strconv.Itoa(n)),
+			Value: []byte("v" + strconv.Itoa(n)),
+		}})
+		require.NoError(t, err)
+		last = offs[len(offs)-1]
+	}
+	l.SetHighWatermark(last)
+
+	segs := l.Segments()
+	require.GreaterOrEqual(t, len(segs), 4, "need segments below and above the boundary")
+	boundary := segs[1]
+	require.Greater(t, boundary.LastOffset(), boundary.BaseOffset,
+		"the boundary must hold at least two records, so the cut straddles it")
+
+	// Inside the boundary, so the trim keeps records rather than dropping it.
+	cut := boundary.BaseOffset + 1
+
+	// The snapshot, taken before the truncation. This is the reader.
+	stale := l.Segments()
+
+	require.NoError(t, l.TruncateBefore(cut))
+
+	seg, _ := findSegment(stale, cut)
+	require.NotNil(t, seg, "a snapshot taken before the truncation lost the offset entirely")
+	require.Equal(t, cut, seg.BaseOffset,
+		"a snapshot resolved to the segment at %d instead of the trim at %d — "+
+			"the boundary went without recording what took over its records",
+		seg.BaseOffset, cut)
+}
