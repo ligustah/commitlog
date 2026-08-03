@@ -31,7 +31,7 @@ type RemoteIndexCache struct {
 	maxBytes int64
 
 	mu      sync.Mutex
-	entries map[string]*list.Element // cacheKey -> *cachedIndex element
+	entries map[string]*list.Element // index object key -> *cachedIndex element
 	lru     *list.List               // most-recently-used at the front
 	total   int64                    // sum of cached entries' on-disk bytes
 }
@@ -39,11 +39,11 @@ type RemoteIndexCache struct {
 // cachedIndex is one entry: the downloaded index file, opened, plus a pin count
 // so an index in use by a live seek is never evicted out from under it.
 type cachedIndex struct {
-	cacheKey string
-	idx      *index
-	path     string
-	bytes    int64
-	refs     int
+	objectKey string
+	idx       *index
+	path      string
+	bytes     int64
+	refs      int
 	// stale marks an entry Invalidate has detached from the cache while a seek
 	// still held it. It is no longer findable or evictable; the last release
 	// closes it. Without this an invalidated-but-pinned entry would either be
@@ -84,23 +84,37 @@ func NewRemoteIndexCache(dir string, maxBytes int64) (*RemoteIndexCache, error) 
 	}, nil
 }
 
-// cacheFileName maps a globally-unique cacheKey to a collision-free filename in
-// the cache dir. cacheKey embeds the log path and base offset, so two streams'
+// cacheFileName maps an index object key to a collision-free filename in the
+// cache dir. The object key carries a random per-upload id, so two streams'
 // like-named index objects (both "…000.index") never share a file.
-func (c *RemoteIndexCache) cacheFileName(cacheKey string) string {
+func (c *RemoteIndexCache) cacheFileName(objectKey string) string {
 	h := fnv.New64a()
-	_, _ = h.Write([]byte(cacheKey))
+	_, _ = h.Write([]byte(objectKey))
 	return filepath.Join(c.dir, fmt.Sprintf("%016x.index", h.Sum64()))
 }
 
 // acquire returns the index for an offloaded segment, downloading its index
 // object (objectKey) from store into the cache on a miss, and a release func the
-// caller MUST call when done seeking. cacheKey uniquely identifies the segment
-// across all logs; baseOffset opens the index. The entry is pinned between
-// acquire and release, so it is never evicted while a seek holds it.
-func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey, cacheKey string, baseOffset int64) (*index, func(), error) {
+// caller MUST call when done seeking. baseOffset opens the index. The entry is
+// pinned between acquire and release, so it is never evicted while a seek holds
+// it.
+//
+// The cache is keyed by the OBJECT KEY, and that choice is load-bearing. It used
+// to be keyed by the segment's log path and base offset, which is unique across
+// every log in a process but NOT across time: delete a log's directory, create a
+// new log at the same path, and its segments restart at base offset 0 and
+// produce byte-identical keys. A hit then returned the dead log's index without
+// consulting the store at all — and an index applied to a different log's bytes
+// is not a stale answer, it is a wrong one. Reported downstream: a seek for
+// offset 5 began at 7, in order, with no error.
+//
+// An object key cannot do that. newStoreKeys mints a fresh 128-bit id for every
+// upload attempt, and openOffloadedSegment takes the key from the offload marker
+// verbatim, so it is unique across logs and across incarnations by construction —
+// with no nonce to persist and no invalidation for a caller to remember.
+func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey string, baseOffset int64) (*index, func(), error) {
 	c.mu.Lock()
-	if el, ok := c.entries[cacheKey]; ok {
+	if el, ok := c.entries[objectKey]; ok {
 		ci := el.Value.(*cachedIndex)
 		ci.refs++
 		c.lru.MoveToFront(el)
@@ -112,13 +126,13 @@ func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey, cacheKey strin
 	// Miss: download and open outside the lock (it is I/O). A concurrent acquire
 	// of the same key may also fetch; the insert below dedups, discarding the
 	// loser's copy.
-	ci, err := c.fetch(store, objectKey, cacheKey, baseOffset)
+	ci, err := c.fetch(store, objectKey, baseOffset)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	c.mu.Lock()
-	if el, ok := c.entries[cacheKey]; ok {
+	if el, ok := c.entries[objectKey]; ok {
 		existing := el.Value.(*cachedIndex)
 		existing.refs++
 		c.lru.MoveToFront(el)
@@ -128,7 +142,7 @@ func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey, cacheKey strin
 	}
 	ci.refs = 1
 	el := c.lru.PushFront(ci)
-	c.entries[cacheKey] = el
+	c.entries[objectKey] = el
 	c.total += ci.bytes
 	c.evictLocked()
 	c.mu.Unlock()
@@ -136,12 +150,12 @@ func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey, cacheKey strin
 }
 
 // fetch downloads the index object to the cache dir and opens it.
-func (c *RemoteIndexCache) fetch(store SegmentStore, objectKey, cacheKey string, baseOffset int64) (*cachedIndex, error) {
+func (c *RemoteIndexCache) fetch(store SegmentStore, objectKey string, baseOffset int64) (*cachedIndex, error) {
 	size, err := store.Size(objectKey)
 	if err != nil {
 		return nil, errors.Wrap(err, "remote index size")
 	}
-	path := c.cacheFileName(cacheKey)
+	path := c.cacheFileName(objectKey)
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, errors.Wrap(err, "create cached index file")
@@ -180,7 +194,7 @@ func (c *RemoteIndexCache) fetch(store SegmentStore, objectKey, cacheKey string,
 		os.Remove(path)
 		return nil, errors.Wrap(err, "initialize cached index")
 	}
-	return &cachedIndex{cacheKey: cacheKey, idx: idx, path: path, bytes: size}, nil
+	return &cachedIndex{objectKey: objectKey, idx: idx, path: path, bytes: size}, nil
 }
 
 // release drops one pin on a cached entry. The entry stays cached (evictable
@@ -199,9 +213,9 @@ func (c *RemoteIndexCache) release(ci *cachedIndex) {
 	}
 }
 
-// Invalidate drops the cached index for cacheKey, so the next seek refetches it
-// from the store rather than reading an index that describes an object which no
-// longer exists.
+// Invalidate drops the cached index for an index OBJECT KEY, so the next seek
+// refetches it from the store rather than reading an index that describes an
+// object which no longer exists.
 //
 // Needed because eviction is LRU-only: without this a cached index outlives the
 // object it describes, and there is no size pressure that would reliably remove
@@ -211,16 +225,16 @@ func (c *RemoteIndexCache) release(ci *cachedIndex) {
 // An entry a live seek is holding is detached rather than closed — it stops
 // being findable immediately, and the last release closes it — so this never
 // pulls an index out from under a reader.
-func (c *RemoteIndexCache) Invalidate(cacheKey string) {
+func (c *RemoteIndexCache) Invalidate(objectKey string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	el, ok := c.entries[cacheKey]
+	el, ok := c.entries[objectKey]
 	if !ok {
 		return
 	}
 	ci := el.Value.(*cachedIndex)
 	c.lru.Remove(el)
-	delete(c.entries, cacheKey)
+	delete(c.entries, objectKey)
 	c.total -= ci.bytes
 	ci.stale = true
 	if ci.refs == 0 {
@@ -241,7 +255,7 @@ func (c *RemoteIndexCache) evictLocked() {
 		}
 		ci := victim.Value.(*cachedIndex)
 		c.lru.Remove(victim)
-		delete(c.entries, ci.cacheKey)
+		delete(c.entries, ci.objectKey)
 		c.total -= ci.bytes
 		ci.close()
 	}

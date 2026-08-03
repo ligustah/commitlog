@@ -76,19 +76,19 @@ func TestRemoteIndexCacheInvalidateDropsUnpinnedEntry(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { c.Close() })
 
-	_, release, err := c.acquire(store, "k.index", "k", 0)
+	_, release, err := c.acquire(store, "k.index", 0)
 	require.NoError(t, err)
 	release()
 
 	c.mu.Lock()
-	_, present := c.entries["k"]
+	_, present := c.entries["k.index"]
 	c.mu.Unlock()
 	require.True(t, present, "the entry should be cached at this point")
 
-	c.Invalidate("k")
+	c.Invalidate("k.index")
 
 	c.mu.Lock()
-	_, present = c.entries["k"]
+	_, present = c.entries["k.index"]
 	total := c.total
 	c.mu.Unlock()
 	require.False(t, present, "an invalidated entry must not be findable")
@@ -96,7 +96,7 @@ func TestRemoteIndexCacheInvalidateDropsUnpinnedEntry(t *testing.T) {
 
 	// The next acquire refetches, which is the whole point.
 	before := store.sizes.Load()
-	_, release2, err := c.acquire(store, "k.index", "k", 0)
+	_, release2, err := c.acquire(store, "k.index", 0)
 	require.NoError(t, err)
 	release2()
 	require.Greater(t, store.sizes.Load(), before,
@@ -114,13 +114,13 @@ func TestRemoteIndexCacheInvalidateDefersWhilePinned(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { c.Close() })
 
-	idx, release, err := c.acquire(store, "k.index", "k", 0)
+	idx, release, err := c.acquire(store, "k.index", 0)
 	require.NoError(t, err)
 
-	c.Invalidate("k") // while still pinned
+	c.Invalidate("k.index") // while still pinned
 
 	c.mu.Lock()
-	_, present := c.entries["k"]
+	_, present := c.entries["k.index"]
 	c.mu.Unlock()
 	require.False(t, present, "it must stop being findable at once")
 
@@ -132,12 +132,12 @@ func TestRemoteIndexCacheInvalidateDefersWhilePinned(t *testing.T) {
 	release() // last pin: now it may close
 
 	// A fresh acquire refetches rather than reviving the detached entry.
-	_, release2, err := c.acquire(store, "k.index", "k", 0)
+	_, release2, err := c.acquire(store, "k.index", 0)
 	require.NoError(t, err)
 	release2()
 
 	c.mu.Lock()
-	_, present = c.entries["k"]
+	_, present = c.entries["k.index"]
 	c.mu.Unlock()
 	require.True(t, present, "the refetched entry should be cached again")
 }

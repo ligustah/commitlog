@@ -60,7 +60,7 @@ func TestRemoteIndexCache_AcquireReadsEntries(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	idx, release, err := c.acquire(store, "k.index", "log|100", 100)
+	idx, release, err := c.acquire(store, "k.index", 100)
 	require.NoError(t, err)
 	defer release()
 
@@ -81,10 +81,10 @@ func TestRemoteIndexCache_HitDoesNotRefetch(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	_, rel1, err := c.acquire(store, "k.index", "log|0", 0)
+	_, rel1, err := c.acquire(store, "k.index", 0)
 	require.NoError(t, err)
 	rel1()
-	_, rel2, err := c.acquire(store, "k.index", "log|0", 0)
+	_, rel2, err := c.acquire(store, "k.index", 0)
 	require.NoError(t, err)
 	rel2()
 
@@ -102,17 +102,17 @@ func TestRemoteIndexCache_EvictsLRUOverBudget(t *testing.T) {
 	require.NoError(t, err)
 	defer c.Close()
 
-	_, relA, err := c.acquire(store, "a.index", "log|a", 0)
+	_, relA, err := c.acquire(store, "a.index", 0)
 	require.NoError(t, err)
 	relA()
-	_, relB, err := c.acquire(store, "b.index", "log|b", 0)
+	_, relB, err := c.acquire(store, "b.index", 0)
 	require.NoError(t, err)
 	relB()
 
 	// a was the LRU and unpinned, so acquiring b evicted it; re-acquiring a
 	// re-downloads.
 	require.Equal(t, int64(2), store.sizes.Load())
-	_, relA2, err := c.acquire(store, "a.index", "log|a", 0)
+	_, relA2, err := c.acquire(store, "a.index", 0)
 	require.NoError(t, err)
 	relA2()
 	require.Equal(t, int64(3), store.sizes.Load(), "evicted entry must re-download")
@@ -128,11 +128,11 @@ func TestRemoteIndexCache_PinnedNotEvicted(t *testing.T) {
 	defer c.Close()
 
 	// Hold a pinned (do not release).
-	idxA, relA, err := c.acquire(store, "a.index", "log|a", 0)
+	idxA, relA, err := c.acquire(store, "a.index", 0)
 	require.NoError(t, err)
 
 	// Acquiring b puts the cache over budget, but a is pinned and must survive.
-	_, relB, err := c.acquire(store, "b.index", "log|b", 0)
+	_, relB, err := c.acquire(store, "b.index", 0)
 	require.NoError(t, err)
 	relB()
 
@@ -146,11 +146,11 @@ func TestRemoteIndexCache_PinnedNotEvicted(t *testing.T) {
 	// unpinned, reclaiming it; re-acquiring a then re-downloads.
 	relA()
 	writeIndexObject(t, store, "c.index", 0, []*entry{{Offset: 0, Timestamp: 1, Position: 0, Size: 8}})
-	_, relC, err := c.acquire(store, "c.index", "log|c", 0)
+	_, relC, err := c.acquire(store, "c.index", 0)
 	require.NoError(t, err)
 	relC()
 
-	_, relA2, err := c.acquire(store, "a.index", "log|a", 0)
+	_, relA2, err := c.acquire(store, "a.index", 0)
 	require.NoError(t, err)
 	relA2()
 	require.Greater(t, store.sizes.Load(), int64(3), "unpinned entry becomes evictable after release")

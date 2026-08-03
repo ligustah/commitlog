@@ -40,6 +40,48 @@ library from that fork onward.
   Together with the `fsync`-before-unlink fix in v0.49.0, this is both halves of
   durable_streams' second report.
 
+- **Fixed**: a log recreated at a deleted log's path read the dead log's index,
+  and seeks landed on the wrong record.
+
+  `RemoteIndexCache` is process-wide and outlives any one log. It was keyed by
+  the segment's log path and base offset — unique across every log in a process,
+  but not across *time*. Delete a log's directory, create a new log at the same
+  path, and its segments restart at base offset 0 and produce byte-identical
+  keys. `acquire` then returned the dead log's index on a hit without consulting
+  the store at all. An index says "the record at offset X is at byte position
+  P"; applied to a different log's bytes that is not a stale answer, it is a
+  wrong one. Reported from durable_streams against v0.48.0: a read asking for
+  offset 5 began at offset 7, in order, with no error.
+
+  The cache is now keyed by the index **object key**, which it was already being
+  handed. `newStoreKeys` mints a fresh 128-bit random id for every upload attempt
+  and `openOffloadedSegment` takes the key from the offload marker verbatim, so
+  it is unique across logs and across incarnations by construction. That is
+  strictly better than the two shapes the report proposed: no nonce to create and
+  persist alongside the log directory, and no `InvalidatePrefix` for a caller to
+  remember to call — a rule that only the callers using option-2 tiering would
+  ever discover they were supposed to follow. `segment.indexCacheKey()` is gone,
+  and `acquire`, `fetch` and `Invalidate` lost their now-redundant parameter.
+
+  `withIndex` also now treats an empty `indexKey` as corruption rather than
+  passing it through. It is what the cache is keyed by, so an empty one is not a
+  miss to paper over — it would collide with every other segment in the same
+  state.
+
+  Reachability: needs `WithRemoteIndexCache` plus a delete-and-recreate of the
+  same name within one process lifetime, before eviction clears the entry. A
+  name being reused is ordinary, not exotic.
+
+  Verified both ways by hand rather than by `hack/guardcheck.sh`: the fix deletes
+  a derived key and reuses a parameter that was already there, so there is no
+  single line to remove, and adding an indirection purely to make one
+  neutralisable would make the code worse than the bug did. With the key put back
+  to a base-offset-derived one,
+  `TestARecreatedLogDoesNotSeekWithTheDeletedLogsCachedIndex` fails at the second
+  generation's first probe with a CRC error — the first generation's byte
+  positions landing mid-record — while the first generation stays green
+  throughout.
+
 - **Internal**: two guards that cover `TruncateBefore` were re-anchored, and one
   of them gained a new test.
 

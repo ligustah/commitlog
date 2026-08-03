@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -138,13 +137,6 @@ type segment struct {
 // rather than a local file. Caller holds at least the read lock.
 func (s *segment) isOffloaded() bool { return s.store != nil }
 
-// indexCacheKey uniquely identifies this segment's index across every log in the
-// process (the shared cache is keyed by it), so two logs' like-named index
-// objects never collide.
-func (s *segment) indexCacheKey() string {
-	return s.path + "|" + strconv.FormatInt(s.BaseOffset, 10)
-}
-
 // withIndex runs fn against the segment's index: the resident local index for a
 // normal or option-1 offloaded segment, or — for an option-2 offloaded segment
 // whose index lives in the store — the index fetched into the shared cache on
@@ -153,10 +145,14 @@ func (s *segment) withIndex(fn func(idx *index) error) error {
 	if s.Index != nil {
 		return fn(s.Index)
 	}
-	if s.indexCache == nil || s.store == nil {
+	// indexKey is what the cache is keyed by, so an empty one is not a cache
+	// miss to be papered over -- it would collide with every other segment in
+	// the same state. A segment reaching here without one is an option-1
+	// offloaded segment whose LOCAL index failed to open, which is corruption.
+	if s.indexCache == nil || s.store == nil || s.indexKey == "" {
 		return errIndexCorrupt
 	}
-	idx, release, err := s.indexCache.acquire(s.store, s.indexKey, s.indexCacheKey(), s.BaseOffset)
+	idx, release, err := s.indexCache.acquire(s.store, s.indexKey, s.BaseOffset)
 	if err != nil {
 		return err
 	}
@@ -1804,7 +1800,11 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]p
 		sb.Invalidate()
 	}
 	if s.indexKey != "" && s.indexCache != nil {
-		s.indexCache.Invalidate(s.indexCacheKey())
+		// s.indexKey is still the OLD object's key here -- the swap to
+		// newIndexKey happens below, after the marker is committed -- so this
+		// names the entry that is about to describe an object nobody should
+		// read again.
+		s.indexCache.Invalidate(s.indexKey)
 	}
 
 	// An option-1 offloaded segment keeps its index on LOCAL disk, and that
