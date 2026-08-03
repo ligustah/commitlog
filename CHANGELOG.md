@@ -7,6 +7,41 @@ library from that fork onward.
 
 ## Unreleased
 
+- **Fixed**: a truncation stopped every read and every append on the log for as
+  long as it took.
+
+  `TruncateBefore` held `l.mu` — the lock `Segments()` RLocks and `split()`
+  Locks — across all of its file I/O: every segment close, every unlink, and
+  then a scan of the boundary segment end to end and the write of a whole new
+  one. Retention is meant to be background work, and this made it a hard stop
+  for the whole log. Reported downstream as a 10-minute test timeout whose stack
+  was one truncator inside a Windows `FlushFileBuffers` with the writer and
+  every reader queued on the mutex behind it. Not a deadlock — a convoy.
+
+  It now decides under the lock, does the file work with it released, and
+  re-takes it only to publish the surviving list. Same discipline
+  `CleanWithSpec` already used. Against a log of 500 small segments: reads
+  completed during the truncation went from **0 to ~41,000**, at roughly 60% of
+  the rate they run at when nothing is truncating.
+
+  Two things follow from letting go of the lock, and the fix handles both. An
+  append can roll a new segment while it is down, so what `split()` appended has
+  to be carried into the published list rather than spliced away. And `Close()`
+  does not take `cleanMu`, so the log can close underneath the rewrite;
+  publishing into a set `closeSegments` has already walked would leave the trim
+  with nothing to close it.
+
+  A failure part-way through is also better behaved than it was. The scan and
+  the rewrite now happen before anything is deleted, so a boundary segment that
+  cannot be read leaves the log exactly as it was found — previously the
+  obsolete segments below it had already been unlinked, and the call returned an
+  error having left `l.segments` naming files that were gone.
+
+  Together with the `fsync`-before-unlink fix in v0.49.0, this is both halves of
+  durable_streams' second report.
+
+## v0.49.0 — 2026-08-03
+
 - **Fixed**: a log reopened after a crash inside `TruncateBefore` served records
   twice.
 
@@ -37,6 +72,23 @@ library from that fork onward.
   across its I/O, and it is the reason the deletes have not simply been moved
   outside the lock: publishing the surviving list before doing the file work
   widens this window rather than closing it.
+
+- **Performance**: deleting a segment stopped `fsync`ing the index it was about
+  to unlink.
+
+  `segment.Delete` closes before it removes, and closing an index syncs and
+  shrinks it. Both are durability work, and durability is meaningless for bytes
+  that are about to stop existing — the flush pushed an index to stable storage
+  microseconds before the file was removed. On Windows each is a blocking
+  syscall (`FlushFileBuffers`, `SetEndOfFile`), and a retention pass dropping N
+  segments paid both N times, inside the log's write lock.
+
+  The delete path now closes without either. It still releases the mapping and
+  the handle, which is not optional: a mapped index cannot be unlinked on
+  Windows at all.
+
+  Measured over ~225 segments: **1.27s → 0.79s**. The first half of
+  durable_streams' second report.
 
 ## v0.48.0 — 2026-08-03
 
