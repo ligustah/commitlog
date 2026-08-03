@@ -40,6 +40,26 @@ library from that fork onward.
   Together with the `fsync`-before-unlink fix in v0.49.0, this is both halves of
   durable_streams' second report.
 
+- **Internal**: two guards that cover `TruncateBefore` were re-anchored, and one
+  of them gained a new test.
+
+  `hack/guardcheck.sh` removes each guard and requires the test named for it to
+  go red. Both of these named code the rewrite above had moved, so they reported
+  `SKIP` — pattern not found, which is the one failure mode that looks like
+  nothing being wrong.
+
+  The copy-on-write guard just moved. The redirect guard —
+  `boundary.SupersededBy(trimmed)`, which is what stops a reader following a
+  deleted boundary into nothing — needed more: the chaos test it named stopped
+  covering it. Checked both ways, that test fails in under a second without the
+  link on the previous commit and passes eight consecutive runs without it on
+  this one. The hazard is unchanged; the window narrowed, because truncation now
+  publishes the new segment list *before* it unlinks, so a reader that
+  re-resolves finds the trim already published and never consults the boundary.
+  Only a snapshot older than the publish still reaches it, and chaos cannot
+  manufacture one on demand. `TestAStaleSegmentSnapshotFollowsATrimmedBoundary`
+  takes that snapshot deliberately instead. All 20 guards are covered again.
+
 ## v0.49.0 — 2026-08-03
 
 - **Fixed**: a log reopened after a crash inside `TruncateBefore` served records
