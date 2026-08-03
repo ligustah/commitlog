@@ -4,6 +4,7 @@ package commitlog
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -55,6 +56,30 @@ var ErrTimestampBeforeLog = errors.New("commitlog: timestamp is before the begin
 // nothing now proceeds past a record it should not trust. Every caller of
 // ReadMessage already handles an error return, and none can handle a panic.
 var ErrCorruptRecord = errors.New("commitlog: record failed its CRC check")
+
+// ErrSegmentUnreadable reports that a scan could not reach the end of a
+// segment, so anything derived from that scan describes a prefix rather than the
+// segment. Truncate, TruncateBefore and Clean wrap it, and leave the segment
+// exactly as they found it when they return it.
+//
+// It is worth telling apart from any other failure of those calls: it says the
+// bytes on this replica are damaged, which is a thing a caller with a peer to
+// copy from can act on, and a thing retrying the same call cannot fix.
+//
+// The alternative, and what every one of these loops used to do, is to treat it
+// as the end of the segment. That is how damage becomes LOSS rather than an
+// error: each loop writes what it collected into a fresh segment and deletes the
+// original, so whatever the scan could not reach is not in the copy and the
+// source is gone a moment later, with the call reporting success.
+//
+// A compaction pass reports it rather than skipping the segment and carrying on.
+// The pass runs unattended on a timer, so the argument for skipping is real —
+// but it would take the disposition machinery a nil digest cannot go through,
+// and a warning logged every tick forever is a quieter answer than this
+// deserves. Retention is unaffected either way: the delete stage runs first and
+// its removals are kept when compaction fails, so a damaged segment costs
+// deferred compaction, not a filling disk.
+var ErrSegmentUnreadable = errors.New("commitlog: segment could not be read to its end")
 
 // ErrBlockFormat reports a segment written in a block format this build
 // does not understand. Callers probe for it at startup (before touching
@@ -1162,6 +1187,53 @@ func (l *commitLog) Truncate(offset int64) error {
 		return nil
 	}
 
+	// The segment holding the offset is rewritten without its tail, unless the
+	// offset is exactly its base — then there is nothing of it to keep and it
+	// goes whole, provided it is not the only one left.
+	replace := seg.BaseOffset != offset || idx == 0
+
+	// Build the replacement BEFORE deleting anything. The scan can fail, and
+	// until the first Delete every failure can be returned with the log exactly
+	// as it was found. Deleting first meant a failure here left l.segments
+	// naming files that were already gone and vActiveSegment pointing at a
+	// segment that was already closed — the call returned an error and the next
+	// append died on it, which is a worse outcome than the truncation not
+	// happening.
+	var newSegment *segment
+	if replace {
+		var err error
+		if newSegment, err = seg.Truncated(); err != nil {
+			return err
+		}
+		ss := newSegmentScanner(seg)
+		defer ss.Close()
+		for {
+			ms, e, err := ss.Scan()
+			if err != nil {
+				// A scan ends for two very different reasons and this used to
+				// treat them alike: it reached the end, or it hit something it
+				// could not read. Both arrive as a non-nil error, and what
+				// follows writes whatever was collected and DELETES the source —
+				// so anything the scan could not reach was dropped, silently,
+				// with the call reporting success. Rewriting a segment over an
+				// unread suffix is the one thing that turns damage into loss.
+				if !errors.Is(err, io.EOF) {
+					_ = newSegment.Delete()
+					return fmt.Errorf("%w: truncate of segment %d: %w",
+						ErrSegmentUnreadable, seg.BaseOffset, err)
+				}
+				break
+			}
+			if ms.Offset() >= offset {
+				break
+			}
+			if err := newSegment.WriteMessageSet(ms, []*entry{e}); err != nil {
+				_ = newSegment.Delete()
+				return err
+			}
+		}
+	}
+
 	// Delete all following segments.
 	deleted := 0
 	for i := idx + 1; i < len(l.segments); i++ {
@@ -1170,22 +1242,11 @@ func (l *commitLog) Truncate(offset int64) error {
 		}
 		deleted++
 	}
-
-	var replace bool
-
-	// Delete the segment if its base offset is the target offset, provided
-	// it's not the first segment.
-	if seg.BaseOffset == offset {
-		if idx == 0 {
-			replace = true
-		} else {
-			if err := seg.Delete(); err != nil {
-				return err
-			}
-			deleted++
+	if !replace {
+		if err := seg.Delete(); err != nil {
+			return err
 		}
-	} else {
-		replace = true
+		deleted++
 	}
 
 	// Retain all preceding segments.
@@ -1196,24 +1257,7 @@ func (l *commitLog) Truncate(offset int64) error {
 
 	// Replace segment containing offset with truncated segment.
 	if replace {
-		var (
-			ss              = newSegmentScanner(seg)
-			newSegment, err = seg.Truncated()
-		)
-		defer ss.Close()
-		if err != nil {
-			return err
-		}
-		for ms, e, err := ss.Scan(); err == nil; ms, e, err = ss.Scan() {
-			if ms.Offset() < offset {
-				if err := newSegment.WriteMessageSet(ms, []*entry{e}); err != nil {
-					return err
-				}
-			} else {
-				break
-			}
-		}
-		if err = newSegment.Replace(seg); err != nil {
+		if err := newSegment.Replace(seg); err != nil {
 			return err
 		}
 		segments[idx] = newSegment
@@ -1331,7 +1375,22 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 				newBaseOffset int64 = -1
 				kept          []messageSet
 			)
-			for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
+			for {
+				ms, _, err := ss.Scan()
+				if err != nil {
+					// See the same guard in Truncate. This one has the sharper
+					// edge: if the FIRST scan fails, newBaseOffset stays -1, and
+					// "no records at or above minOffset" is indistinguishable
+					// from "could not read the first frame" — so the branch
+					// below deleted the whole boundary segment, including every
+					// record the caller asked to keep, and returned nil.
+					if !errors.Is(err, io.EOF) {
+						return fmt.Errorf("%w: truncate before, boundary "+
+							"segment %d: %w", ErrSegmentUnreadable,
+							boundary.BaseOffset, err)
+					}
+					break
+				}
 				if ms.Offset() >= minOffset {
 					if newBaseOffset < 0 {
 						newBaseOffset = ms.Offset()

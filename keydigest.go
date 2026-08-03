@@ -122,7 +122,20 @@ func buildKeyDigest(seg *segment, sc *blockCache) (*keyDigest, error) {
 		ss        = newSegmentScannerCache(seg, sc)
 	)
 	defer ss.Close()
-	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
+	for {
+		ms, _, err := ss.Scan()
+		if err != nil {
+			// A digest that covers only what the scan could reach is worse than
+			// no digest: it is written down, trusted on every later tick, and
+			// says of the records past the damage that they are not in this
+			// segment — which is the input a rewrite uses to decide what may be
+			// dropped.
+			if !errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("%w: digest for segment %d: %w",
+					ErrSegmentUnreadable, seg.BaseOffset, err)
+			}
+			break
+		}
 		var (
 			offset = ms.Offset()
 			msg    = ms.Message()

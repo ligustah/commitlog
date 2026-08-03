@@ -5,6 +5,83 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.44.0 — 2026-08-03
+
+Five ways an unclean shutdown or a damaged byte cost more than the bytes it
+touched. Every one of them turns a local fault into a global one: damage in a
+segment taking the log, damage in a log taking the process. The pattern is the
+same each time — a recovery path that could not tell "I could not read this"
+from "there is nothing more here" — and the fix is the same each time: say
+which one it was, and never let the second answer be a guess.
+
+- **Fixed**: truncating one byte off the active segment of a **block-compressed**
+  log made `New` fail outright with `block scan overran segment`, taking every
+  sealed segment under it with it. The log was unopenable, not degraded. A raw
+  log survived the identical cut, because only the block path treated a
+  half-written trailing block as a malformed segment rather than as the tail of
+  an interrupted append — which is what it is, and what every crash mid-append
+  leaves behind.
+
+  `scanBlocks` now ENDS its walk at a block it cannot resolve — too few bytes
+  left for a header, a header that does not parse, or a payload reaching past
+  the file's end — instead of failing the segment. A version mismatch is still a
+  hard error: that is a format the reader genuinely cannot handle, not an
+  interrupted write.
+
+- **Fixed**: the same crash on a **raw** segment — default configuration, no
+  compression — read back as **zero records**. Tail recovery corrected the
+  segment's position but left the torn bytes on disk, and the write handle is
+  `O_APPEND`: the next record landed after the orphan rather than over it, so
+  every subsequent read walked into the gap and stopped. The log accepted
+  writes and served nothing.
+
+  The torn frame is now removed from the file, not merely stepped over, and an
+  index that reaches past the log it belongs to is rebuilt for raw segments
+  rather than trusted — a half-written frame has no offset, so nothing later
+  could have trimmed it.
+
+- **Fixed**: after recovery trimmed a torn tail, the high-watermark checkpoint
+  still named a record that no longer existed, and every read of the reopened
+  log failed with `segment not found` — including reads of records that were
+  never in question. The checkpoint is a durable file and outlives the records
+  it counted; it is now clamped to the log's newest offset when the log opens,
+  with a warning naming both numbers.
+
+- **Fixed**: a `New` that failed left every segment it had already opened open —
+  a file handle and an index mmap each, released only by exiting the process. A
+  caller retrying an open that keeps failing leaked the whole set again on every
+  attempt. The half-built log is now closed on the way out of a failed open.
+
+- **Fixed**: `segmentScanner.Scan` sized its payload allocation from a frame
+  header it had not checked, so a handful of damaged bytes in one sealed segment
+  **killed the process** — `makeslice: len out of range` is a panic, not an
+  error, and it took every unrelated log in the same binary with it. Raised from
+  routine maintenance rather than from a read anyone was waiting on. The read
+  path had verified that header's CRC since the CRC existed; the scan never did.
+  It does now, and also refuses a frame claiming more payload than the segment
+  has left.
+
+  **Behaviour change.** The same scans then had to stop calling an unreadable
+  segment a finished one. Every rewrite loop — `Truncate`, `TruncateBefore`,
+  compaction, and the key digest behind it — ended on any error from `Scan`,
+  wrote out what it had collected and deleted the source. That is the step that
+  turns damage into loss: the records past the damage were gone, with the file
+  that still held them, and the call returned success. They now distinguish
+  `io.EOF` from a read failure and return an error wrapping the new exported
+  `ErrSegmentUnreadable` on the latter, leaving the segment exactly as they
+  found it — worth telling apart, because it says the bytes on this replica are
+  damaged, which a caller with a peer to copy from can act on and a retry of the
+  same call cannot fix. Callers that ignored the error
+  from these three will now see one where they previously saw silent success —
+  which is the point. Retention is unaffected: the delete stage runs before
+  compaction and its removals are kept when compaction fails.
+
+  `Truncate` also built its replacement segment only after deleting the segments
+  above it, so any failure in the rewrite left the log naming files that were
+  already gone and an active segment that was already closed — the next append
+  died on it. The replacement is now built before anything is deleted, so a
+  truncation that fails is a truncation that did not happen.
+
 ## v0.43.8 — 2026-08-03
 
 - **Retracted v0.43.6.** The warning in the v0.43.7 note was only a note, which

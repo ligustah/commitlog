@@ -2340,7 +2340,35 @@ func (s *segmentScanner) Scan() (messageSet, *entry, error) {
 		s.stream.Close()
 		return nil, nil, err
 	}
+	// Nothing below may trust the header until the header says it can be
+	// trusted. Its CRC covers the size field, and reading a length out of bytes
+	// that failed it was how damage in ONE segment killed the whole process: the
+	// size went straight into make(), and a size out of range is not an error
+	// there, it is a panic. Unrecoverable in the caller, fatal to every unrelated
+	// log in the same binary, and raised during routine maintenance rather than
+	// at a moment anyone is watching.
+	//
+	// The read path has checked this since the frame header CRC existed. The scan
+	// never did, which is why the paths that walk a segment to REWRITE it —
+	// compaction, Truncate, TruncateBefore — were the ones that could be made to
+	// crash by a caller's damaged data.
+	if want, got := storedHeaderCrc(header), headerCrc(header); want != got {
+		s.stream.Close()
+		return nil, nil, errors.Wrapf(ErrCorruptRecord,
+			"frame header at %d failed CRC: expected 0x%08x, got 0x%08x",
+			s.pos, want, got)
+	}
 	size := header.Size()
+	// A frame cannot be longer than what follows its own header. A size that
+	// says otherwise passed its CRC, so the damage is elsewhere — in the length
+	// itself, or in the segment's extent — and either way there is nothing here
+	// to read.
+	if remaining := s.s.Position() - (s.pos + msgSetHeaderLen); int64(size) > remaining {
+		s.stream.Close()
+		return nil, nil, errors.Wrapf(ErrCorruptRecord,
+			"frame at %d declares %d payload bytes with %d left in the segment",
+			s.pos, size, remaining)
+	}
 	payload := make([]byte, size)
 	if _, err := s.s.scanReadAt(s.cache, s.stream, payload, s.pos+msgSetHeaderLen); err != nil {
 		return nil, nil, err

@@ -2,7 +2,9 @@ package commitlog
 
 import (
 	"bytes"
+	"fmt"
 	"hash/crc32"
+	"io"
 	"log/slog"
 	"math"
 	"sort"
@@ -786,7 +788,21 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		haveEpoch          bool
 	)
 	defer ss.Close()
-	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
+	for {
+		ms, _, err := ss.Scan()
+		if err != nil {
+			// The rewrite is about to REPLACE this segment, so a scan that
+			// stopped early would install a copy missing everything past the
+			// damage and then delete the original — silently, reporting success.
+			// The partial copy is thrown away and the source left exactly as it
+			// is.
+			if !errors.Is(err, io.EOF) {
+				cleaned.Delete()
+				return nil, 0, nil, fmt.Errorf("%w: rewrite of segment %d: %w",
+					ErrSegmentUnreadable, seg.BaseOffset, err)
+			}
+			break
+		}
 		var (
 			offset      = ms.Offset()
 			leaderEpoch = ms.LeaderEpoch()
