@@ -123,8 +123,16 @@ jobs:
         with:
           go-version: stable
           cache: true
+      # Invoked through bash rather than as a bare command. The script carries a
+      # shebang and its mode bit is now 100755, so `hack/guardcheck.sh` would
+      # work — but this repo is developed on Windows, where the filesystem has
+      # no executable bit for git to preserve, so a future commit can drop it
+      # again without anyone touching this file. It had in fact never been set:
+      # this job failed with "Permission denied" (exit 126) from the day it was
+      # added, so every guard it claimed to check went unchecked, which is a
+      # worse failure than the one it exists to prevent.
       - name: guardcheck
-        run: hack/guardcheck.sh
+        run: bash hack/guardcheck.sh
 
   # A short active fuzzing sweep on top of the seed corpus (the seeds already run
   # as normal subtests in the `test` job). Bounded so it stays a smoke test; a
