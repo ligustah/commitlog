@@ -394,21 +394,18 @@ func New(opts Options) (CommitLog, error) {
 		return nil, err
 	}
 
-	if err := l.open(); err != nil {
-		return nil, err
-	}
-
-	// After an unclean shutdown, the leader epoch checkpoint file could be
-	// ahead of the log (as the log is flushed asynchronously by default). To
-	// account for this, remove all entries from the leader epoch checkpoint
-	// file where the offset is greater than the log end offset.
-	if err := l.leaderEpochCache.ClearLatest(l.activeSegment().NextOffset()); err != nil {
-		return nil, err
-	}
-
-	// The earliest leader epoch may not be flushed during a hard failure.
-	// Recover it here.
-	if err := l.leaderEpochCache.ClearEarliest(l.OldestOffset()); err != nil {
+	// Everything from here on can fail with segments already open, and the log
+	// they belong to is about to be dropped on the floor — so it has to give
+	// their handles and index mmaps back itself. open() appends segments one at
+	// a time and returns on the first that will not open, so a directory whose
+	// thirtieth segment is damaged has twenty-nine of them held; a caller that
+	// retries (a supervisor, a broker reopening a partition, a test) holds that
+	// many more each attempt and never gets them back short of exiting.
+	//
+	// It shows differently on the two platforms and neither is benign: on Windows
+	// a mapped index makes the directory undeletable, and on Linux the leak is
+	// silent until the process runs out of descriptors.
+	if err := l.openOrRelease(); err != nil {
 		return nil, err
 	}
 
@@ -429,6 +426,39 @@ func (l *commitLog) init() error {
 		return errors.Wrap(err, "mkdir failed")
 	}
 	return nil
+}
+
+// openOrRelease opens the log and reconciles the leader epoch checkpoint
+// against it, releasing every segment it managed to open if any of that fails.
+//
+// The release is best-effort and its errors are dropped: the caller is already
+// failing, and the reason it is failing is more useful than a second error from
+// closing a segment that was only opened to be thrown away. Errors here are also
+// nearly always the same handle trouble the release exists to avoid.
+func (l *commitLog) openOrRelease() (err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		for _, segment := range l.segments {
+			_ = segment.Close()
+		}
+		l.segments = nil
+		l.segmentsClosed = true
+	}()
+	if err := l.open(); err != nil {
+		return err
+	}
+	// After an unclean shutdown, the leader epoch checkpoint file could be
+	// ahead of the log (as the log is flushed asynchronously by default). To
+	// account for this, remove all entries from the leader epoch checkpoint
+	// file where the offset is greater than the log end offset.
+	if err := l.leaderEpochCache.ClearLatest(l.activeSegment().NextOffset()); err != nil {
+		return err
+	}
+	// The earliest leader epoch may not be flushed during a hard failure.
+	// Recover it here.
+	return l.leaderEpochCache.ClearEarliest(l.OldestOffset())
 }
 
 func (l *commitLog) open() error {
