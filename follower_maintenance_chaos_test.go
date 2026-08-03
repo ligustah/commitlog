@@ -80,6 +80,7 @@ func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec)
 		hotKeys  = 12   // rewritten constantly, so compaction has work
 		enough   = 3000 // records the writer must land before the run retires
 		maxSteps = 64   // messages per reader lifetime before it is rebuilt
+		minReads = 500  // records the follower must get through, or it caught nothing
 	)
 
 	var (
@@ -247,19 +248,52 @@ func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec)
 		}
 	}()
 
+	// Retire the run when it has become DANGEROUS, not when the writer has
+	// landed a fixed count. The writer is the cheap participant: it appends,
+	// while the follower decodes a block, checks a CRC and re-resolves its
+	// position. Waiting on the writer therefore retires the run at a moment that
+	// depends on the ratio between the two, and that ratio is not a constant —
+	// under -race the follower slows by much more than the writer does, so the
+	// run ended with the follower having read 225 records against a floor of 500
+	// and the suite failed on its own precondition rather than on the invariant.
+	// Red on CI's race job through several releases, green on every laptop.
+	//
+	// Waiting for the conditions the assertions below need makes the run
+	// self-pacing on any machine at any speed, and turns the deadline into the
+	// only thing that can be wrong — with a message naming what never happened.
+	unmet := func() string {
+		switch {
+		case writes.Load() < enough:
+			return fmt.Sprintf("the writer landed %d of %d records", writes.Load(), enough)
+		case cleans.Load() == 0:
+			return "no maintenance pass ran"
+		case l.OldestOffset() <= 0:
+			return "retention never collected anything"
+		case got.Load() <= minReads:
+			return fmt.Sprintf("the follower read %d records, below the floor of %d",
+				got.Load(), minReads)
+		case crossed.Load() == 0:
+			return "the follower never crossed a segment boundary mid-scan"
+		case overtaken.Load() == 0:
+			return "retention never got past the follower"
+		}
+		return ""
+	}
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for writes.Load() < enough && violation.Load() == nil {
+		for unmet() != "" && violation.Load() == nil {
 			time.Sleep(time.Millisecond)
 		}
 	}()
 	select {
 	case <-done:
 	case <-time.After(120 * time.Second):
+		reason := unmet()
 		close(stop)
 		wg.Wait()
-		t.Fatal("the writer never landed enough records")
+		t.Fatalf("the run never became dangerous enough to assert on: %s", reason)
 	}
 	close(stop)
 	wg.Wait()
@@ -275,9 +309,12 @@ func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec)
 
 	// The run has to have been dangerous. Without these it passes on a log that
 	// never rolled, never collected, and never made the follower cross anything.
+	// These now hold by construction — the run does not retire until they do —
+	// so they are here to fail loudly if that wait is ever weakened, rather than
+	// to be the first place the shortfall is noticed.
 	require.Positive(t, cleans.Load(), "no maintenance pass ran")
 	require.Positive(t, l.OldestOffset(), "retention never collected anything")
-	require.Greater(t, got.Load(), int64(500),
+	require.Greater(t, got.Load(), int64(minReads),
 		"the follower barely read, so it can hardly have caught anything")
 	require.Positive(t, crossed.Load(),
 		"the follower never crossed a segment boundary mid-scan, which is the "+
