@@ -1249,6 +1249,13 @@ func (l *commitLog) IsClosed() bool {
 // outside the segment lock. An append extending the segment mid-scan leaves the
 // copy holding a torn frame, and the rebuilt log then cannot be read end to
 // end. Reproduced in roughly one run in eight.
+//
+// l.mu is a different matter, and this holds it only to publish. It is the lock
+// every reader takes through Segments(), so holding it across the scan, the
+// rewrite and the unlinks stopped the whole log for the length of the call —
+// the same convoy TruncateBefore had. Holding appendMu makes this simpler than
+// the fix there: nothing can roll a segment underneath the call, so the list at
+// publish time is the list that was snapshotted, and there is no rebase to do.
 func (l *commitLog) Truncate(offset int64) error {
 	// Republish the tier after the segment set changes: dropping segments
 	// can remove offloaded ones, and a manifest naming an object that is
@@ -1258,16 +1265,19 @@ func (l *commitLog) Truncate(offset int64) error {
 	defer l.cleanMu.Unlock()
 	l.appendMu.Lock()
 	defer l.appendMu.Unlock()
-	l.mu.Lock()
-	defer l.mu.Unlock()
+
+	l.mu.RLock()
+	closed := l.segmentsClosed
+	snapshot := l.segments
+	l.mu.RUnlock()
 	// A truncation builds a replacement segment, so running it on a log whose
 	// segments have already been closed would leave that replacement open with
 	// nothing left to close it. Same invariant the roll path holds: never
 	// install a segment into a set that has already been walked.
-	if l.segmentsClosed {
+	if closed {
 		return ErrCommitLogClosed
 	}
-	seg, idx := findSegment(l.segments, offset)
+	seg, idx := findSegment(snapshot, offset)
 	if seg == nil {
 		// Nothing to truncate.
 		return nil
@@ -1320,10 +1330,19 @@ func (l *commitLog) Truncate(offset int64) error {
 		}
 	}
 
-	// Delete all following segments.
+	// Delete all following segments, with l.mu released.
+	//
+	// Before the publish, and deliberately unlike TruncateBefore, which unlinks
+	// after it. The records above the cut are the ones this call exists to make
+	// unreachable — a follower reconciling after an unclean election is being
+	// told they diverged — so the window where they can still be served has to
+	// be the earliest one available, not the latest. Deleted-but-still-listed is
+	// exactly the mid-pass state current() is written for: it answers ok=false
+	// and findSegment moves on, which is what a reader does once a pass has
+	// finished anyway.
 	deleted := 0
-	for i := idx + 1; i < len(l.segments); i++ {
-		if err := l.segments[i].Delete(); err != nil {
+	for i := idx + 1; i < len(snapshot); i++ {
+		if err := snapshot[i].Delete(); err != nil {
 			return err
 		}
 		deleted++
@@ -1335,20 +1354,43 @@ func (l *commitLog) Truncate(offset int64) error {
 		deleted++
 	}
 
-	// Retain all preceding segments.
-	segments := make([]*segment, len(l.segments)-deleted)
-	for i := 0; i < idx; i++ {
-		segments[i] = l.segments[i]
-	}
-
-	// Replace segment containing offset with truncated segment.
+	// Renaming the rewrite over its source and linking the two, also outside the
+	// lock. It has to happen before the publish either way: it is what makes a
+	// reader holding the old snapshot resolve into the replacement rather than
+	// into a segment that is simply gone.
 	if replace {
 		if err := newSegment.Replace(seg); err != nil {
 			return err
 		}
+	}
+
+	// Retain all preceding segments.
+	segments := make([]*segment, len(snapshot)-deleted)
+	for i := 0; i < idx; i++ {
+		segments[i] = snapshot[i]
+	}
+	if replace {
 		segments[idx] = newSegment
 	}
 	activeSegment := segments[len(segments)-1]
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.segmentsClosed {
+		// Closed underneath us. closeSegments has already walked the set, so
+		// publishing into it would leave the replacement open with nothing left
+		// to close it — the same invariant checked on the way in, re-checked
+		// because the lock was down in between.
+		//
+		// Close it rather than delete it. Replace has already renamed it over
+		// its source, so what is on disk is the truncated log and a reopen finds
+		// exactly that; only the handle would leak. Deleting would throw away
+		// the work AND leave the source gone.
+		if newSegment != nil {
+			_ = newSegment.Close()
+		}
+		return ErrCommitLogClosed
+	}
 	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&l.vActiveSegment)),
 		unsafe.Pointer(activeSegment))
 	l.segments = segments

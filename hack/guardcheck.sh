@@ -280,14 +280,14 @@ run_guard_pair "committed reader watermark" \
 # the maintenance paths and the roll path hold this invariant; a segment
 # published past the walk is one nothing will ever close.
 run_guard "truncate refuses a closed log" commitlog.go \
-  '	if l.segmentsClosed {
+  '	if closed {
 		return ErrCommitLogClosed
 	}
-	seg, idx := findSegment(l.segments, offset)' \
-  '	if l.segmentsClosed && false {
+	seg, idx := findSegment(snapshot, offset)' \
+  '	if closed && false {
 		return ErrCommitLogClosed
 	}
-	seg, idx := findSegment(l.segments, offset)' \
+	seg, idx := findSegment(snapshot, offset)' \
   '^TestMaintenanceOnAClosedLogBuildsNothing$'
 
 run_guard "roll refuses a closed log" commitlog.go \
@@ -365,6 +365,30 @@ run_guard "truncation unlinks outside the lock" commitlog.go   '	for i := 0; i <
 # list it publishes has to carry what split() appended. Losing it drops records
 # that were acknowledged, silently.
 run_guard "truncation carries segments rolled under it" commitlog.go   '	if len(newSegments) > len(oldSegments) {'   '	if false {'   '^TestATruncationDoesNotLoseASegmentRolledUnderIt$'
+
+# Truncate unlinks with l.mu released, and on a follower reconciling after an
+# unclean election the unlinks are most of the call. The neutralization takes the
+# lock around just the delete loop and gives it back -- a MATCHED pair rather
+# than a defer, because Truncate publishes under l.mu further down and a deferred
+# unlock would deadlock there. Same limitation as the TruncateBefore guard above:
+# what this catches is the unlinks moving back under the lock, not the whole call
+# doing so, and the test asserts a RATE so partial starvation is enough.
+run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
+	for i := idx + 1; i < len(snapshot); i++ {
+		if err := snapshot[i].Delete(); err != nil {
+			return err
+		}
+		deleted++
+	}'   '	deleted := 0
+	l.mu.Lock()
+	for i := idx + 1; i < len(snapshot); i++ {
+		if err := snapshot[i].Delete(); err != nil {
+			l.mu.Unlock()
+			return err
+		}
+		deleted++
+	}
+	l.mu.Unlock()'   '^TestReadsAreServedWhileATruncateRuns$'
 
 echo
 if [ "$failures" -ne 0 ]; then

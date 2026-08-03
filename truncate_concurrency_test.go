@@ -1,8 +1,13 @@
 package commitlog
 
 import (
+	"context"
+	"fmt"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -129,4 +134,136 @@ func TestTruncateRacingAppendsLosesNoAcknowledgedRecord(t *testing.T) {
 	require.Less(t, failures, writers*each/2,
 		"%d of %d appends failed; truncation should occasionally lose a race "+
 			"with an append, not routinely", failures, writers*each)
+}
+
+// The same convoy TestReadsAreServedWhileATruncationRuns covers for
+// TruncateBefore, on the other truncation.
+//
+// Truncate held l.mu — the lock every reader takes through Segments() — across
+// the scan of the boundary segment, the write of its replacement, and the
+// unlink of every segment above the cut. A follower reconciling after an
+// unclean election can be told to truncate a long way back, so that is not a
+// small amount of work, and for all of it the log served nothing.
+//
+// Unlike TruncateBefore, appendMu is held throughout and that is NOT being
+// changed: the boundary scan runs outside the segment's own lock, so an append
+// extending the segment mid-scan tears the copy — which is exactly what
+// TestTruncateRacingAppendsLosesNoAcknowledgedRecord above exists for. Appends
+// are meant to wait here. Reads are not.
+//
+// The assertion is a COUNT against a measured baseline, not a duration, for the
+// same reason as the TruncateBefore test: with the lock held end to end a read
+// that starts during the truncation cannot finish until it ends, so essentially
+// none complete, however long or short the call happens to be.
+func TestReadsAreServedWhileATruncateRuns(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path:             tempDir(t),
+		MaxSegmentBytes:  128, // many small segments, so there is real work to do
+		DisableAutoClean: true,
+	})
+	defer cleanup()
+
+	const records = 1000
+	for n := int64(0); n < records; n++ {
+		offs, err := l.Append([]*Message{{
+			Key:   []byte(fmt.Sprintf("k:%d", n%16)),
+			Value: []byte(strconv.FormatInt(n, 10) + ":padding to force segment rolls"),
+		}})
+		require.NoError(t, err)
+		l.SetHighWatermark(offs[len(offs)-1])
+	}
+	l.mu.RLock()
+	segs := len(l.segments)
+	l.mu.RUnlock()
+	require.Greater(t, segs, 100, "need enough segments for the truncate to take real time")
+
+	// Half the log goes, and the cut lands INSIDE a segment so the boundary
+	// rewrite runs too — a whole segment read and a whole segment written, which
+	// is the expensive half of the call.
+	cut := l.NewestOffset() / 2
+	require.Greater(t, cut, int64(0))
+
+	var (
+		stop     = make(chan struct{})
+		total    atomic.Int64
+		during   atomic.Int64
+		wg       sync.WaitGroup
+		truncing atomic.Bool
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hdr := make([]byte, HeaderBufferLen)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// From the FLOOR, which a Truncate never moves — so unlike the
+			// TruncateBefore test there is nothing here that is expected to fail
+			// benignly as the log changes under the reader.
+			r, err := l.NewReader(From(l.OldestOffset()), Uncommitted())
+			if err != nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, _, _, _, err = r.ReadMessage(ctx, hdr)
+			cancel()
+			if err != nil {
+				continue
+			}
+			total.Add(1)
+			// Counted only if the truncate was in flight for the WHOLE read:
+			// sampled after, so a read that began before it started cannot count.
+			if truncing.Load() {
+				during.Add(1)
+			}
+		}
+	}()
+
+	// What this machine serves when nothing is truncating, so the assertion can
+	// be a RATIO. An absolute floor would only catch the lock being held across
+	// the whole call; a ratio also catches it being held across just the deletes
+	// or just the rewrite, which is the shape a partial regression would take.
+	const warmup = 250 * time.Millisecond
+	time.Sleep(warmup)
+	baseline := float64(total.Load()) / warmup.Seconds()
+
+	truncing.Store(true)
+	start := time.Now()
+	require.NoError(t, l.Truncate(cut))
+	elapsed := time.Since(start)
+	truncing.Store(false)
+
+	close(stop)
+	wg.Wait()
+
+	// A quarter of the undisturbed rate. Deliberately generous: a truncate does
+	// compete for the disk and for each segment's own lock, so reads are
+	// expected to be somewhat slower while one runs — just not STOPPED.
+	want := int64(0.25 * baseline * elapsed.Seconds())
+	t.Logf("truncate of %d segments took %s; %d reads completed inside it "+
+		"(baseline %.0f/s, floor %d)", segs, elapsed, during.Load(), baseline, want)
+	require.Greater(t, elapsed, 20*time.Millisecond,
+		"the truncate was too fast to prove anything; raise the segment count")
+	require.Greater(t, want, int64(20), "the baseline was too low to assert on")
+	require.Greater(t, during.Load(), want,
+		"reads were starved while the truncate ran (%s)", elapsed)
+
+	// And it still did the job.
+	require.Equal(t, cut-1, l.NewestOffset(), "the truncate did not cut where it was asked to")
+	require.Equal(t, int64(0), l.OldestOffset(), "the floor moved, and it should not have")
+
+	// End to end, so the boundary rewrite is not merely present but readable.
+	r, err := l.NewReader(From(0), Uncommitted())
+	require.NoError(t, err)
+	hdr := make([]byte, HeaderBufferLen)
+	for at := int64(0); at < cut; at++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, off, _, _, err := r.ReadMessage(ctx, hdr)
+		cancel()
+		require.NoError(t, err, "reading back offset %d after the truncate", at)
+		require.Equal(t, at, off, "the log skipped a record the truncate kept")
+	}
 }

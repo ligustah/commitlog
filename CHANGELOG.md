@@ -40,6 +40,30 @@ library from that fork onward.
   Together with the `fsync`-before-unlink fix in v0.49.0, this is both halves of
   durable_streams' second report.
 
+- **Fixed**: `Truncate` stopped every read for the length of the call, the same
+  way `TruncateBefore` did.
+
+  It held `l.mu` across the scan of the boundary segment, the write of its
+  replacement, and the unlink of every segment above the cut. A follower
+  reconciling after an unclean election can be told to cut a long way back, so
+  that is not a small amount of work. Measured on a log of 500 small segments:
+  reads completing during the call went from **0 to ~41,000**, and the call
+  itself got faster — 1.94s to 0.86s — because it was no longer contending with
+  the readers it had queued up behind itself.
+
+  `appendMu` is still held for the whole call and that has not changed. The
+  boundary scan runs outside the segment's own lock, so an append extending the
+  segment mid-scan tears the copy; appends are meant to wait here. Holding it
+  also makes this simpler than the `TruncateBefore` fix — nothing can roll a
+  segment underneath the call, so the list at publish time is the list that was
+  snapshotted and there is no rebase to do.
+
+  One deliberate difference from `TruncateBefore`: the unlinks happen *before*
+  the publish rather than after. The records above the cut are the ones the call
+  exists to make unreachable, so the window in which they can still be served has
+  to be the earliest available, not the latest. Deleted-but-still-listed is
+  exactly the mid-pass state `current()` is written for.
+
 - **Fixed**: a log recreated at a deleted log's path read the dead log's index,
   and seeks landed on the wrong record.
 
