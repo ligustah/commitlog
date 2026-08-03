@@ -1357,13 +1357,22 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 		return nil
 	}
 
+	// Copy on write, for the same reason Truncate does. Segments() hands out the
+	// slice HEADER, so every lock-free reader holding one indexes this backing
+	// array — writing an element in place is a data race against all of them, and
+	// the race detector calls it: reported downstream, red under -race in a
+	// deletion and a truncate chaos test. Publishing a new array instead leaves
+	// whatever a reader is already holding immutable.
+	segments := make([]*segment, len(l.segments))
+	copy(segments, l.segments)
+
 	// Find the first sealed segment whose last offset >= minOffset (the boundary).
 	// All sealed segments before it are entirely obsolete.
 	// If no sealed segment qualifies, boundaryIdx = len-1 (the active segment),
 	// and we just delete all sealed segments.
-	boundaryIdx := len(l.segments) - 1
-	for i := 0; i < len(l.segments)-1; i++ {
-		if l.segments[i].LastOffset() >= minOffset {
+	boundaryIdx := len(segments) - 1
+	for i := 0; i < len(segments)-1; i++ {
+		if segments[i].LastOffset() >= minOffset {
 			boundaryIdx = i
 			break
 		}
@@ -1371,15 +1380,15 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 
 	// Delete all sealed segments before the boundary.
 	for i := 0; i < boundaryIdx; i++ {
-		if err := l.segments[i].Delete(); err != nil {
+		if err := segments[i].Delete(); err != nil {
 			return err
 		}
 	}
 
 	// Rewrite the boundary segment if it's a sealed segment whose BaseOffset
 	// falls before minOffset (meaning it straddles the cut point).
-	if boundaryIdx < len(l.segments)-1 {
-		boundary := l.segments[boundaryIdx]
+	if boundaryIdx < len(segments)-1 {
+		boundary := segments[boundaryIdx]
 		if boundary.BaseOffset < minOffset {
 			ss := newSegmentScanner(boundary)
 			defer ss.Close()
@@ -1434,7 +1443,7 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 				if err := boundary.Delete(); err != nil {
 					return err
 				}
-				l.segments[boundaryIdx] = trimmed
+				segments[boundaryIdx] = trimmed
 			} else {
 				// Boundary segment had no records >= minOffset; delete it entirely.
 				if err := boundary.Delete(); err != nil {
@@ -1445,7 +1454,7 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 		}
 	}
 
-	l.segments = l.segments[boundaryIdx:]
+	l.segments = segments[boundaryIdx:]
 	return l.leaderEpochCache.ClearEarliest(minOffset)
 }
 

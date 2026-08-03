@@ -5,6 +5,30 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.44.2 — 2026-08-03
+
+- **Fixed**: retention wrote into a segment slice that readers were already
+  holding — a data race on the log's own backing array, reported downstream as
+  red under `-race` in a deletion and a truncate chaos test.
+
+  `Segments()` returns the slice header rather than a copy, deliberately: it is
+  called on the path of every read, and copying there would allocate per call.
+  The price of that choice is an obligation on the writing side — whoever
+  changes the segment set publishes a NEW array instead of writing into the one
+  readers are indexing. `Truncate` has always done that. `TruncateBefore` did
+  not: it replaced its boundary segment with `l.segments[boundaryIdx] = trimmed`
+  in place, under `l.mu`, which readers do not take.
+
+  That is an unsynchronised write against concurrent reads of the same memory,
+  so which of the two segments a reader observes is unordered with respect to
+  the state of the segment it then uses — and one of the two candidates is on
+  its way to being deleted. The reads are lock-free by design, so nothing on the
+  read side could have made this safe; the fix is not to write there at all.
+
+  `TruncateBefore` now snapshots, edits the snapshot, and publishes it, exactly
+  as `Truncate` does. There are no remaining in-place element writes to
+  `l.segments` anywhere in the package.
+
 ## v0.44.1 — 2026-08-03
 
 - **Fixed**: a committed reader could be built with no high watermark and then
