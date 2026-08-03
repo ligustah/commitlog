@@ -110,16 +110,14 @@ type CommitLog interface {
 
 	// Truncate removes all messages from the log starting at the given offset.
 	//
-	// It does NOT lower the high watermark, and the two can be moved apart by
-	// this call: truncating at or below the current watermark leaves
-	// HighWatermark() above NewestOffset(). That state is reachable on purpose —
-	// a follower told to roll back past what it had locally committed is an
-	// ordinary outcome of an unclean leader election — so this refuses nothing.
+	// Cutting at or below the high watermark is allowed, and LOWERS it to the
+	// new end of the log. A follower told to roll back past what it had locally
+	// committed is an ordinary outcome of an unclean leader election, so this
+	// refuses nothing — but it will not leave the watermark naming records it
+	// just removed, and it logs a warning when it moves it.
 	//
-	// But SetHighWatermark only ever RAISES the watermark, so it cannot put the
-	// two back together; use OverrideHighWatermark. Left alone, the log serves no
-	// committed reads in the meantime (the watermark resolves to no segment) and
-	// self-corrects only on reopen, where a checkpoint above the log is clamped.
+	// So a caller truncating below the watermark has nothing to pair this with.
+	// SetHighWatermark could not have done it anyway, being monotonic.
 	Truncate(offset int64) error
 
 	// Sync makes the log durable through offset: once it returns, a reopened log
@@ -274,11 +272,10 @@ type CommitLog interface {
 	// OverrideHighWatermark sets the high watermark on the log using the given
 	// value, even if the value is less than the current HW.
 	//
-	// This is the deliberate exception to SetHighWatermark's monotonicity, and it
-	// is not only for tests: after Truncate cuts at or below the watermark, this
-	// is the ONLY way to bring the watermark back down to the log. A follower
-	// rolling back after an unclean leader election needs exactly that, so a
-	// caller that truncates below what it had committed must pair the two.
+	// This is the deliberate exception to SetHighWatermark's monotonicity. It is
+	// not needed after Truncate, which lowers the watermark itself; it is here
+	// for a caller that has some other reason to know the committed boundary has
+	// moved backwards.
 	//
 	// Lowering the watermark is not free — it tells readers that records they
 	// were already entitled to see are no longer committed — so everything else

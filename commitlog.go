@@ -981,8 +981,9 @@ func (l *commitLog) SetHighWatermark(hw int64) {
 }
 
 // OverrideHighWatermark sets the high watermark on the log using the given
-// value, even if the value is less than the current HW. This is used for unit
-// testing purposes.
+// value, even if the value is less than the current HW — the deliberate
+// exception to SetHighWatermark's monotonicity. See the interface doc; it is
+// not needed after Truncate, which lowers the watermark itself.
 func (l *commitLog) OverrideHighWatermark(hw int64) {
 	l.mu.Lock()
 	l.hw = hw
@@ -1273,6 +1274,32 @@ func (l *commitLog) Truncate(offset int64) error {
 	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&l.vActiveSegment)),
 		unsafe.Pointer(activeSegment))
 	l.segments = segments
+
+	// A truncation can cut below the watermark, and then the watermark names
+	// records that are gone. Clamp it, for the same reason and with the same
+	// warning as a checkpoint that overshoots the log on reopen: the records are
+	// not there, and a log does not get to keep asserting they are.
+	//
+	// Reachable in production rather than in theory. A follower reconciling
+	// against a leader promoted from OUTSIDE the ISR — an unclean election — is
+	// told to truncate below what it had locally committed, which is the whole
+	// point of an unclean election and not something this call should refuse.
+	//
+	// Leaving it unclamped was worse than un-committing the records, because
+	// SetHighWatermark is monotonic and cannot bring the watermark back down.
+	// The log served NO committed reads at all until it was reopened — the
+	// watermark resolved to no segment, so every committed reader failed to
+	// build — and nothing said why at the point that caused it.
+	if newest := activeSegment.NextOffset() - 1; l.hw > newest {
+		slog.Warn("commitlog: truncation cut below the high watermark; clamping",
+			slog.String("path", l.Path),
+			slog.Int64("hw", l.hw),
+			slog.Int64("newest", newest),
+			slog.Int64("truncated_at", offset),
+		)
+		l.hw = newest
+		l.notifyHWChange()
+	}
 	return l.leaderEpochCache.ClearLatest(offset)
 }
 

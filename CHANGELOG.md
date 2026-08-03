@@ -5,6 +5,40 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.46.0 — 2026-08-03
+
+- **Fixed**: a truncation that cut below the high watermark left the watermark
+  naming records it had just removed, and the log then served nothing at all.
+
+  `Truncate` is allowed to cut below the watermark — a follower reconciling
+  against a leader promoted from OUTSIDE the ISR is told to discard records it
+  had locally committed, which is the whole point of an unclean election and not
+  something the log should refuse. Reported by a consumer as reachable through
+  exactly that path, in a rollback that does not touch the watermark afterwards.
+
+  What made it more than untidy is that the state could not be escaped. The
+  watermark resolves through `findSegment`, which returns nil past the last
+  segment, so every committed reader failed to build: the log served no
+  committed reads whatsoever. `SetHighWatermark` is monotonic and silently
+  ignores a smaller value, so the obvious repair does nothing;
+  `OverrideHighWatermark` was the only way and its documentation said it was for
+  unit tests. And nothing was raised at the call that caused it — the log
+  recovered on the next reopen, where a checkpoint above the log is clamped, and
+  not before.
+
+  `Truncate` now clamps the watermark itself, with the same warning the reopen
+  path logs. That is the log's own stated principle applied one call earlier:
+  the records are not there, and a log does not get to keep asserting they are.
+  A truncation ABOVE the watermark — the ordinary `Truncate(HW+1)` — leaves it
+  untouched, since the watermark is still true.
+
+  Callers that truncate below the watermark no longer need to pair the call with
+  anything.
+
+- **Changed**: `SetHighWatermark`'s monotonicity and `OverrideHighWatermark`'s
+  purpose are now documented. Both were load-bearing and unwritten, and the
+  latter's "used for unit testing purposes" was actively wrong.
+
 ## v0.45.0 — 2026-08-03
 
 - **Added**: `AtomicWriteFileWithRetry`, which was `atomicWriteWithRetry`. Same

@@ -85,8 +85,16 @@ s = open(p, encoding="utf-8", newline="").read()
 # regardless, so rewriting it with LF here costs nothing.
 if old not in s and "\r\n" in s:
     s = s.replace("\r\n", "\n")
-if old not in s:
+n = s.count(old)
+if n == 0:
     sys.exit(3)
+# More than one match is AMBIGUOUS, not a licence to take the first. Two guards
+# in this file are byte-identical on their `if` line -- the high watermark clamp
+# on reopen and the one in Truncate -- so a pattern matching both would have
+# neutralized the wrong one and reported on a guard it never touched. Caught
+# while falsifying that very clamp by hand, where it silently proved nothing.
+if n > 1:
+    sys.exit(4)
 open(p, "w", encoding="utf-8", newline="").write(s.replace(old, new, 1))
 ' "$file"
 }
@@ -129,11 +137,24 @@ guard_finish() {
   git checkout -- "$@"
 }
 
+# why_edit_failed EXITCODE — 3 is "gone", 4 is "matches more than one place".
+why_edit_failed() {
+  if [ "$1" = "4" ]; then
+    echo "SKIP (guard text matches more than one place — narrow it)"
+  else
+    echo "SKIP (guard text not found — did it move?)"
+  fi
+}
+
 run_guard() {
   local name="$1" file="$2" old="$3" new="$4" test_re="$5" mode="${6:-}"
   guard_start "$name" || return 0
-  if ! apply_edit "$file" "$old" "$new"; then
-    echo "SKIP (guard text not found — did it move?)"
+  # Status captured on its own line: inside `if ! cmd; then`, $? is the NEGATED
+  # status, so it reads 0 and every failure would report the same reason.
+  apply_edit "$file" "$old" "$new"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    why_edit_failed "$rc"
     failures=$((failures + 1))
     git checkout -- "$file"
     return 0
@@ -148,8 +169,14 @@ run_guard() {
 run_guard_pair() {
   local name="$1" f1="$2" o1="$3" n1="$4" f2="$5" o2="$6" n2="$7" test_re="$8" mode="${9:-}"
   guard_start "$name" || return 0
-  if ! apply_edit "$f1" "$o1" "$n1" || ! apply_edit "$f2" "$o2" "$n2"; then
-    echo "SKIP (guard text not found — did it move?)"
+  apply_edit "$f1" "$o1" "$n1"
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    apply_edit "$f2" "$o2" "$n2"
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    why_edit_failed "$rc"
     failures=$((failures + 1))
     git checkout -- "$f1" "$f2"
     return 0
@@ -184,7 +211,13 @@ run_guard "reclamation pin" tier_state.go \
   'if e.pin != nil && e.pin.referenced() && false {' \
   '^TestReclamationWaitsForTheReaderHoldingTheOldObject$'
 
-run_guard "append tail-under-lock" commitlog.go   '	l.appendMu.Lock()
+# Anchored on the comment above it: `l.appendMu.Lock()` with its deferred unlock
+# appears at four sites in this file, and the bare pair matched all of them. It
+# happened to hit the intended one first, so this guard was accidentally valid
+# rather than actually valid — and would have silently moved to another site the
+# first time anyone added a lock earlier in the file.
+run_guard "append tail-under-lock" commitlog.go   '	// Reading the tail and writing to it must be one step; see appendMu.
+	l.appendMu.Lock()
 	defer l.appendMu.Unlock()'   '	// BREAK: tail read and write no longer one step'   '^TestConcurrentAppends'
 
 run_guard "frame-header CRC" reader.go   'if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got {'   'if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got && false {'   '^FuzzCorruptFrameHeaderIsNeverServedAsTruth$'
@@ -275,6 +308,17 @@ run_guard "TruncateBefore copy-on-write" commitlog.go \
   '	// whatever a reader is already holding immutable.
 	segments := l.segments' \
   '^TestRetentionNeverWritesIntoASliceAReaderIsHolding$' race
+
+# A truncation that cuts below the watermark must bring the watermark down with
+# it. Note the two-line pattern: the `if` line alone is byte-identical to the
+# reopen clamp above it in the same file, so a one-line pattern would neutralize
+# whichever came first and report on a guard it never touched.
+run_guard "truncate clamps the watermark" commitlog.go \
+  '	if newest := activeSegment.NextOffset() - 1; l.hw > newest {
+		slog.Warn("commitlog: truncation cut below the high watermark; clamping",' \
+  '	if newest := activeSegment.NextOffset() - 1; l.hw > newest && false {
+		slog.Warn("commitlog: truncation cut below the high watermark; clamping",' \
+  '^TestTruncatingBelowTheWatermarkClampsIt$'
 
 echo
 if [ "$failures" -ne 0 ]; then
