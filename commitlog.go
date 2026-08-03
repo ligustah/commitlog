@@ -568,6 +568,11 @@ func (l *commitLog) open() error {
 			return err
 		}
 	}
+	// After every source of segments has been read, and before anything reads
+	// the list: two of them can describe the same records.
+	if err := l.resolveSegmentOverlaps(); err != nil {
+		return err
+	}
 	// A log whose newest segment is offloaded has nowhere to append: every
 	// offloaded segment is sealed, and the active segment must be local and
 	// writable. This is the normal state after adopting a tier into an empty
@@ -621,6 +626,79 @@ func (l *commitLog) open() error {
 		)
 		l.hw = newest
 	}
+	return nil
+}
+
+// resolveSegmentOverlaps drops any segment whose records the segment before it
+// already holds. Caller holds l.mu, or is open() before publication.
+//
+// It is the recovery for a crash in the middle of TruncateBefore. That call
+// trims the boundary segment by writing the surviving records into a NEW file
+// at a HIGHER base offset and then deleting the source, and those are two
+// separate steps with a gap between them. Stopping in the gap — after Finalize
+// has renamed the trim into place, before Delete removes the source — leaves
+// two .log files whose ranges overlap: the source [B, L] and the trim [B+k, L].
+// open() had no notion of overlap and took both, so a read walked the source to
+// L and then began the trim again at B+k. Offsets came back TWICE, in order,
+// with no error anywhere: confirmed as 0..7 then 6,7,8,9.
+//
+// The trim is a strict SUFFIX of the source, so the source on its own is a
+// complete and correct log, and dropping the trim un-does an unfinished
+// truncation the caller can simply run again. Dropping the source instead is
+// wrong even though it is the newer file: the segments below the boundary are
+// deleted one at a time BEFORE the trim is written, so a crash can leave some
+// of them standing, and taking the source's low records away then opens a HOLE
+// in the middle of the log. An un-done truncation is recoverable; a hole is not.
+//
+// An overlap that is not containment cannot be produced by any path in this
+// package — every other rewrite renames over its source, keeping the base
+// offset and so the name. It is reported rather than repaired, because serving
+// an offset twice is the failure being fixed here and guessing at a partial
+// overlap would only pick a different way to do it.
+func (l *commitLog) resolveSegmentOverlaps() error {
+	kept := make([]*segment, 0, len(l.segments))
+	for _, s := range l.segments {
+		prev := (*segment)(nil)
+		if n := len(kept); n > 0 {
+			prev = kept[n-1]
+		}
+		// NextOffset is the exclusive end, and an EMPTY segment reports its own
+		// base for it — so an empty segment neither overlaps nor is overlapped,
+		// which is what we want: it describes no records to duplicate.
+		if prev == nil || s.BaseOffset >= prev.NextOffset() {
+			kept = append(kept, s)
+			continue
+		}
+		if s.NextOffset() > prev.NextOffset() {
+			return errors.Errorf("commitlog: segments %d and %d overlap and "+
+				"neither contains the other (%d..%d and %d..%d); refusing to "+
+				"open a log that would serve an offset twice",
+				prev.BaseOffset, s.BaseOffset, prev.BaseOffset,
+				prev.NextOffset()-1, s.BaseOffset, s.NextOffset()-1)
+		}
+		slog.Warn("commitlog: dropping a segment whose records the previous one "+
+			"already holds; a truncation was interrupted before it could remove "+
+			"the segment it rewrote",
+			slog.String("path", l.Path),
+			slog.Int64("dropped_base_offset", s.BaseOffset),
+			slog.Int64("covered_by_base_offset", prev.BaseOffset),
+			slog.Int64("covered_through", prev.NextOffset()-1),
+		)
+		if s.isOffloaded() {
+			// Closed, not Deleted: Delete would remove the tier OBJECT, and a
+			// process that opens a log has not established that it owns the
+			// tier. The duplicate is out of the segment list either way, and the
+			// next publish by whoever does own it stops naming the object.
+			if err := s.Close(); err != nil {
+				return errors.Wrap(err, "close overlapping offloaded segment")
+			}
+			continue
+		}
+		if err := s.Delete(); err != nil {
+			return errors.Wrap(err, "remove overlapping segment")
+		}
+	}
+	l.segments = kept
 	return nil
 }
 

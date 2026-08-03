@@ -333,6 +333,12 @@ run_guard "clean raises the epoch floor" clean.go   '	err := l.leaderEpochCache.
 # the very records the trim preserved.
 run_guard "trimmed boundary redirects" commitlog.go   '				boundary.SupersededBy(trimmed)'   '				_ = trimmed'   '^TestChaosAReadFromThePublishedFloorStartsAtIt$'
 
+# Two segments describing the same records is the state a crash inside
+# TruncateBefore leaves -- the trim renamed into place, the source it was
+# rewritten from not yet deleted. Without this, open() takes both and a read
+# serves those offsets TWICE, in order, with no error anywhere.
+run_guard "reopen resolves segment overlaps" commitlog.go   '	if err := l.resolveSegmentOverlaps(); err != nil {'   '	if err := error(nil); err != nil {'   '^TestAnInterruptedTrimDoesNotServeRecordsTwice$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

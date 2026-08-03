@@ -5,6 +5,39 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed**: a log reopened after a crash inside `TruncateBefore` served records
+  twice.
+
+  Trimming the boundary segment writes the surviving records into a new file at
+  a higher base offset and then deletes the source. Those are two steps, and a
+  crash lands between them: the trim has been renamed into place, the source is
+  still there, and the directory holds two `.log` files whose offset ranges
+  overlap. `open()` had no notion of overlap and took both, so a read walked the
+  source to its end and then began the trim again in the middle — offsets came
+  back twice, in order, with no error anywhere. Confirmed as `0..7` then
+  `6,7,8,9`.
+
+  `open()` now drops any segment whose records the one before it already holds.
+  The trim is a strict suffix of its source, so the source alone is a complete
+  log; dropping the trim un-does an unfinished truncation the caller can simply
+  run again. Dropping the source instead would be wrong despite it being the
+  older file — the segments below the boundary are deleted one at a time before
+  the trim is written, so a crash can leave some of them standing, and removing
+  the source's low records then opens a hole in the middle of the log.
+
+  An overlap where neither segment contains the other cannot be produced by any
+  path in this package, since every other rewrite renames over its source and so
+  keeps the name. That one is reported rather than repaired: serving an offset
+  twice is the failure being fixed here, and guessing at a partial overlap would
+  only choose a different way to do it.
+
+  Found while reading durable_streams' report on `TruncateBefore` holding `l.mu`
+  across its I/O, and it is the reason the deletes have not simply been moved
+  outside the lock: publishing the surviving list before doing the file work
+  widens this window rather than closing it.
+
 ## v0.48.0 — 2026-08-03
 
 - **Fixed**: a read from a published retention floor came back past it.
