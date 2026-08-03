@@ -112,6 +112,31 @@ func findSegmentIndexByTimestamp(segments []*segment, timestamp int64) (int, err
 // short-circuit that at the cost of a new failure the old shape did not have: a
 // tail of gone segments would return nil, and the caller turns nil into a hard
 // "no segment to consume" where the retry would have resolved it.
+// findSegmentAfter returns the segment a reader that has consumed all of seg
+// should continue into, or nil when there is nothing after it yet.
+//
+// It asks for the segment holding seg's next offset, NOT for the next base
+// offset above seg's. Those differ precisely when a segment is replaced by one
+// with a HIGHER base covering a SUFFIX of the same range, which is what
+// TruncateBefore's boundary trim is: source 0..5 becomes a trim 4..5. Asking for
+// "the next base above 0" finds that trim and hands the reader a segment it has
+// already walked, so a scan served 5 and then 4 — reported downstream as a read
+// batch that was not monotonic, with every record in it genuine.
+//
+// The trim excludes itself here for free: findSegment wants NextOffset() >
+// offset, and a trim ends exactly where its source did, so seg.NextOffset() is
+// not inside it. Resolution goes through current(), so a replacement installed
+// by a rewrite is still followed.
+func findSegmentAfter(segments []*segment, seg *segment) *segment {
+	next, _ := findSegment(segments, seg.NextOffset())
+	if next == seg {
+		// Only reachable if seg grew between the caller's EOF and this lookup;
+		// there is nothing after it, and returning it would restart it at zero.
+		return nil
+	}
+	return next
+}
+
 func findSegmentByBaseOffset(segments []*segment, offset int64) *segment {
 	n := len(segments)
 	idx := sort.Search(n, func(i int) bool {

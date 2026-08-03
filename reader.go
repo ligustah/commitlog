@@ -348,7 +348,7 @@ LOOP:
 		// We hit the end of the segment.
 		if err == io.EOF && !waiting {
 			// Check if there are more segments.
-			nextSeg := findSegmentByBaseOffset(segments, r.seg.BaseOffset+1)
+			nextSeg := findSegmentAfter(segments, r.seg)
 			if nextSeg != nil {
 				r.seg = nextSeg
 				r.br.reset(nextSeg, 0)
@@ -368,7 +368,7 @@ LOOP:
 		// We hit an EOF after waiting for data which means a new segment was
 		// rolled, so move to the next segment.
 		segments = r.cl.Segments()
-		nextSeg := findSegmentByBaseOffset(segments, r.seg.BaseOffset+1)
+		nextSeg := findSegmentAfter(segments, r.seg)
 
 		// If there are not enough segments to read, wait for new segment to be
 		// appended or the context to be canceled.
@@ -378,7 +378,7 @@ LOOP:
 				break LOOP
 			}
 			segments = r.cl.Segments()
-			nextSeg = findSegmentByBaseOffset(segments, r.seg.BaseOffset+1)
+			nextSeg = findSegmentAfter(segments, r.seg)
 		}
 		r.seg = nextSeg
 		r.br.reset(nextSeg, 0)
@@ -573,7 +573,7 @@ LOOP:
 
 		// We hit the end of the segment, so jump to the next one.
 		if err == io.EOF {
-			nextSeg := findSegmentByBaseOffset(segments, r.seg.BaseOffset+1)
+			nextSeg := findSegmentAfter(segments, r.seg)
 			if nextSeg == nil {
 				// Name the state. A bare "no segment to consume" cost a long
 				// investigation and sent two people at the wrong theory — a

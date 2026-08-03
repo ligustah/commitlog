@@ -5,6 +5,40 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed**: one read spanning a truncation could return the same offset twice,
+  or go backwards. Regression in v0.50.0; **v0.50.0 should not be used**.
+
+  A reader that finished a segment advanced with
+  `findSegmentByBaseOffset(r.seg.BaseOffset+1)` — *the next segment whose base is
+  above mine* — and reset to that segment's position zero. That query is wrong
+  whenever a segment can be replaced by one with a **higher** base offset
+  covering a **suffix** of the same range, which is exactly what
+  `TruncateBefore`'s boundary trim is: a source holding `0..5` becomes a trim
+  holding `4..5`. A reader that had served `5` was handed the trim and restarted
+  it at its base, serving `4` next.
+
+  Reported from durable_streams as a single `ReadWithOffsets` batch that was not
+  monotonic — `4 after 5`, `242 after 242`. The most useful part of that report
+  was what did *not* break: every record served was genuine and self-consistent
+  with the offset it came back at. That ruled out a bad index, a stale cached
+  seek and a torn frame, and left only the reader re-visiting a range it had
+  already walked.
+
+  The reader now advances to the segment holding its own next offset. A trim
+  excludes itself for free — it ends exactly where its source did, so the source's
+  next offset is not inside it — and resolution still goes through `current()`,
+  so a replacement installed by a compaction rewrite is followed as before.
+
+  The v0.50.0 locking rework made this reachable rather than causing it. Publishing
+  the new segment list *before* unlinking the source leaves a window where the
+  source is still live and readable and its trim is already published, so an
+  ordinary scan can walk from one into the other. Under the old all-under-`l.mu`
+  ordering the source was always closed before the trim became reachable, and the
+  reader took the `ErrSegmentReplaced` path instead — which re-resolves by offset
+  and lands correctly. The bug was latent in the reader the whole time.
+
 ## v0.50.0 — 2026-08-03
 
 - **Fixed**: a truncation stopped every read and every append on the log for as

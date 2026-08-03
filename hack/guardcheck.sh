@@ -390,6 +390,14 @@ run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 	}
 	l.mu.Unlock()'   '^TestReadsAreServedWhileATruncateRuns$'
 
+# A reader that consumed a segment must advance PAST it, by asking for the
+# segment holding its next OFFSET. The neutralization restores the old query --
+# the next BASE offset above its own -- which walks straight into the trim that
+# replaced the segment it just read, because a trim has a higher base and covers
+# a suffix of the same range. That served a record twice, downstream, inside one
+# read batch.
+run_guard "reader advances past its segment" util.go   '	next, _ := findSegment(segments, seg.NextOffset())'   '	next := findSegmentByBaseOffset(segments, seg.BaseOffset+1)'   '^TestASegmentAdvanceSkipsTheTrimOfTheSegmentJustRead$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
