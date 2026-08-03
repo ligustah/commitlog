@@ -109,6 +109,17 @@ type CommitLog interface {
 	NewReader(opts ...ReadOption) (*Reader, error)
 
 	// Truncate removes all messages from the log starting at the given offset.
+	//
+	// It does NOT lower the high watermark, and the two can be moved apart by
+	// this call: truncating at or below the current watermark leaves
+	// HighWatermark() above NewestOffset(). That state is reachable on purpose —
+	// a follower told to roll back past what it had locally committed is an
+	// ordinary outcome of an unclean leader election — so this refuses nothing.
+	//
+	// But SetHighWatermark only ever RAISES the watermark, so it cannot put the
+	// two back together; use OverrideHighWatermark. Left alone, the log serves no
+	// committed reads in the meantime (the watermark resolves to no segment) and
+	// self-corrects only on reopen, where a checkpoint above the log is clamped.
 	Truncate(offset int64) error
 
 	// Sync makes the log durable through offset: once it returns, a reopened log
@@ -253,11 +264,25 @@ type CommitLog interface {
 
 	// SetHighWatermark sets the high watermark on the log. All messages up to
 	// and including the high watermark are considered committed.
+	//
+	// MONOTONIC: a value below the current watermark is ignored, not applied.
+	// Committed data does not become uncommitted just because a caller passed a
+	// smaller number, and a late or reordered call must not walk the watermark
+	// backwards under readers that have already been told what is committed.
 	SetHighWatermark(hw int64)
 
 	// OverrideHighWatermark sets the high watermark on the log using the given
-	// value, even if the value is less than the current HW. This is used for
-	// unit testing purposes.
+	// value, even if the value is less than the current HW.
+	//
+	// This is the deliberate exception to SetHighWatermark's monotonicity, and it
+	// is not only for tests: after Truncate cuts at or below the watermark, this
+	// is the ONLY way to bring the watermark back down to the log. A follower
+	// rolling back after an unclean leader election needs exactly that, so a
+	// caller that truncates below what it had committed must pair the two.
+	//
+	// Lowering the watermark is not free — it tells readers that records they
+	// were already entitled to see are no longer committed — so everything else
+	// should use SetHighWatermark.
 	OverrideHighWatermark(hw int64)
 
 	// HighWatermark returns the high watermark for the log.
