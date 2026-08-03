@@ -5,6 +5,60 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.47.0 — 2026-08-03
+
+- **Fixed**: compaction erased the log's leader epoch, and every follower of a
+  compacted stream was fenced out permanently.
+
+  A clean `Replace`d the live epoch cache with one the compactor rebuilt from
+  the per-record epoch stamps of the surviving records. That cache could only
+  ever be a subset of the real one, and on a leader it was empty: the only
+  writer that stamps a record with an epoch is the follower path taking a
+  leader's framing verbatim. `Append` writes 0, and `NewLeaderEpoch` writes to
+  the checkpoint file and nowhere else.
+
+  So one ordinary maintenance pass took `LastLeaderEpoch()` from 3 to 0.
+  `LastOffsetForLeaderEpoch` still answered, but only through the fallback that
+  fires when there is no history at all. Downstream that epoch is the
+  replication fence, so every follower's fetch was refused, the follower did as
+  it was told — re-probe, truncate, refetch — with the same epoch, and was
+  refused again, forever. It needs no race and no failure: a stream with
+  `Compact: true` and more than one replica is enough, which in a cluster is the
+  ordinary configuration. Reported from durable_streams with a pure-commitlog
+  repro, now a test here.
+
+  A clean removes records. It does not renumber them and it does not change when
+  a leadership began, so every entry the live cache holds is still true
+  afterwards, and the only ones needing attention are those anchored below the
+  surviving floor. `ClearEarliest` already does exactly that — re-anchoring the
+  newest of them at the floor rather than dropping it — and is what the
+  retention path has always used. The compaction path now uses it too, and
+  nothing else touches the cache.
+
+  This also fixes the two narrower versions of the same hole: an epoch assigned
+  to an empty log (start offset -1, below every base offset), and an epoch whose
+  records have all been compacted away, which was lost even on a follower whose
+  records do carry stamps.
+
+- **Changed**: the epoch offsets a clean leaves behind are where each leadership
+  BEGAN, not where each epoch's first surviving record sits. An epoch that began
+  at 5 keeps its anchor at 5 even when compaction leaves only offset 9. This is
+  also the safe answer for the follower asking: told 5 it rolls back everything
+  from 5 on, whereas 9 would tell it to keep local copies of 5..8 that the
+  leader no longer has and so could never correct. A test asserted the old
+  answers and has been updated.
+
+- **Removed**: `leaderEpochCache.Replace` and `Rebase`, the epoch cache threaded
+  through `compact`/`CompactSpec`/`cleanSegment`, and the per-rewrite epoch
+  collection. All of it existed to build the cache that is no longer used.
+  `Replace` in particular is the primitive that made this bug possible; the
+  cache is now only ever added to or trimmed at an end.
+
+- **Changed**: the key digest sidecar is format v2 — the leader-epoch section is
+  gone. A v1 sidecar is not recognized, and an unrecognized digest has always
+  been rebuilt from a segment scan rather than treated as an error, so this
+  needs nothing from callers.
+
 ## v0.46.0 — 2026-08-03
 
 - **Fixed**: a truncation that cut below the high watermark left the watermark
