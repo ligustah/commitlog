@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.50.1 — 2026-08-04
 
 - **Fixed**: one read spanning a truncation could return the same offset twice,
   or go backwards. Regression in v0.50.0; **v0.50.0 should not be used**.
