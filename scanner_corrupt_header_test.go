@@ -149,6 +149,86 @@ func TestDamageInOneSegmentDoesNotKillTheProcess(t *testing.T) {
 	}
 }
 
+// A frame header can pass its CRC and still be a lie about length.
+//
+// The header CRC covers the size field, so damaged bytes are caught by it —
+// which is why the test above never reaches the second check. But the CRC only
+// says the header is the one that was WRITTEN; it cannot say the payload it
+// describes is still there. A segment torn between its header and its payload,
+// or one whose extent shrank underneath a header that is intact, produces a size
+// that is internally consistent and larger than what follows it.
+//
+// So this forges exactly that: a real header, its size raised past the end of
+// the segment, and its CRC recomputed so the first check waves it through. What
+// stops it is the length-versus-extent check, and nothing else does.
+//
+// Without that check the scan allocates from the declared size and reads past
+// the end, which arrives as io.EOF — indistinguishable, to a rewrite loop, from
+// having reached the end of the segment legitimately. The pass then reports
+// success and deletes the source. That is the difference this test exists to
+// pin: not a crash, but a silent truncation reported as a completed rewrite.
+func TestAFrameCannotDeclareMoreThanTheSegmentHolds(t *testing.T) {
+	dir := tempDir(t)
+	l, cleanup := setupWithOptions(t, Options{
+		Path:            dir,
+		MaxSegmentBytes: 1024,
+	})
+	defer cleanup()
+	for i := range 200 {
+		offs, err := l.Append([]*Message{{
+			Key:   []byte(fmt.Sprintf("k:%d", i%8)),
+			Value: []byte(fmt.Sprintf("v:%08d:%s", i, strings.Repeat("x", 32))),
+		}})
+		require.NoError(t, err)
+		l.SetHighWatermark(offs[0])
+	}
+
+	require.Greater(t, len(l.segments), 3, "need a sealed segment to damage")
+	victim := l.segments[len(l.segments)/2]
+	minOffset := victim.BaseOffset + 2
+	require.Greater(t, victim.NextOffset(), minOffset, "victim segment too short")
+
+	// In place, under an open log, and without changing the file's length — same
+	// reason as the test above: damage on a closed log is caught when it opens
+	// and never reaches a rewrite.
+	path := filepath.Join(dir, fmt.Sprintf(fileFormat, victim.BaseOffset, logFileSuffix))
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	require.NoError(t, err)
+	defer f.Close()
+
+	hdr := make([]byte, msgSetHeaderLen)
+	_, err = f.ReadAt(hdr, 0)
+	require.NoError(t, err)
+	// If this fails the segment does not start with a raw frame — block
+	// compression, say — and the forgery below would be meaningless rather than
+	// wrong. Assert the assumption instead of silently testing nothing.
+	require.Equal(t, storedHeaderCrc(hdr), headerCrc(hdr),
+		"segment does not begin with a plain frame header; this test's forgery assumes it does")
+
+	// Larger than anything that can follow this header: the file's own length
+	// bounds the segment's extent, and the header sits at position 0.
+	info, err := f.Stat()
+	require.NoError(t, err)
+	declared := int32(info.Size())
+	require.Greater(t, declared, int32(0))
+	encoding.PutUint32(hdr[sizePos:sizePos+4], uint32(declared))
+	encoding.PutUint32(hdr[headerCrcPos:], headerCrc(hdr))
+	// The forged header must now PASS the first check, or this test is just the
+	// previous one again.
+	require.Equal(t, storedHeaderCrc(hdr), headerCrc(hdr), "forged header does not pass its own CRC")
+	_, err = f.WriteAt(hdr, 0)
+	require.NoError(t, err)
+
+	// TruncateBefore rewrites the boundary segment from its start, so the forged
+	// frame is the first thing it walks.
+	err = l.TruncateBefore(minOffset)
+	require.ErrorIs(t, err, ErrSegmentUnreadable,
+		"a frame declaring more than the segment holds was treated as readable")
+
+	_, err = l.Append([]*Message{{Key: []byte("k:after"), Value: []byte("v:after")}})
+	require.NoError(t, err, "the log refused writes after meeting the damage")
+}
+
 // readableOffsets returns every offset the log will actually serve from a
 // sequential read, stopping at the first thing it will not. Uncommitted so the
 // high watermark plays no part, and errors are the end of the walk rather than a
