@@ -205,6 +205,20 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 		return -1, cleanErr
 	}
 	l.mu.Lock()
+	if l.segmentsClosed {
+		// The log closed while this pass was rewriting, which it does outside
+		// l.mu. Installing now would hand the log a set of freshly built
+		// segments that closeSegments has already walked past, so nothing would
+		// ever close them — the same leak a roll racing a close used to cause.
+		// Close what this pass built instead; close() is idempotent, so the
+		// segments carried over unchanged from the old set are unaffected.
+		for _, segment := range cleaned {
+			_ = segment.Close()
+		}
+		l.mu.Unlock()
+		l.queueReclaim(superseded)
+		return -1, ErrCommitLogClosed
+	}
 	newSegments := l.segments
 	if len(newSegments) > len(oldSegments) {
 		// New segments were added while cleaning. Rebase the new segments onto

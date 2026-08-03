@@ -1181,6 +1181,13 @@ func (l *commitLog) Truncate(offset int64) error {
 	defer l.appendMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// A truncation builds a replacement segment, so running it on a log whose
+	// segments have already been closed would leave that replacement open with
+	// nothing left to close it. Same invariant the roll path holds: never
+	// install a segment into a set that has already been walked.
+	if l.segmentsClosed {
+		return ErrCommitLogClosed
+	}
 	seg, idx := findSegment(l.segments, offset)
 	if seg == nil {
 		// Nothing to truncate.
@@ -1340,6 +1347,11 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 	defer l.cleanMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// See Truncate: this one also builds a trimmed boundary segment.
+	if l.segmentsClosed {
+		return ErrCommitLogClosed
+	}
 
 	if len(l.segments) == 0 || minOffset <= 0 {
 		return nil
@@ -1554,16 +1566,33 @@ func (l *commitLog) split(oldActiveSegment *segment) error {
 	//
 	// If a second caller of split is ever added, this stops being vestigial and
 	// the lock discipline above it needs re-deciding, not this line.
+	//
+	// Both steps of publishing the new segment — the CAS and the append to
+	// l.segments — are held under l.mu, and that is what makes closing safe.
+	// closeSegments walks l.segments and sets segmentsClosed under the same
+	// lock, so a roll either finishes entirely before the walk and is closed by
+	// it, or sees the flag below. Publishing outside the lock left a window in
+	// between: an append still in flight when Close ran could roll a segment
+	// AFTER the walk had passed it, so the log's own slice ended up naming a
+	// segment nothing would ever close — a file handle and an index mmap held
+	// until the process exited.
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.segmentsClosed {
+		// The log closed underneath this append. Do not publish into a set that
+		// has already been walked; refusing the append is the correct outcome
+		// for a log that is closing, and it is the caller's own append that
+		// fails rather than an unrelated one.
+		segment.Delete() // nolint: errcheck
+		return ErrCommitLogClosed
+	}
 	if !atomic.CompareAndSwapPointer(
 		(*unsafe.Pointer)(unsafe.Pointer(&l.vActiveSegment)),
 		unsafe.Pointer(oldActiveSegment), unsafe.Pointer(segment)) {
 		segment.Delete() // nolint: errcheck
 		return ErrSegmentExists
 	}
-	l.mu.Lock()
-	segments := append(l.segments, segment)
-	l.segments = segments
-	l.mu.Unlock()
+	l.segments = append(l.segments, segment)
 	return nil
 }
 

@@ -5,6 +5,61 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.44.1 — 2026-08-03
+
+- **Fixed**: a committed reader could be built with no high watermark and then
+  serve records that were never committed. This is the defect behind the
+  intermittent `no segment to consume` in the follower chaos test, which had
+  survived several releases as an unexplained flake — and drew two independent
+  investigations to the same wrong theory, a stale segment snapshot. The
+  snapshot was never stale. The reader had no watermark.
+
+  The way in is a race a consumer cannot avoid. It asks the log where to start,
+  gets `OldestOffset() == -1` because the log is empty, and passes that back a
+  moment later — by which time records have landed. Both guards in
+  `newReaderCommitted` then miss: `offset > hw` is `-1 > -1`, false, and
+  `OldestOffset() == -1` is no longer true. Execution reaches the tail of the
+  constructor, which computes the watermark position only `if hw != -1`, so it
+  returns a reader with a nil `hwSeg` and a NON-nil starting segment.
+
+  That combination is unbounded, because the read is clamped to the watermark
+  only when `r.seg == r.hwSeg` and a nil `hwSeg` is equal to nothing. The reader
+  took the whole segment regardless of what was committed. Running off the end
+  of it is what raised the error — but that was the second symptom; the first
+  was a committed reader serving uncommitted records, which is the one promise
+  that interface exists to make.
+
+  Fixed at both levels: `hw == -1` now takes the park-and-wait branch on its own
+  merits (nothing is committed, whatever offset was asked for), and an unset
+  `hwSeg` no longer reads as "the watermark is somewhere else". The error text
+  at the end of the segment names the reader's state now, rather than saying
+  only that it ran out.
+
+- **Fixed**: a segment rolled while the log was closing was never closed — a
+  file handle and an index mmap held until the process exited, and on Windows a
+  log directory that could not be removed. Reported downstream, reproducing 10
+  runs in 10.
+
+  Closing walks `l.segments` and marks the log closed under `l.mu`. Rolling
+  published the new segment in two steps and only the second took that lock, so
+  an append still in flight when `Close` ran could install a segment AFTER the
+  walk had gone past it. The log's own slice then named a segment nothing would
+  ever close. Worse than a leak in isolation: that segment is open, so appends
+  into the closed log kept SUCCEEDING, and each further roll leaked another one.
+
+  Both publishing steps now happen under `l.mu`, and a roll into a log whose
+  segments are already closed is refused with `ErrCommitLogClosed` rather than
+  installed. A roll therefore either completes before the walk and is closed by
+  it, or does not happen.
+
+  The same shape was in two more places, found by looking rather than by report.
+  `Clean` rewrites outside `l.mu` and installs at the end, so a pass overlapping
+  a close installed a freshly built set that nothing would close; it now closes
+  what it built and returns `ErrCommitLogClosed`. `Truncate` and `TruncateBefore`
+  each build a replacement segment, and on an already-closed log left it open;
+  they now refuse. Shutdown is exactly when this happens — a process takes a
+  signal with maintenance and appends still in flight.
+
 ## v0.44.0 — 2026-08-03
 
 Five ways an unclean shutdown or a damaged byte cost more than the bytes it

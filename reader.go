@@ -510,7 +510,13 @@ func (r *committedReader) readLoop(
 LOOP:
 	for {
 		lim := int64(len(p[n:]))
-		if r.seg == r.hwSeg {
+		// A nil hwSeg is not "the watermark is elsewhere", it is "this reader
+		// does not know where the watermark is" — and equality with r.seg
+		// cannot tell those apart, so an unset one used to leave the read
+		// unbounded and let a COMMITTED reader walk into uncommitted bytes.
+		// Fall into the sync branch below instead, which establishes the bound
+		// or parks until there is one.
+		if r.hwSeg == nil || r.seg == r.hwSeg {
 			lim = min(lim, r.hwPos-r.pos)
 		}
 		if lim <= 0 {
@@ -569,7 +575,19 @@ LOOP:
 		if err == io.EOF {
 			nextSeg := findSegmentByBaseOffset(segments, r.seg.BaseOffset+1)
 			if nextSeg == nil {
-				err = errors.New("no segment to consume")
+				// Name the state. A bare "no segment to consume" cost a long
+				// investigation and sent two people at the wrong theory — a
+				// stale segment snapshot — when what the numbers actually said
+				// was that the reader had no high watermark at all.
+				var hwBase int64 = -1
+				if r.hwSeg != nil {
+					hwBase = r.hwSeg.BaseOffset
+				}
+				err = pkgErrors.Errorf(
+					"no segment to consume after segment %d at position %d "+
+						"(hw %d in segment %d at position %d, %d segments)",
+					r.seg.BaseOffset, r.pos, r.hw, hwBase, r.hwPos,
+					len(segments))
 				break
 			}
 			r.seg = nextSeg
@@ -638,7 +656,23 @@ func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader
 
 	// If offset exceeds HW, wait for the next message. This also covers the
 	// case when the log is empty.
-	if offset > hw || l.OldestOffset() == -1 {
+	//
+	// hw == -1 is its own reason and not a special case of offset > hw. It says
+	// nothing is committed, so there is nothing this reader may serve whatever
+	// offset it was asked for — including a NEGATIVE one, which is how the
+	// condition used to be escaped. A caller that reads OldestOffset() on an
+	// empty log gets -1 and passes it here; by the time this runs, records may
+	// have landed, so `l.OldestOffset() == -1` is false, and `-1 > -1` is false
+	// as well. Both clauses miss, and the fall-through below then SKIPS
+	// computing the high watermark position (it is guarded by hw != -1) while
+	// still handing back a non-nil segment.
+	//
+	// A committed reader in that state has no bound: readLoop only clamps its
+	// read when r.seg == r.hwSeg, and a nil hwSeg is equal to nothing. So it
+	// read the whole segment regardless of what was committed and ran off the
+	// end of it — surfacing as "no segment to consume", and able to serve
+	// uncommitted records before it got there.
+	if hw == -1 || offset > hw || l.OldestOffset() == -1 {
 		return &committedReader{
 			cl:     l,
 			seg:    nil,
