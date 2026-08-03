@@ -19,9 +19,8 @@ import (
 // segment without reading its records: every keyed data record's offset,
 // tombstone flag, header presence and timestamp — sorted by key so cleans can
 // stream a k-way merge across segments instead of materializing a global
-// latest-per-key map — plus the unkeyed data offsets, control-marker offsets
-// and leader-epoch assignments that the clean's remove/strip/skip decisions
-// depend on.
+// latest-per-key map — plus the unkeyed data offsets and control-marker
+// offsets that the clean's remove/strip/skip decisions depend on.
 //
 // Validity is bound to the segment's .log byte size: any rewrite (Replace,
 // Trimmed) changes it, so a stale digest can never describe replaced content.
@@ -31,8 +30,12 @@ import (
 const (
 	keysSuffix = ".keys"
 
-	digestMagic   uint32 = 0x434C4B44 // "CLKD"
-	digestVersion byte   = 1
+	digestMagic uint32 = 0x434C4B44 // "CLKD"
+	// v2 dropped the leader-epoch section: nothing read it once compaction
+	// stopped rebuilding the epoch cache from record stamps (see
+	// CleanWithSpec). A version a reader does not recognize is not an error —
+	// loadKeyDigest returns nil and the digest is rebuilt from a scan.
+	digestVersion byte = 2
 
 	digestFlagTombstone  byte = 1 << 0
 	digestFlagHasHeaders byte = 1 << 1
@@ -43,11 +46,6 @@ type digestRec struct {
 	offset int64
 	flags  byte
 	ts     int64
-}
-
-type digestEpoch struct {
-	epoch       uint64
-	firstOffset int64
 }
 
 type keyDigest struct {
@@ -61,7 +59,6 @@ type keyDigest struct {
 	stripVerifiedBelow int64
 	stripHdrs          []string
 
-	epochs []digestEpoch
 	// The keyed section (entries sorted by key) lives in exactly one of two
 	// places: freshly built digests hold the encoded bytes in `keyed`; loaded
 	// sidecars record only the section's file position (path/keyedOff/
@@ -116,10 +113,8 @@ func buildKeyDigest(seg *segment, sc *blockCache) (*keyDigest, error) {
 		recs []digestRec
 	}
 	var (
-		byKey     = make(map[string]*keyRecs)
-		lastEpoch = uint64(0)
-		haveEpoch = false
-		ss        = newSegmentScannerCache(seg, sc)
+		byKey = make(map[string]*keyRecs)
+		ss    = newSegmentScannerCache(seg, sc)
 	)
 	defer ss.Close()
 	for {
@@ -141,10 +136,6 @@ func buildKeyDigest(seg *segment, sc *blockCache) (*keyDigest, error) {
 			msg    = ms.Message()
 			attrs  = msg.Attributes()
 		)
-		if le := ms.LeaderEpoch(); !haveEpoch || le > lastEpoch {
-			d.epochs = append(d.epochs, digestEpoch{epoch: le, firstOffset: offset})
-			lastEpoch, haveEpoch = le, true
-		}
 		if attrs&AttrControl != 0 {
 			d.control = append(d.control, offset)
 			continue
@@ -229,11 +220,6 @@ func encodeKeyDigest(d *keyDigest) []byte {
 	for _, h := range d.stripHdrs {
 		putUvarint(uint64(len(h)))
 		buf.WriteString(h)
-	}
-	putUvarint(uint64(len(d.epochs)))
-	for _, e := range d.epochs {
-		putUvarint(e.epoch)
-		putVarint(e.firstOffset - d.base)
 	}
 	putUvarint(uint64(d.nKeys))
 	putUvarint(uint64(len(d.keyed)))
@@ -377,18 +363,6 @@ func loadKeyDigest(seg *segment) *keyDigest {
 	for i := uint64(0); i < nHdrs; i++ {
 		hl := r.uvarint()
 		d.stripHdrs = append(d.stripHdrs, string(r.bytes(int(hl))))
-	}
-	nEpochs := r.uvarint()
-	if r.err != nil || nEpochs > uint64(len(body)) {
-		return nil
-	}
-	if nEpochs > 0 {
-		d.epochs = make([]digestEpoch, 0, nEpochs)
-	}
-	for i := uint64(0); i < nEpochs; i++ {
-		e := r.uvarint()
-		off := r.varint() + d.base
-		d.epochs = append(d.epochs, digestEpoch{epoch: e, firstOffset: off})
 	}
 	d.nKeys = int(r.uvarint())
 	keyedLen := r.uvarint()

@@ -59,19 +59,22 @@ func newCompactCleaner(opts compactCleanerOptions) *compactCleaner {
 // Ceiling, only the latest message per key survives. With a transactional
 // spec it additionally removes aborted records, garbage-collects expired
 // tombstones, drops control markers below StripBelow, and strips the
-// transactional headers off surviving decided records. Returns the compacted
-// segments and a leaderEpochCache containing the earliest offsets for each
-// leader epoch, or nil if nothing was compacted.
+// transactional headers off surviving decided records.
+//
+// The log's leader epoch cache is NOT this function's business. A clean removes
+// records without renumbering them or changing when a leadership began, so the
+// live cache stays true and the caller only has to raise its floor; see the
+// ClearEarliest call in commitLog.CleanWithSpec.
 func (c *compactCleaner) CompactSpec(spec CleanSpec, segments []*segment) ([]*segment,
-	*leaderEpochCache, int64, error) {
+	int64, error) {
 
 	if len(segments) <= 1 {
-		return segments, nil, -1, nil
+		return segments, -1, nil
 	}
 
 	slog.Debug("Compacting log", slog.String("name", c.Name))
 	before := time.Now()
-	compacted, epochCache, removed, verified, err := c.compact(spec, segments)
+	compacted, removed, verified, err := c.compact(spec, segments)
 	if err == nil {
 		slog.Debug("Finished compacting log",
 			slog.String("name", c.Name),
@@ -83,7 +86,7 @@ func (c *compactCleaner) CompactSpec(spec CleanSpec, segments []*segment) ([]*se
 
 	}
 
-	return compacted, epochCache, verified, errors.Wrap(err, "failed to compact log")
+	return compacted, verified, errors.Wrap(err, "failed to compact log")
 
 }
 
@@ -130,7 +133,7 @@ func (d *dropSet) get(off int64) bool {
 }
 
 func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segment,
-	*leaderEpochCache, int, int64, error) {
+	int, int64, error) {
 
 	// Latest-per-key is computed by a streaming merge over per-segment sorted
 	// key digests (persistent sidecars for sealed segments, in-memory for the
@@ -138,17 +141,16 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// the pass would change nothing are kept without reading a single record.
 	digests, err := c.loadOrBuildDigests(segments)
 	if err != nil {
-		return nil, nil, 0, -1, err
+		return nil, 0, -1, err
 	}
 	merged, err := c.mergeDigests(spec, segments, digests)
 	if err != nil {
-		return nil, nil, 0, -1, err
+		return nil, 0, -1, err
 	}
 
 	var (
-		compacted  = make([]*segment, 0, len(segments))
-		epochCache = newLeaderEpochCacheNoFile(c.Name)
-		removed    = 0
+		compacted = make([]*segment, 0, len(segments))
+		removed   = 0
 		// The verified floor: highest offset of the CONSECUTIVE oldest run
 		// of sealed segments this pass rewrote or digest-proved converged.
 		// An age-protected segment (kept unread, headers and abort markers
@@ -168,17 +170,6 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	var horizon int64
 	if c.MinAge > 0 {
 		horizon = timestamp() - int64(c.MinAge)
-	}
-
-	feedEpochs := func(d *keyDigest) error {
-		for _, e := range d.epochs {
-			if e.epoch > epochCache.LastLeaderEpoch() {
-				if err := epochCache.Assign(e.epoch, e.firstOffset); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
 	}
 
 	// Write new segments. Skip the last segment since we will not compact it.
@@ -291,7 +282,6 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	sc := newBlockCache() // one decode-buffer pair for the whole pass
 	rewritten := make([]*segment, n)
 	didRewrite := make([]bool, n)
-	assigns := make([][]epochAssign, n)
 	// Skipping for budget is only safe in the order-INSENSITIVE phase. A late
 	// segment removes a record that governs older ones, and may only do so if
 	// everything it governs was rewritten in this same pass — so once any
@@ -323,18 +313,17 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 			skipped = true
 			continue // this tier is spent; the other may still have room
 		}
-		cleaned, msgsRemoved, ea, err := c.cleanSegment(spec, segments[i], merged.drops[i], bw, sc)
+		cleaned, msgsRemoved, err := c.cleanSegment(spec, segments[i], merged.drops[i], bw, sc)
 		if err != nil {
-			return nil, nil, 0, -1, err
+			return nil, 0, -1, err
 		}
 		b.note()
-		rewritten[i], didRewrite[i], assigns[i] = cleaned, true, ea
+		rewritten[i], didRewrite[i] = cleaned, true
 		removed += msgsRemoved
 	}
 
-	// Assembly phase, offset order: build the segment list, feed the epoch
-	// cache in ascending order, and advance the verified floor over the
-	// consecutive verified prefix.
+	// Assembly phase, offset order: build the segment list and advance the
+	// verified floor over the consecutive verified prefix.
 	for i, seg := range segments[:n] {
 		segEnd := seg.NextOffset() - 1
 		switch {
@@ -347,9 +336,6 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		case disp[i] == keepConverged:
 			// Digest proves a rewrite would keep every record byte-for-byte.
 			compacted = append(compacted, seg)
-			if err := feedEpochs(digests[i]); err != nil {
-				return nil, nil, 0, -1, err
-			}
 			if verifiedChain {
 				verified = segEnd
 			}
@@ -361,17 +347,7 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 			// down an arbitrarily large debt a slice at a time.
 			verifiedChain = false
 			compacted = append(compacted, seg)
-			if err := feedEpochs(digests[i]); err != nil {
-				return nil, nil, 0, -1, err
-			}
 			continue
-		}
-		for _, ea := range assigns[i] {
-			if ea.epoch > epochCache.LastLeaderEpoch() {
-				if err := epochCache.Assign(ea.epoch, ea.offset); err != nil {
-					return nil, nil, 0, -1, err
-				}
-			}
 		}
 		if rewritten[i] != nil {
 			compacted = append(compacted, rewritten[i])
@@ -381,13 +357,9 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		}
 	}
 
-	// Add the last segment back in to the compacted list and feed its epoch
-	// assignments (its digest covers every record).
+	// Add the last segment back in to the compacted list.
 	last := segments[len(segments)-1]
 	compacted = append(compacted, last)
-	if err := feedEpochs(digests[len(segments)-1]); err != nil {
-		return nil, nil, 0, -1, err
-	}
 
 	// Stripping applies to offsets strictly below StripBelow, so the record
 	// AT StripBelow keeps its headers; a spec without strip semantics
@@ -395,7 +367,7 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	if verified > spec.StripBelow-1 {
 		verified = spec.StripBelow - 1
 	}
-	return compacted, epochCache, removed, verified, nil
+	return compacted, removed, verified, nil
 }
 
 // mergeResult carries the merge's per-segment decisions.
@@ -717,13 +689,6 @@ func (c *compactCleaner) classify(spec CleanSpec, offset int64, msg SerializedMe
 // blockRefs; rewrites consolidate them ~1000x.
 const cleanBlockTarget = 256 << 10
 
-// epochAssign is one leader-epoch start collected during a rewrite, applied
-// to the epoch cache later in ascending-offset order.
-type epochAssign struct {
-	epoch  uint64
-	offset int64
-}
-
 // blockWriter accumulates retained message sets and flushes them as
 // cleanBlockTarget-sized blocks (one WriteMessageSet call each): concatenated
 // message sets are a valid sequence, and entriesForMessageSet computes every
@@ -760,11 +725,11 @@ func (w *blockWriter) flush() error {
 }
 
 func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropSet,
-	bw *blockWriter, sc *blockCache) (*segment, int, []epochAssign, error) {
+	bw *blockWriter, sc *blockCache) (*segment, int, error) {
 
 	cleaned, err := seg.Cleaned()
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, err
 	}
 	bw.reset(cleaned)
 	var (
@@ -783,9 +748,6 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		// sits at/above StripBelow with one present)? Decides how far the
 		// refreshed digest's strip stamp may reach.
 		residualStrippable = false
-		assigns            []epochAssign
-		lastEpoch          uint64
-		haveEpoch          bool
 	)
 	defer ss.Close()
 	for {
@@ -798,15 +760,14 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 			// is.
 			if !errors.Is(err, io.EOF) {
 				cleaned.Delete()
-				return nil, 0, nil, fmt.Errorf("%w: rewrite of segment %d: %w",
+				return nil, 0, fmt.Errorf("%w: rewrite of segment %d: %w",
 					ErrSegmentUnreadable, seg.BaseOffset, err)
 			}
 			break
 		}
 		var (
-			offset      = ms.Offset()
-			leaderEpoch = ms.LeaderEpoch()
-			msg         = ms.Message()
+			offset = ms.Offset()
+			msg    = ms.Message()
 		)
 		disp := c.classify(spec, offset, msg, drops)
 		if disp == dispRemove {
@@ -837,7 +798,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 					slog.String("name", c.Name), slog.Int64("offset", offset),
 					slog.String("err", err.Error()))
 			case err != nil:
-				return nil, removed, nil, err
+				return nil, removed, err
 			case changed:
 				out = sf
 				stripped++
@@ -847,21 +808,16 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 			residualStrippable = true
 		}
 		if err := bw.add(out); err != nil {
-			return nil, removed, nil, err
-		}
-		// Collect each new leader epoch's first RETAINED offset.
-		if !haveEpoch || leaderEpoch > lastEpoch {
-			assigns = append(assigns, epochAssign{epoch: leaderEpoch, offset: offset})
-			lastEpoch, haveEpoch = leaderEpoch, true
+			return nil, removed, err
 		}
 	}
 	if err := bw.flush(); err != nil {
-		return nil, removed, nil, err
+		return nil, removed, err
 	}
 
 	if cleaned.IsEmpty() {
 		// If the new segment is empty, remove it along with the old one.
-		return nil, removed, assigns, cleanupEmptySegment(cleaned, seg)
+		return nil, removed, cleanupEmptySegment(cleaned, seg)
 	}
 	// After either outcome the segment's digest is refreshed with a strip
 	// stamp recording what this scan proved, so the NEXT pass can skip the
@@ -884,15 +840,15 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	// are exempt: their value IS the rewrite.)
 	if removed == 0 && stripped == 0 && !consolidating {
 		if err := cleaned.Delete(); err != nil {
-			return nil, 0, nil, err
+			return nil, 0, err
 		}
 		c.refreshDigest(seg, stamp, stampHdrs, sc)
-		return seg, 0, assigns, nil
+		return seg, 0, nil
 	}
 	// The rewrite may hold the ONLY remaining copy of latest-per-key data;
 	// make it durable before it replaces the source segment.
 	if err := cleaned.Sync(); err != nil {
-		return nil, removed, nil, err
+		return nil, removed, err
 	}
 	// Install the rewrite. An offloaded segment cannot take the local path:
 	// Replace renames over the source's local files, and an offloaded segment
@@ -902,20 +858,20 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	if seg.isOffloaded() {
 		reclaim, err := seg.ReplaceOffloaded(cleaned, c.cache)
 		if err != nil {
-			return nil, removed, nil, err
+			return nil, removed, err
 		}
 		c.superseded = append(c.superseded, reclaim...)
 		if err := cleaned.Delete(); err != nil { // the local vehicle is done
-			return nil, removed, nil, err
+			return nil, removed, err
 		}
 		c.refreshDigest(seg, stamp, stampHdrs, sc)
-		return seg, removed, assigns, nil
+		return seg, removed, nil
 	}
 	if err = cleaned.Replace(seg); err != nil {
-		return nil, removed, nil, err
+		return nil, removed, err
 	}
 	c.refreshDigest(cleaned, stamp, stampHdrs, sc)
-	return cleaned, removed, assigns, nil
+	return cleaned, removed, nil
 }
 
 // rewriteBudget bounds how much rewrite debt one pass pays down. Time is

@@ -37,13 +37,6 @@ type leaderEpochCache struct {
 	name           string
 }
 
-func newLeaderEpochCacheNoFile(name string) *leaderEpochCache {
-	return &leaderEpochCache{
-		epochOffsets: []*epochOffset{},
-		name:         name,
-	}
-}
-
 func newLeaderEpochCache(name, path string) (*leaderEpochCache, error) {
 	var (
 		file   = filepath.Join(path, leaderEpochFileName)
@@ -153,38 +146,13 @@ func (l *leaderEpochCache) ClearEarliest(offset int64) error {
 	return pkgErrors.Wrap(err, "failed to flush epoch offsets")
 }
 
-// Rebase adds the leader epoch offsets from the given leaderEpochCache
-// starting at the given offset.
-func (l *leaderEpochCache) Rebase(from *leaderEpochCache, offset int64) error {
-	from.mu.RLock()
-	defer from.mu.RUnlock()
-
-	i := sort.Search(len(from.epochOffsets), func(i int) bool {
-		return from.epochOffsets[i].startOffset >= offset
-	})
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, epoch := range from.epochOffsets[i:] {
-		if epoch.leaderEpoch > l.latestEpoch() {
-			if err := l.assign(epoch.leaderEpoch, epoch.startOffset); err != nil {
-				return err
-			}
-		}
-	}
-
-	return l.flush()
-}
-
-// Replace the contents of the cache using the provided one.
-func (l *leaderEpochCache) Replace(from *leaderEpochCache) error {
-	from.mu.RLock()
-	defer from.mu.RUnlock()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.epochOffsets = from.epochOffsets
-	return l.flush()
-}
+// There is deliberately no way to overwrite this cache wholesale from another
+// one. Compaction used to, with a cache rebuilt from the surviving records'
+// epoch stamps, and that silently discarded every epoch no surviving record
+// happened to carry — on a leader, all of them. The cache is only ever added to
+// (assign) or trimmed at an end (ClearEarliest, ClearLatest), and a trim at the
+// earliest end re-anchors rather than drops. See the ClearEarliest call in
+// commitLog.CleanWithSpec.
 
 func (l *leaderEpochCache) earliestOffset() int64 {
 	if len(l.epochOffsets) == 0 {

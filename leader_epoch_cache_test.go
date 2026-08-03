@@ -60,58 +60,6 @@ func TestLeaderEpochCache(t *testing.T) {
 	require.Equal(t, int64(16), l.latestOffset())
 }
 
-// Ensure Rebase correctly applies the epoch offsets to the leaderEpochCache.
-func TestLeaderEpochCacheRebase(t *testing.T) {
-	dir1 := tempDir(t)
-	defer remove(t, dir1)
-	dir2 := tempDir(t)
-	defer remove(t, dir2)
-
-	l1, err := newLeaderEpochCache("foo", dir1)
-	require.NoError(t, err)
-	require.NoError(t, l1.Assign(3, 15))
-	require.NoError(t, l1.Assign(4, 30))
-	require.NoError(t, l1.Assign(5, 40))
-
-	l2, err := newLeaderEpochCache("foo", dir2)
-	require.NoError(t, err)
-	require.NoError(t, l2.Assign(1, 0))
-	require.NoError(t, l2.Assign(2, 10))
-
-	require.NoError(t, l2.Rebase(l1, 3))
-
-	require.Len(t, l2.epochOffsets, 5)
-	require.Equal(t, int64(0), l2.earliestOffset())
-	require.Equal(t, int64(40), l2.latestOffset())
-	require.Equal(t, uint64(5), l2.LastLeaderEpoch())
-}
-
-// Ensure Replace correctly replaces the epoch offsets in the leaderEpochCache.
-func TestLeaderEpochCacheReplace(t *testing.T) {
-	dir1 := tempDir(t)
-	defer remove(t, dir1)
-	dir2 := tempDir(t)
-	defer remove(t, dir2)
-
-	l1, err := newLeaderEpochCache("foo", dir1)
-	require.NoError(t, err)
-	require.NoError(t, l1.Assign(3, 15))
-	require.NoError(t, l1.Assign(4, 30))
-	require.NoError(t, l1.Assign(5, 40))
-
-	l2, err := newLeaderEpochCache("foo", dir2)
-	require.NoError(t, err)
-	require.NoError(t, l2.Assign(3, 17))
-	require.NoError(t, l2.Assign(4, 33))
-
-	require.NoError(t, l1.Replace(l2))
-
-	require.Len(t, l1.epochOffsets, 2)
-	require.Equal(t, int64(17), l1.earliestOffset())
-	require.Equal(t, int64(33), l1.latestOffset())
-	require.Equal(t, uint64(4), l1.LastLeaderEpoch())
-}
-
 // Ensure readLeaderEpochOffsets can correctly parse leader epoch checkpoint
 // files.
 func TestReadLeaderEpochOffsets(t *testing.T) {

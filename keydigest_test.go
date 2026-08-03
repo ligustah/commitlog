@@ -39,7 +39,6 @@ func TestKeyDigestRoundtrip(t *testing.T) {
 	require.Equal(t, d.nKeys, got.nKeys)
 	require.Equal(t, d.unkeyed, got.unkeyed)
 	require.Equal(t, d.control, got.control)
-	require.Equal(t, d.epochs, got.epochs)
 
 	// A loaded digest streams its keyed section from disk.
 	require.Nil(t, got.keyed, "loaded digest must not retain keyed bytes")

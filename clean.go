@@ -194,7 +194,7 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 	// Collected per pass, under cleanMu, so the entries queued belong to this
 	// call.
 	l.compactCleaner.superseded = nil
-	cleaned, epochCache, verified, cleanErr := l.clean(spec, oldSegments)
+	cleaned, verified, cleanErr := l.clean(spec, oldSegments)
 	superseded := l.compactCleaner.superseded
 	l.compactCleaner.superseded = nil
 	if cleaned == nil {
@@ -224,18 +224,29 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 		// New segments were added while cleaning. Rebase the new segments onto
 		// the cleaned ones.
 		rebase := newSegments[len(oldSegments):]
-		cleaned = l.rebaseSegments(rebase, cleaned, epochCache)
+		cleaned = l.rebaseSegments(rebase, cleaned)
 	}
 	l.segments = cleaned
-	// Update the leader epoch offset cache to account for deleted segments. If
-	// compaction ran, we need to regenerate the cache using the one returned
-	// from compaction.
-	var err error
-	if epochCache != nil {
-		err = l.leaderEpochCache.Replace(epochCache)
-	} else {
-		err = l.leaderEpochCache.ClearEarliest(l.segments[0].BaseOffset)
-	}
+	// Move the epoch cache's floor up to what survived, and NOTHING else. A
+	// clean removes records; it does not renumber them and it does not change
+	// when a leadership began, so every entry the cache holds is still true.
+	// The only entries that need touching are the ones anchored below the
+	// surviving floor, and ClearEarliest re-anchors the newest of those at the
+	// floor rather than dropping it.
+	//
+	// Compaction used to Replace() the whole cache with one the compactor
+	// rebuilt from the per-record epoch stamps of the surviving records. That
+	// cache could only ever be a SUBSET: on a leader nothing stamps a record at
+	// all — the only writer that does is the follower path taking a leader's
+	// framing verbatim, while Append writes 0 and NewLeaderEpoch writes to the
+	// checkpoint and nowhere else. So one ordinary maintenance pass took the
+	// log's epoch to 0, and downstream that epoch is the replication fence:
+	// every follower of a compacted stream was refused, truncated, refused
+	// again, and could not rejoin the in-sync set. Even where records DO carry
+	// stamps the rebuild was the worse answer, since it anchors an epoch at the
+	// first SURVIVING record carrying it rather than where leadership actually
+	// started.
+	err := l.leaderEpochCache.ClearEarliest(l.segments[0].BaseOffset)
 	l.mu.Unlock()
 
 	// Republish what the tier now holds. A pass can rewrite a segment onto new
@@ -272,23 +283,15 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 }
 
 // rebaseSegments adds the segments in from to the end of the slice of segments
-// in to and adds any leader epoch offsets to the given leaderEpochCache.
-func (l *commitLog) rebaseSegments(from, to []*segment, epochCache *leaderEpochCache) []*segment {
-	to = append(to, from...)
-	// Rebase any leader epoch offsets also. We don't check the error returned
-	// here because Rebase can't return an error since epochCache is not
-	// file-backed. The epoch cache is nil if compaction didn't run, in which
-	// case skip this.
-	if epochCache != nil {
-		epochCache.Rebase(l.leaderEpochCache, from[0].BaseOffset) // nolint: errcheck
-	}
-	return to
+// in to. It has no epoch work to do: the pass never rewrites the live epoch
+// cache, so the entries covering these segments are still in it untouched.
+func (l *commitLog) rebaseSegments(from, to []*segment) []*segment {
+	return append(to, from...)
 }
 
-// clean returns the cleaned segments, the pass's verified floor (see
-// CleanWithSpec; -1 when compaction did not run) and, if compaction ran, a
-// *leaderEpochCache maintaining the start offset for each new leader epoch.
-func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *leaderEpochCache, int64, error) {
+// clean returns the cleaned segments and the pass's verified floor (see
+// CleanWithSpec; -1 when compaction did not run).
+func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int64, error) {
 	// Offloaded segments used to be held aside here as an immutable prefix,
 	// because the rewriters build a local working segment and rewrite in place
 	// and an offloaded segment has no local file to rewrite. That exclusion is
@@ -305,21 +308,20 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 		// A partial retention failure still hands back the surviving
 		// segments; propagate them so the caller swaps them in — the deleted
 		// prefix must leave the read path even when the clean errs.
-		return cleaned, nil, -1, err
+		return cleaned, -1, err
 	}
 	verified := int64(-1)
-	var epochCache *leaderEpochCache
 	if l.Compact {
 		if spec.Ceiling <= 0 {
 			spec.Ceiling = l.HighWatermark()
 		}
-		compacted, cache, v, err := l.compactCleaner.CompactSpec(spec, cleaned)
+		compacted, v, err := l.compactCleaner.CompactSpec(spec, cleaned)
 		if err != nil {
 			// Keep the delete stage's result: its removals are already on
 			// disk regardless of the compaction failure.
-			return cleaned, nil, -1, err
+			return cleaned, -1, err
 		}
-		cleaned, epochCache, verified = compacted, cache, v
+		cleaned, verified = compacted, v
 	} else if consolidated, err := consolidateSegments(cleaned, spec.maxRewrites, spec.RewriteBudget); err != nil {
 		// Non-compacted logs still owe block-layout maintenance: their
 		// per-append tiny blocks otherwise accumulate blockRef memory and
@@ -328,9 +330,9 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, *lea
 		// soak). The consolidation-only pass rewrites records
 		// VERBATIM — content, offsets and epochs untouched — into
 		// cleanBlockTarget-sized blocks, budgeted like compaction rewrites.
-		return cleaned, nil, -1, err
+		return cleaned, -1, err
 	} else {
 		cleaned = consolidated
 	}
-	return cleaned, epochCache, verified, nil
+	return cleaned, verified, nil
 }

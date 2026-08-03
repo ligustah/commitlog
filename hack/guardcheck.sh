@@ -320,6 +320,13 @@ run_guard "truncate clamps the watermark" commitlog.go \
 		slog.Warn("commitlog: truncation cut below the high watermark; clamping",' \
   '^TestTruncatingBelowTheWatermarkClampsIt$'
 
+# A clean raises the epoch cache's floor, and that is the whole of what it does
+# to it. Note which test this is registered against: removing the call leaves
+# the cache untouched, which still KEEPS every epoch, so the tests named for the
+# epochs surviving a clean cannot see it go. What only this call does is
+# re-anchor an entry that now sits below the surviving floor.
+run_guard "clean raises the epoch floor" clean.go   '	err := l.leaderEpochCache.ClearEarliest(l.segments[0].BaseOffset)'   '	var err error'   '^TestCleanerKeepsLeaderEpochOffsetsThroughCompaction$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

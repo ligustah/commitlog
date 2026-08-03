@@ -363,9 +363,17 @@ func TestCleanerDeleteLeaderEpochOffsets(t *testing.T) {
 	require.Equal(t, int64(14), l.LastOffsetForLeaderEpoch(3))
 }
 
-// Ensure Clean replaces leader epoch offsets in the cache when segments are
-// compacted.
-func TestCleanerReplaceLeaderEpochOffsets(t *testing.T) {
+// Ensure a compacting Clean keeps every leader epoch and only raises the
+// cache's floor to what survived.
+//
+// Note what the epoch offsets are NOT: where the first surviving record of an
+// epoch sits. Epoch 2's records here are offsets 5..9 and compaction keeps only
+// the last of them, but the cache still answers 5, because that is where epoch
+// 2's leadership began and compaction did not change it. The answer is also the
+// safe one for the caller that asks: a follower told 5 rolls back everything it
+// holds from 5 on, whereas 9 would tell it to keep local copies of 5..8 — which
+// this leader no longer has, so nothing would ever correct them.
+func TestCleanerKeepsLeaderEpochOffsetsThroughCompaction(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:            tempDir(t),
 		MaxSegmentBytes: 6,
@@ -428,9 +436,12 @@ func TestCleanerReplaceLeaderEpochOffsets(t *testing.T) {
 	require.Equal(t, int64(14), l.NewestOffset())
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
+	// Epoch 1 started at 0, which is now below the floor, so it is re-anchored
+	// there rather than dropped. Epochs 2 and 3 are untouched: a clean does not
+	// move where a leadership began.
 	require.Equal(t, int64(4), l.LastOffsetForLeaderEpoch(0))
-	require.Equal(t, int64(9), l.LastOffsetForLeaderEpoch(1))
-	require.Equal(t, int64(14), l.LastOffsetForLeaderEpoch(2))
+	require.Equal(t, int64(5), l.LastOffsetForLeaderEpoch(1))
+	require.Equal(t, int64(10), l.LastOffsetForLeaderEpoch(2))
 	require.Equal(t, int64(14), l.LastOffsetForLeaderEpoch(3))
 }
 
