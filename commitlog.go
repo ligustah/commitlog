@@ -544,6 +544,28 @@ func (l *commitLog) open() error {
 	}
 	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&l.vActiveSegment)),
 		unsafe.Pointer(activeSegment))
+	// The HW checkpoint can claim MORE than the log can serve. It is fsynced on
+	// its own schedule, and a crash can take back log bytes it had already
+	// counted — a torn tail dropped at open is exactly that. Nothing downstream
+	// treats "committed but absent" as a state to recover from: a reader
+	// resolving the HW's segment finds none and the log answers
+	// ErrSegmentNotFound for an offset far below it, so a stale checkpoint on the
+	// last segment made the whole log unreadable.
+	//
+	// Clamping is the only honest answer — the records are not there, and a log
+	// does not get to keep asserting they are. It also loses nothing a caller
+	// could have used, because everything above the real tail is unreadable by
+	// construction. The opposite skew (a checkpoint BELOW the tail) is the
+	// ordinary one and stays for RecoverTail, which walks that suffix and
+	// recovers it.
+	if newest := activeSegment.NextOffset() - 1; l.hw > newest {
+		slog.Warn("commitlog: high watermark checkpoint overshoots the log; clamping",
+			slog.String("path", l.Path),
+			slog.Int64("checkpoint", l.hw),
+			slog.Int64("newest", newest),
+		)
+		l.hw = newest
+	}
 	return nil
 }
 

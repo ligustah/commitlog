@@ -2,8 +2,10 @@ package commitlog
 
 import (
 	"context"
+	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -151,6 +153,15 @@ func TestCommitLogRecoverHW(t *testing.T) {
 	}
 	l, cleanup := setupWithOptions(t, opts)
 	defer cleanup()
+	// Records the watermark can actually stand on. It used to be set over an
+	// EMPTY log, which reads as a checkpoint claiming 101 committed records that
+	// were never written — the state a reopen now refuses to inherit, so the
+	// round-trip has to be shown over a log that really holds them.
+	for i := range 101 {
+		offs, err := l.Append([]*Message{{Value: []byte(fmt.Sprintf("v:%d", i))}})
+		require.NoError(t, err)
+		require.EqualValues(t, i, offs[0])
+	}
 	l.SetHighWatermark(100)
 	require.Equal(t, int64(100), l.HighWatermark())
 	require.NoError(t, l.Close())
@@ -158,6 +169,57 @@ func TestCommitLogRecoverHW(t *testing.T) {
 	defer cleanup()
 	defer l.Close()
 	require.Equal(t, int64(100), l.HighWatermark())
+}
+
+// A high watermark is a claim that records up to it are committed, and a log
+// that reopens holding fewer than it claims must stop making the claim.
+//
+// The checkpoint is written on its own schedule and a crash can take back log
+// bytes it had already counted, so the two can disagree by the tail. Left alone
+// the log is unreadable — resolving the watermark to a segment finds none, and
+// every committed read fails with "segment not found" for offsets far below it —
+// and it is unsafe once readable, because the next append lands on the very
+// offset the stale watermark already calls committed, publishing a record the
+// moment it is written and before anyone has committed it.
+func TestAHighWatermarkAboveTheLogIsNotInherited(t *testing.T) {
+	opts := Options{Path: tempDir(t), MaxSegmentBytes: 1024}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+	for i := range 10 {
+		_, err := l.Append([]*Message{{Value: []byte(fmt.Sprintf("v:%d", i))}})
+		require.NoError(t, err)
+	}
+	l.SetHighWatermark(9)
+	require.NoError(t, l.Close())
+
+	// Stand in for the crash: the checkpoint counted records whose bytes never
+	// reached the disk. Writing the file directly is the same end state without
+	// depending on which recovery path removed them.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(opts.Path, hwFileName), []byte("40"), 0o644))
+
+	reopened, cleanup2 := setupWithOptions(t, opts)
+	defer cleanup2()
+	defer reopened.Close()
+	require.EqualValues(t, 9, reopened.NewestOffset())
+	require.EqualValues(t, 9, reopened.HighWatermark(),
+		"the log kept a watermark 31 records above anything it holds")
+
+	// Readable, which is the failure this was found through.
+	r, err := reopened.NewReader(From(0))
+	require.NoError(t, err, "a log with a stale watermark could not be read at all")
+	msg, offset, _, _, err := r.ReadMessage(context.Background(), make([]byte, HeaderBufferLen))
+	require.NoError(t, err)
+	require.EqualValues(t, 0, offset)
+	require.Equal(t, "v:0", string(msg.Value()))
+
+	// And the next record is uncommitted until someone commits it, rather than
+	// arriving already inside the range the old checkpoint claimed.
+	offs, err := reopened.Append([]*Message{{Value: []byte("v:after")}})
+	require.NoError(t, err)
+	require.Greater(t, offs[0], reopened.HighWatermark(),
+		"an append landed at or below the high watermark, so it was published "+
+			"as committed by the act of being written")
 }
 
 func TestOverrideHighWatermark(t *testing.T) {
