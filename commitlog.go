@@ -1443,6 +1443,33 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 // Sealed segments entirely before minOffset are deleted. A boundary sealed
 // segment (one that straddles minOffset) is rewritten keeping only records at
 // or after minOffset. The active segment is never rewritten.
+// The lock discipline here is the same one CleanWithSpec uses, and for the same
+// reason: decide under l.mu, do the FILE WORK with it released, then re-take it
+// only to publish. Every reader and every appender takes l.mu — Segments()
+// RLocks it, split() Locks it — so anything done while holding it is a hard stop
+// for the whole log.
+//
+// This used to hold the write lock across all of it: N segment closes, N
+// unlinks, and then a scan of the boundary segment end to end and a write of a
+// whole new one. Reported downstream as a 10-minute test timeout whose stack was
+// one truncator inside a Windows FlushFileBuffers with every reader and the
+// writer queued on the mutex behind it. Not a deadlock — a convoy, and the log
+// was unavailable for as long as the truncation took.
+//
+// Two things follow from letting go of the lock, and both have precedent above:
+//
+//   - An append can ROLL while it is down, so the surviving list cannot be
+//     spliced from the snapshot alone; the segments split() appended have to be
+//     carried over. Same rebase CleanWithSpec does.
+//   - Close() does not take cleanMu, so the log can close underneath the
+//     rewrite. Publishing into a set closeSegments has already walked would
+//     leave the trim with nothing to close it, which is the leak split()'s CAS
+//     comment describes. Hence the second segmentsClosed check.
+//
+// The deletes moving after publication also WIDEN the window in which the disk
+// holds the trim and the source it was rewritten from at the same time. That is
+// safe only because open() resolves overlapping segments; before it did, a crash
+// in that window made a reopened log serve those records twice.
 func (l *commitLog) TruncateBefore(minOffset int64) error {
 	// Republish the tier after the segment set changes: dropping segments
 	// can remove offloaded ones, and a manifest naming an object that is
@@ -1450,126 +1477,175 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 	defer func() { _ = l.writeTierManifest() }()
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
-	l.mu.Lock()
-	defer l.mu.Unlock()
 
+	l.mu.RLock()
 	// See Truncate: this one also builds a trimmed boundary segment.
-	if l.segmentsClosed {
+	closed := l.segmentsClosed
+	oldSegments := l.segments
+	l.mu.RUnlock()
+	if closed {
 		return ErrCommitLogClosed
 	}
-
-	if len(l.segments) == 0 || minOffset <= 0 {
+	if len(oldSegments) == 0 || minOffset <= 0 {
 		return nil
 	}
 
+	// Find the first sealed segment whose last offset >= minOffset (the boundary).
+	// All sealed segments before it are entirely obsolete.
+	// If no sealed segment qualifies, boundaryIdx = len-1 (the active segment),
+	// and we just delete all sealed segments.
+	boundaryIdx := len(oldSegments) - 1
+	for i := 0; i < len(oldSegments)-1; i++ {
+		if oldSegments[i].LastOffset() >= minOffset {
+			boundaryIdx = i
+			break
+		}
+	}
+
+	// Rewrite the boundary segment if it's a sealed segment whose BaseOffset
+	// falls before minOffset (meaning it straddles the cut point). This is the
+	// expensive half — a whole segment read and a whole segment written — and it
+	// runs with the lock down. It touches no shared state: the boundary is
+	// sealed, so it is only read, and the trim is written under a .trimmed suffix
+	// that open() does not pick up.
+	var (
+		boundary     *segment
+		trimmed      *segment
+		dropBoundary bool
+	)
+	if boundaryIdx < len(oldSegments)-1 && oldSegments[boundaryIdx].BaseOffset < minOffset {
+		boundary = oldSegments[boundaryIdx]
+		ss := newSegmentScanner(boundary)
+		var (
+			newBaseOffset int64 = -1
+			kept          []messageSet
+		)
+		for {
+			ms, _, err := ss.Scan()
+			if err != nil {
+				// See the same guard in Truncate. This one has the sharper
+				// edge: if the FIRST scan fails, newBaseOffset stays -1, and
+				// "no records at or above minOffset" is indistinguishable
+				// from "could not read the first frame" — so the branch
+				// below deleted the whole boundary segment, including every
+				// record the caller asked to keep, and returned nil.
+				if !errors.Is(err, io.EOF) {
+					ss.Close()
+					return fmt.Errorf("%w: truncate before, boundary "+
+						"segment %d: %w", ErrSegmentUnreadable,
+						boundary.BaseOffset, err)
+				}
+				break
+			}
+			if ms.Offset() >= minOffset {
+				if newBaseOffset < 0 {
+					newBaseOffset = ms.Offset()
+				}
+				kept = append(kept, ms)
+			}
+		}
+		ss.Close()
+
+		if newBaseOffset >= 0 {
+			t, err := boundary.Trimmed(newBaseOffset)
+			if err != nil {
+				return errors.Wrap(err, "create trimmed segment failed")
+			}
+			for _, ms := range kept {
+				entries := entriesForMessageSet(t.Position(), ms)
+				if err := t.WriteMessageSet(ms, entries); err != nil {
+					t.Delete()
+					return errors.Wrap(err, "write trimmed segment failed")
+				}
+			}
+			if err := t.Finalize(); err != nil {
+				t.Delete()
+				return errors.Wrap(err, "finalize trimmed segment failed")
+			}
+			// Seal so that uncommitted readers hitting EOF on this
+			// segment immediately move to the next one instead of
+			// waiting for more data that will never come.
+			t.Seal()
+			trimmed = t
+		} else {
+			// Boundary segment had no records >= minOffset; it goes entirely.
+			dropBoundary = true
+		}
+	}
+
+	// Publish. Everything above this point is undoable by returning an error;
+	// nothing below it is, which is why the file removals come after.
+	firstKept := boundaryIdx
+	if dropBoundary {
+		firstKept++
+	}
+	l.mu.Lock()
+	if l.segmentsClosed {
+		// The log closed while this was rewriting, which it does outside l.mu.
+		// Same reasoning as CleanWithSpec: do not install into a set that
+		// closeSegments has already walked. The trim is removed rather than
+		// closed — it was never published, so nothing can be reading it, and
+		// leaving the file would leave the directory holding an overlap for
+		// open() to resolve on the next boot.
+		l.mu.Unlock()
+		if trimmed != nil {
+			_ = trimmed.Delete()
+		}
+		return ErrCommitLogClosed
+	}
 	// Copy on write, for the same reason Truncate does. Segments() hands out the
 	// slice HEADER, so every lock-free reader holding one indexes this backing
 	// array — writing an element in place is a data race against all of them, and
 	// the race detector calls it: reported downstream, red under -race in a
 	// deletion and a truncate chaos test. Publishing a new array instead leaves
 	// whatever a reader is already holding immutable.
-	segments := make([]*segment, len(l.segments))
-	copy(segments, l.segments)
-
-	// Find the first sealed segment whose last offset >= minOffset (the boundary).
-	// All sealed segments before it are entirely obsolete.
-	// If no sealed segment qualifies, boundaryIdx = len-1 (the active segment),
-	// and we just delete all sealed segments.
-	boundaryIdx := len(segments) - 1
-	for i := 0; i < len(segments)-1; i++ {
-		if segments[i].LastOffset() >= minOffset {
-			boundaryIdx = i
-			break
-		}
+	newSegments := l.segments
+	survivors := make([]*segment, 0, len(newSegments)-firstKept)
+	survivors = append(survivors, oldSegments[firstKept:]...)
+	if trimmed != nil {
+		// firstKept IS the boundary in this branch; the trim stands in for it.
+		survivors[0] = trimmed
+	}
+	if len(newSegments) > len(oldSegments) {
+		// An append rolled while the lock was down. split() only ever appends, so
+		// the extra segments are at the tail and everything below them is
+		// unchanged — carry them over rather than publishing a list that has
+		// forgotten them.
+		survivors = append(survivors, newSegments[len(oldSegments):]...)
+	}
+	l.segments = survivors
+	err := l.leaderEpochCache.ClearEarliest(minOffset)
+	l.mu.Unlock()
+	if err != nil {
+		return err
 	}
 
-	// Delete all sealed segments before the boundary.
+	// Now the file work, with the log open for business again. A failure here
+	// leaves files behind rather than corrupting anything: the surviving list is
+	// already correct and already published, and what is left on disk is a
+	// retention pass that did not finish, which the next one repeats.
 	for i := 0; i < boundaryIdx; i++ {
-		if err := segments[i].Delete(); err != nil {
+		if err := oldSegments[i].Delete(); err != nil {
 			return err
 		}
 	}
-
-	// Rewrite the boundary segment if it's a sealed segment whose BaseOffset
-	// falls before minOffset (meaning it straddles the cut point).
-	if boundaryIdx < len(segments)-1 {
-		boundary := segments[boundaryIdx]
-		if boundary.BaseOffset < minOffset {
-			ss := newSegmentScanner(boundary)
-			defer ss.Close()
-			var (
-				newBaseOffset int64 = -1
-				kept          []messageSet
-			)
-			for {
-				ms, _, err := ss.Scan()
-				if err != nil {
-					// See the same guard in Truncate. This one has the sharper
-					// edge: if the FIRST scan fails, newBaseOffset stays -1, and
-					// "no records at or above minOffset" is indistinguishable
-					// from "could not read the first frame" — so the branch
-					// below deleted the whole boundary segment, including every
-					// record the caller asked to keep, and returned nil.
-					if !errors.Is(err, io.EOF) {
-						return fmt.Errorf("%w: truncate before, boundary "+
-							"segment %d: %w", ErrSegmentUnreadable,
-							boundary.BaseOffset, err)
-					}
-					break
-				}
-				if ms.Offset() >= minOffset {
-					if newBaseOffset < 0 {
-						newBaseOffset = ms.Offset()
-					}
-					kept = append(kept, ms)
-				}
-			}
-
-			if newBaseOffset >= 0 {
-				trimmed, err := boundary.Trimmed(newBaseOffset)
-				if err != nil {
-					return errors.Wrap(err, "create trimmed segment failed")
-				}
-				for _, ms := range kept {
-					entries := entriesForMessageSet(trimmed.Position(), ms)
-					if err := trimmed.WriteMessageSet(ms, entries); err != nil {
-						trimmed.Delete()
-						return errors.Wrap(err, "write trimmed segment failed")
-					}
-				}
-				if err := trimmed.Finalize(); err != nil {
-					trimmed.Delete()
-					return errors.Wrap(err, "finalize trimmed segment failed")
-				}
-				// Seal so that uncommitted readers hitting EOF on this
-				// segment immediately move to the next one instead of
-				// waiting for more data that will never come.
-				trimmed.Seal()
-				// Before the delete, and this is load-bearing: a reader that
-				// already resolved into the boundary is holding a segment about
-				// to go. Without the link it reads one that is gone with no
-				// replacement, which means "retention collected these" and sends
-				// it to the NEXT segment — past the records this trim just
-				// preserved. The caller asked to keep them and the log went on
-				// reporting them present, so the read came back 1-3 records late
-				// with no error anywhere.
-				boundary.SupersededBy(trimmed)
-				if err := boundary.Delete(); err != nil {
-					return err
-				}
-				segments[boundaryIdx] = trimmed
-			} else {
-				// Boundary segment had no records >= minOffset; delete it entirely.
-				if err := boundary.Delete(); err != nil {
-					return err
-				}
-				boundaryIdx++
-			}
+	if boundary != nil && (trimmed != nil || dropBoundary) {
+		if trimmed != nil {
+			// Before the delete, and this is load-bearing: a reader that
+			// already resolved into the boundary is holding a segment about
+			// to go. Without the link it reads one that is gone with no
+			// replacement, which means "retention collected these" and sends
+			// it to the NEXT segment — past the records this trim just
+			// preserved. The caller asked to keep them and the log went on
+			// reporting them present, so the read came back 1-3 records late
+			// with no error anywhere.
+			boundary.SupersededBy(trimmed)
+		}
+		if err := boundary.Delete(); err != nil {
+			return err
 		}
 	}
-
-	l.segments = segments[boundaryIdx:]
-	return l.leaderEpochCache.ClearEarliest(minOffset)
+	return nil
 }
 
 // Segments returns the log's segment slice. It returns the slice HEADER, not a

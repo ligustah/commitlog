@@ -339,6 +339,27 @@ run_guard "trimmed boundary redirects" commitlog.go   '				boundary.SupersededBy
 # serves those offsets TWICE, in order, with no error anywhere.
 run_guard "reopen resolves segment overlaps" commitlog.go   '	if err := l.resolveSegmentOverlaps(); err != nil {'   '	if err := error(nil); err != nil {'   '^TestAnInterruptedTrimDoesNotServeRecordsTwice$'
 
+# TruncateBefore unlinks with l.mu released, and the unlinks are the bulk of a
+# retention pass. Taking the lock for them is the regression this catches -- note
+# that it does NOT restore the old behaviour wholesale (the rewrite still runs
+# unlocked), which is the point: the test asserts a RATE against an undisturbed
+# baseline, so it bites on partial starvation and not only on total starvation.
+#
+# Putting the lock back at the TOP of the call, which is what the original bug
+# literally was, cannot be expressed here: the publish step takes l.mu itself, so
+# the neutralised build would deadlock rather than fail, and guardcheck would
+# report a timeout instead of a red test.
+run_guard "truncation unlinks outside the lock" commitlog.go   '	for i := 0; i < boundaryIdx; i++ {
+		if err := oldSegments[i].Delete(); err != nil {'   '	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := 0; i < boundaryIdx; i++ {
+		if err := oldSegments[i].Delete(); err != nil {'   '^TestReadsAreServedWhileATruncationRuns$'
+
+# An append can roll while the truncation has the lock down, and the surviving
+# list it publishes has to carry what split() appended. Losing it drops records
+# that were acknowledged, silently.
+run_guard "truncation carries segments rolled under it" commitlog.go   '	if len(newSegments) > len(oldSegments) {'   '	if false {'   '^TestATruncationDoesNotLoseASegmentRolledUnderIt$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
