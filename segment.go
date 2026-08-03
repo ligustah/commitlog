@@ -1632,6 +1632,17 @@ func (s *segment) Close() error {
 }
 
 func (s *segment) close() error {
+	return s.closeSegment(true)
+}
+
+// closeDiscarding closes for a caller about to remove the segment's files, so
+// the index is neither flushed nor shrunk on the way out. See
+// index.CloseDiscarding. Callers hold the segment lock, as with close.
+func (s *segment) closeDiscarding() error {
+	return s.closeSegment(false)
+}
+
+func (s *segment) closeSegment(durable bool) error {
 	if s.closed {
 		return nil
 	}
@@ -1651,7 +1662,12 @@ func (s *segment) close() error {
 	}
 	var ierr error
 	if s.Index != nil {
-		if ierr = s.Index.Close(); errors.Is(ierr, os.ErrClosed) {
+		if durable {
+			ierr = s.Index.Close()
+		} else {
+			ierr = s.Index.CloseDiscarding()
+		}
+		if errors.Is(ierr, os.ErrClosed) {
 			ierr = nil
 		}
 	}
@@ -2212,7 +2228,10 @@ func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entr
 func (s *segment) Delete() error {
 	s.Lock()
 	defer s.Unlock()
-	if err := s.close(); err != nil {
+	// closeDiscarding, not close: everything this segment owns is unlinked
+	// below, so flushing and shrinking its index first is work whose result
+	// nothing can ever read.
+	if err := s.closeDiscarding(); err != nil {
 		return err
 	}
 	// Nothing may resolve an offset through this segment again. It matters

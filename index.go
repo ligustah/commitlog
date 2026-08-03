@@ -303,6 +303,29 @@ func (idx *index) sync() error {
 }
 
 func (idx *index) Close() error {
+	return idx.closeIndex(true)
+}
+
+// CloseDiscarding closes the index for a caller that is about to UNLINK the
+// file, so it neither flushes it nor shrinks it.
+//
+// Both of those are durability work, and durability is meaningless for bytes
+// that are about to stop existing: the flush pushes an index to stable storage
+// microseconds before the file is removed, and the shrink resizes a file that
+// will not outlive the call. On Windows each is a blocking syscall
+// (FlushFileBuffers, SetEndOfFile), and a retention pass dropping N segments
+// paid both N times — inside the log's write lock, with every reader and
+// appender queued behind it. Reported downstream as a 10-minute test timeout
+// whose stack was one truncator in FlushFileBuffers and everyone else on the
+// mutex.
+//
+// What it still does is release the mapping and the handle, which is not
+// optional: a mapped index cannot be unlinked on Windows at all.
+func (idx *index) CloseDiscarding() error {
+	return idx.closeIndex(false)
+}
+
+func (idx *index) closeIndex(durable bool) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	if idx.closed {
@@ -313,7 +336,10 @@ func (idx *index) Close() error {
 	// bailing out here turns a flush failure into a segment that can never be
 	// deleted and a maintenance pass that fails identically forever. Losing the
 	// unflushed tail is recoverable; leaking the mapping is not.
-	syncErr := idx.sync()
+	var syncErr error
+	if durable {
+		syncErr = idx.sync()
+	}
 	// Unmap before shrinking: on Windows, SetEndOfFile fails with
 	// ERROR_USER_MAPPED_FILE if any view of the file mapping is still open.
 	// idx.mmap may already be nil if Shrink() was called on an empty index.
@@ -333,8 +359,10 @@ func (idx *index) Close() error {
 		idx.closed = true
 		return syncErr
 	}
-	if err := idx.shrink(); err != nil {
-		return err
+	if durable {
+		if err := idx.shrink(); err != nil {
+			return err
+		}
 	}
 	if err := idx.file.Close(); err != nil {
 		return err
