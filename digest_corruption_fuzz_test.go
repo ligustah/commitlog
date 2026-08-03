@@ -43,10 +43,17 @@ func FuzzCorruptDigestNeverChangesTheAnswer(f *testing.F) {
 	f.Add([]byte{3, 96, 0x0F})
 	// Fuzzer-found, and kept because the hand-picked seeds above have NO teeth:
 	// with loadKeyDigest's sidecar CRC check deleted, every one of them still
-	// passed, and this one failed in 2.4 seconds. It damages a byte the keyed
+	// passed, and this one failed in seconds. It damages a byte the keyed
 	// section actually depends on, which is what turns a corrupt digest into a
 	// filtered read that disagrees with a full scan.
-	f.Add([]byte("000"))
+	//
+	// It is an OFFSET into the sidecar, so it is only as good as the layout it
+	// was found against: dropping the leader-epoch section in format v2 moved
+	// everything after the header down and the previous seed ("000") stopped
+	// landing on anything load-bearing — guardcheck caught that immediately,
+	// reporting the CRC as uncovered. Any later format change needs the same
+	// treatment: neutralize the check, re-fuzz, replace this.
+	f.Add([]byte("020"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) < 3 {
