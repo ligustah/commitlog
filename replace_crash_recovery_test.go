@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ligustah/commitlog/compress"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,7 +30,22 @@ import (
 // individually well-formed; only their relationship is wrong. So the question
 // is what a reopened log does with them, and the only unacceptable answer is to
 // serve the mismatch as data.
+//
+// Run over every storage format, because the mismatch is detected by comparing
+// index positions against the log, and a block-compressed segment's positions
+// are not the same kind of number: an entry is a sparse anchor into the
+// decompressed stream, not an offset into the file. The check has a separate
+// branch for it, and a branch no test enters is a branch that only ever looked
+// right.
 func TestAReplaceInterruptedBetweenItsTwoRenames(t *testing.T) {
+	for _, codec := range []compress.Codec{compress.None, compress.Snappy, compress.Zstd} {
+		t.Run(fmt.Sprintf("codec=%d", codec), func(t *testing.T) {
+			replaceInterruptedBetweenItsTwoRenames(t, codec)
+		})
+	}
+}
+
+func replaceInterruptedBetweenItsTwoRenames(t *testing.T, codec compress.Codec) {
 	dir := tempDir(t)
 
 	// A log worth compacting whose segments still SURVIVE the pass. Four keys
@@ -42,6 +58,7 @@ func TestAReplaceInterruptedBetweenItsTwoRenames(t *testing.T) {
 		Path:            dir,
 		MaxSegmentBytes: 4096,
 		Compact:         true,
+		Compression:     codec,
 	})
 	require.NoError(t, err)
 
@@ -90,6 +107,7 @@ func TestAReplaceInterruptedBetweenItsTwoRenames(t *testing.T) {
 		Path:            dir,
 		MaxSegmentBytes: 4096,
 		Compact:         true,
+		Compression:     codec,
 	})
 	if err != nil {
 		t.Logf("reopen refused, which is a lawful answer: %v", err)

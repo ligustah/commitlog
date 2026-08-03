@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ligustah/commitlog/compress"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,7 +46,21 @@ import (
 // happen: the counter stays at zero on every run. Worth keeping as a fact about
 // the log rather than deleting as dead code — it says the read path answers a
 // follower without ever surfacing a maintenance error to it.
+//
+// Run over every storage format. A block-compressed segment is a different
+// storage path end to end — records live inside compressed blocks, the index
+// holds sparse anchors into the decompressed stream rather than file positions,
+// and a read decodes a whole block to reach one record. Maintenance rewrites
+// those blocks. None of it had ever run while something was reading.
 func TestChaosAFollowerNeverSeesTheSequenceGoBackwards(t *testing.T) {
+	for _, codec := range []compress.Codec{compress.None, compress.Snappy, compress.Zstd} {
+		t.Run(fmt.Sprintf("codec=%d", codec), func(t *testing.T) {
+			followerNeverSeesTheSequenceGoBackwards(t, codec)
+		})
+	}
+}
+
+func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path: tempDir(t),
 		// Small enough to roll every few records, so a follower crosses segments
@@ -57,6 +72,7 @@ func TestChaosAFollowerNeverSeesTheSequenceGoBackwards(t *testing.T) {
 		// is half of what a real consumer does.
 		Compact:        true,
 		MaxLogMessages: 50,
+		Compression:    codec,
 	})
 	defer cleanup()
 
