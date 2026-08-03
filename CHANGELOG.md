@@ -5,6 +5,34 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.48.0 — 2026-08-03
+
+- **Fixed**: a read from a published retention floor came back past it.
+
+  `TruncateBefore(f)` keeps `f`, so a floor that has been published and not
+  raised since must stay readable. A reader opened at `f` came back at `f+1`,
+  `f+2` or `f+3` while `OldestOffset()` still answered `f` — the log asserting a
+  record is there while a read from it starts past it, with no error anywhere on
+  the path. Silent data loss rather than a retention decision.
+
+  The trim itself was never wrong; what was missing is a link. `current()` tells
+  a redirect from a deletion by the LINK, not by the flags: a segment that is
+  gone WITH a replacement sends the reader to the replacement, and one that is
+  gone WITHOUT one means retention collected those records, so skip to the next
+  segment. `Replace` records that link as part of renaming a rewrite over its
+  source. A boundary segment trimmed at a new base offset cannot take that path
+  — its replacement is a differently named file, with nothing to rename over —
+  and `TruncateBefore` deleted the source without recording the link. So a
+  reader already resolved into the boundary got the retention answer and skipped
+  the records the trim had just preserved: one segment's worth, which is exactly
+  the 1-3 record stride reported.
+
+  Reported from durable_streams against v0.47.0 with a pure-commitlog repro,
+  where it had been carried as an unreproducible CI sighting for weeks — a
+  consumer resuming at its own published floor silently skipping the first
+  records after it. `Truncate` was never affected: it installs its rewrite with
+  `Replace`, which records the link.
+
 ## v0.47.0 — 2026-08-03
 
 - **Fixed**: compaction erased the log's leader epoch, and every follower of a
