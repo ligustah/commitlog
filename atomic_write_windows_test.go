@@ -35,7 +35,7 @@ func TestAtomicWriteRetriesThroughTransientHandle(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "checkpoint")
 
-	require.NoError(t, atomicWriteWithRetry(path, bytes.NewReader([]byte("first"))))
+	require.NoError(t, AtomicWriteFileWithRetry(path, bytes.NewReader([]byte("first"))))
 
 	h := openDenyAll(t, path)
 	released := make(chan struct{})
@@ -46,7 +46,7 @@ func TestAtomicWriteRetriesThroughTransientHandle(t *testing.T) {
 	}()
 
 	// Must succeed despite the destination being locked when it starts.
-	require.NoError(t, atomicWriteWithRetry(path, bytes.NewReader([]byte("second"))),
+	require.NoError(t, AtomicWriteFileWithRetry(path, bytes.NewReader([]byte("second"))),
 		"a transient exclusive handle must be retried through, not returned as an error")
 	<-released
 
@@ -62,12 +62,12 @@ func TestAtomicWriteRetriesThroughTransientHandle(t *testing.T) {
 func TestAtomicWritePermanentHandleStillFails(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "checkpoint")
-	require.NoError(t, atomicWriteWithRetry(path, bytes.NewReader([]byte("first"))))
+	require.NoError(t, AtomicWriteFileWithRetry(path, bytes.NewReader([]byte("first"))))
 
 	h := openDenyAll(t, path)
 
 	start := time.Now()
-	err := atomicWriteWithRetry(path, bytes.NewReader([]byte("second")))
+	err := AtomicWriteFileWithRetry(path, bytes.NewReader([]byte("second")))
 	elapsed := time.Since(start)
 
 	// Release before reading: the deny-all handle blocks this test too.

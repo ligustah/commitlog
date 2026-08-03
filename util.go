@@ -143,27 +143,37 @@ func removeAllWithRetry(path string) error {
 	return err
 }
 
-// Bound for atomicWriteWithRetry. Long enough to cover a handle that is on its
-// way out (those clear in milliseconds), short enough that a genuinely
+// Bound for AtomicWriteFileWithRetry. Long enough to cover a handle that is on
+// its way out (those clear in milliseconds), short enough that a genuinely
 // conflicted write still fails promptly rather than stalling a checkpoint tick.
 const (
 	atomicWriteRetries    = 25
 	atomicWriteRetryDelay = 20 * time.Millisecond
 )
 
-// atomicWriteWithRetry writes a file atomically, retrying briefly. On Windows
-// the underlying ReplaceFile can transiently fail with "Access is denied" when
-// some other handle to the destination has not been released yet — a process
-// that just exited, or a scanner that opened the file after the previous write.
-// The condition clears in milliseconds, while a real conflict (a second live
-// writer, a read-only file) never does, so the bound keeps that case failing
-// instead of hiding it. On Unix rename is atomic and the first attempt always
-// succeeds, so nothing is added there.
+// AtomicWriteFileWithRetry writes a file atomically, retrying briefly. The retry
+// exists for one platform reason, which is why it is in the name: on Windows the
+// underlying ReplaceFile fails with "Access is denied" when any open handle to
+// the destination was not opened with FILE_SHARE_DELETE. That handle need not be
+// yours — a virus scanner or the search indexer opening the file after your
+// previous write is enough, as is a process that has just exited and not yet
+// been reaped.
 //
-// The payload is buffered up front because a retry has to write the SAME bytes
-// again: atomic_file.WriteFile consumes the reader, so retrying with the
-// original one would replace the file with nothing.
-func atomicWriteWithRetry(path string, r io.Reader) error {
+// The condition clears in milliseconds, while a real conflict (a second live
+// writer, a read-only file) never does, so the bound — 25 attempts, 20ms apart,
+// so ~500ms worst case — keeps that case failing instead of hiding it behind a
+// stall. On Unix rename is atomic and the first attempt always succeeds, so
+// nothing is added there.
+//
+// The payload is buffered up front, and that part is load-bearing rather than
+// incidental: a retry has to write the SAME bytes again, and the underlying
+// WriteFile consumes the reader, so retrying with the original one would replace
+// the file with nothing. Any reimplementation that streams instead of buffering
+// is silently wrong on exactly the path this exists for.
+//
+// Exported for callers outside this package that write small config or
+// checkpoint files next to a log and hit the same Windows failure.
+func AtomicWriteFileWithRetry(path string, r io.Reader) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return pkgErrors.Wrap(err, "failed to buffer atomic write payload")

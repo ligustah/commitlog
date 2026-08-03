@@ -1835,7 +1835,7 @@ func (l *commitLog) checkpointHW() error {
 		return errors.Wrap(err, "failed to sync log file")
 	}
 
-	return atomicWriteWithRetry(file, r)
+	return AtomicWriteFileWithRetry(file, r)
 }
 
 // Sidecars are small named metadata files owned by the log's CLIENT, stored
@@ -1845,7 +1845,7 @@ func (l *commitLog) checkpointHW() error {
 // absent; Remove of an absent sidecar is a no-op. Names must not collide
 // with the log's own files (segments, indexes, checkpoints).
 func (l *commitLog) PutSidecar(name string, data []byte) error {
-	return atomicWriteWithRetry(filepath.Join(l.Path, name), bytes.NewReader(data))
+	return AtomicWriteFileWithRetry(filepath.Join(l.Path, name), bytes.NewReader(data))
 }
 
 func (l *commitLog) GetSidecar(name string) ([]byte, error) {

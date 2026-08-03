@@ -5,6 +5,30 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.45.0 — 2026-08-03
+
+- **Added**: `AtomicWriteFileWithRetry`, which was `atomicWriteWithRetry`. Same
+  implementation, now exported, requested by a consumer that hit the identical
+  Windows failure writing its own config file beside a log.
+
+  It writes a file atomically and retries briefly, and the retry exists for one
+  platform reason — which is why it is in the name. On Windows the underlying
+  `ReplaceFile` fails with `Access is denied` when any open handle to the
+  destination was not opened with `FILE_SHARE_DELETE`. That handle need not be
+  yours: a virus scanner or the search indexer opening the file after your
+  previous write is enough, as is a process that has just exited and not yet
+  been reaped. The condition clears in milliseconds; a real conflict — a second
+  live writer, a read-only file — never does, so the bound of 25 attempts 20ms
+  apart keeps that case failing rather than hiding it behind a stall. On Unix
+  rename is atomic, the first attempt always succeeds, and nothing is added.
+
+  The doc comment now says explicitly that buffering the payload up front is
+  load-bearing rather than incidental, because that is the part a reimplementation
+  gets wrong: a retry must write the SAME bytes, and the underlying `WriteFile`
+  consumes the reader, so a version that streams instead of buffering replaces
+  the file with nothing — silently, and only on the path the helper exists for.
+  Exporting it rather than letting the second copy exist is the point.
+
 ## v0.44.2 — 2026-08-03
 
 - **Fixed**: retention wrote into a segment slice that readers were already
