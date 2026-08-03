@@ -327,6 +327,12 @@ run_guard "truncate clamps the watermark" commitlog.go \
 # re-anchor an entry that now sits below the surviving floor.
 run_guard "clean raises the epoch floor" clean.go   '	err := l.leaderEpochCache.ClearEarliest(l.segments[0].BaseOffset)'   '	var err error'   '^TestCleanerKeepsLeaderEpochOffsetsThroughCompaction$'
 
+# A boundary segment trimmed at a new base offset must point readers at the trim.
+# Without the link a reader already resolved into it reads a segment that is gone
+# with no replacement -- the retention case -- and skips to the NEXT segment, past
+# the very records the trim preserved.
+run_guard "trimmed boundary redirects" commitlog.go   '				boundary.SupersededBy(trimmed)'   '				_ = trimmed'   '^TestChaosAReadFromThePublishedFloorStartsAtIt$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

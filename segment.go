@@ -1914,6 +1914,27 @@ func (s *segment) Replace(old *segment) error {
 	return s.setupIndex()
 }
 
+// SupersededBy records that next carries the records this segment still owes a
+// reader, so current() redirects to it instead of reporting the segment gone.
+//
+// Replace does this as part of renaming a rewrite over its source. A boundary
+// segment trimmed at a NEW base offset cannot take that path — its replacement
+// is a differently NAMED file, so there is nothing to rename over — and
+// TruncateBefore, which is the only caller in that position, deleted the source
+// without ever recording the link. A reader already resolved into it then read
+// a gone segment with no replacement, which is the retention case: skip to the
+// NEXT segment. So it skipped the surviving records sitting in the trim, which
+// were exactly the ones the caller had asked to keep.
+//
+// The distinction current() draws is by the LINK, not the flags. Anything that
+// deletes a segment whose records did not all go with it owes this call.
+func (s *segment) SupersededBy(next *segment) {
+	s.Lock()
+	defer s.Unlock()
+	s.replaced = true
+	s.replacement = next
+}
+
 // replacementDepth bounds how far current() follows the chain. A stale pointer
 // gains one link per compaction pass that touches it, so any real chain is one
 // or two long; the bound only stops a corrupted cycle from hanging a reader.

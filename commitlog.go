@@ -1467,6 +1467,15 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 				// segment immediately move to the next one instead of
 				// waiting for more data that will never come.
 				trimmed.Seal()
+				// Before the delete, and this is load-bearing: a reader that
+				// already resolved into the boundary is holding a segment about
+				// to go. Without the link it reads one that is gone with no
+				// replacement, which means "retention collected these" and sends
+				// it to the NEXT segment — past the records this trim just
+				// preserved. The caller asked to keep them and the log went on
+				// reporting them present, so the read came back 1-3 records late
+				// with no error anywhere.
+				boundary.SupersededBy(trimmed)
 				if err := boundary.Delete(); err != nil {
 					return err
 				}
