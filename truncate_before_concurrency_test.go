@@ -117,9 +117,14 @@ func TestReadsAreServedWhileATruncationRuns(t *testing.T) {
 	want := int64(0.25 * baseline * elapsed.Seconds())
 	t.Logf("truncation of %d segments took %s; %d reads completed inside it "+
 		"(baseline %.0f/s, floor %d)", segs, elapsed, during.Load(), baseline, want)
-	require.Greater(t, elapsed, 20*time.Millisecond,
-		"the truncation was too fast to prove anything; raise the segment count")
-	require.Greater(t, want, int64(20), "the baseline was too low to assert on")
+	// The meaningfulness check is on `want`, not on the clock. An earlier version
+	// of this asserted elapsed > 20ms and failed on Linux CI at 19.69ms — where
+	// the fix was in fact working, 381 reads against a floor of 99. Unlinking 500
+	// files is an order of magnitude cheaper there than on Windows, so a wall
+	// clock floor measures the filesystem rather than the lock. `want` already
+	// says what actually has to be true: the window was long enough that an
+	// unblocked log would have served at least 200 reads inside it.
+	require.Greater(t, want, int64(50), "the window was too small to assert on")
 	require.Greater(t, during.Load(), want,
 		"reads were starved while the truncation ran (%s)", elapsed)
 

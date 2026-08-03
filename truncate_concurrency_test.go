@@ -245,9 +245,11 @@ func TestReadsAreServedWhileATruncateRuns(t *testing.T) {
 	want := int64(0.25 * baseline * elapsed.Seconds())
 	t.Logf("truncate of %d segments took %s; %d reads completed inside it "+
 		"(baseline %.0f/s, floor %d)", segs, elapsed, during.Load(), baseline, want)
-	require.Greater(t, elapsed, 20*time.Millisecond,
-		"the truncate was too fast to prove anything; raise the segment count")
-	require.Greater(t, want, int64(20), "the baseline was too low to assert on")
+	// On `want`, not on the clock — see the note in the TruncateBefore twin: a
+	// wall clock floor measures how fast the filesystem unlinks, which differs by
+	// an order of magnitude between Linux and Windows, rather than whether the
+	// lock was held.
+	require.Greater(t, want, int64(50), "the window was too small to assert on")
 	require.Greater(t, during.Load(), want,
 		"reads were starved while the truncate ran (%s)", elapsed)
 
