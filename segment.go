@@ -112,6 +112,10 @@ type segment struct {
 	blocks       []blockRef
 	physPosition int64
 	cache        *blockCache
+	// Set when opening this segment dropped an unresolvable tail from the log
+	// (a crash mid-append). The index still anchors into the bytes that went,
+	// so it has to be rederived rather than trusted.
+	droppedTornTail bool
 
 	// Set when the segment's log bytes have been offloaded to a SegmentStore
 	// (backing is a *storeBacking). storeKey is the object key; store is the
@@ -511,7 +515,20 @@ func (s *segment) initPositions() error {
 }
 
 // scanBlocks reconstructs the in-memory block index by walking the block headers
-// in the file, and sets position (logical total) and physPosition (file size).
+// in the file, and sets position (logical total) and physPosition.
+//
+// The walk is a chain: each block's header gives the length that locates the
+// next one. A crash mid-append leaves the last link half-written, and there is
+// no way to resume past it — but everything BEFORE it is intact, and a segment
+// that refuses to open takes the whole log with it, every sealed segment
+// included. So a tail that does not resolve ends the walk instead of failing
+// it, which is what a raw segment already does: it accepts the bytes and lets
+// the frame checksum reject the torn frame at read time.
+//
+// A version mismatch is the exception, and stays an error. The magic byte
+// matched, so those bytes are a real header written by a build whose layout
+// this one does not know — reading past it would be guessing, and dropping it
+// would delete data another build can read.
 func (s *segment) scanBlocks(size int64) error {
 	var (
 		phys    int64
@@ -519,14 +536,23 @@ func (s *segment) scanBlocks(size int64) error {
 		hdr     [blockHeaderLen]byte
 	)
 	for phys < size {
+		if size-phys < int64(blockHeaderLen) {
+			break // not enough left for a header: the write was cut inside one
+		}
 		if _, err := s.backing.ReadAt(hdr[:], phys); err != nil {
 			return errors.Wrap(err, "read block header failed")
 		}
 		codec, uLen, cLen, err := parseBlockHeader(hdr[:])
 		if err != nil {
-			return err
+			if errors.Is(err, ErrBlockFormat) {
+				return err
+			}
+			break // garbage where a header should be: a partial flush
 		}
 		physLen := int64(blockHeaderLen) + int64(cLen)
+		if phys+physLen > size {
+			break // header whole, the payload it promises is not
+		}
 		s.blocks = append(s.blocks, blockRef{
 			logicalStart: logical,
 			logicalLen:   int64(uLen),
@@ -538,11 +564,41 @@ func (s *segment) scanBlocks(size int64) error {
 		logical += int64(uLen)
 	}
 	if phys != size {
-		return fmt.Errorf("commitlog: block scan overran segment (%d != %d)", phys, size)
+		// The torn bytes have to GO, not merely be ignored. The file is opened
+		// O_APPEND, so the next block would be written after them and the walk
+		// that reads this segment back would stop at the same place — the
+		// segment would accept records it could never serve.
+		if err := s.discardTornTail(phys, size); err != nil {
+			return err
+		}
+		s.droppedTornTail = true
 	}
 	s.position = logical
-	s.physPosition = size
+	s.physPosition = phys
 	return nil
+}
+
+// discardTornTail removes the unresolvable bytes at the end of a segment — a
+// half-written block, or a half-written frame in a raw one.
+//
+// Only a local file can be cut, and only a local file needs it: a store object
+// is written in one shot, so a torn one is not a crash artefact but damage, and
+// rewriting the object to hide it would be the wrong answer. There, the scanned
+// prefix is served and the tail is left alone.
+func (s *segment) discardTornTail(keep, size int64) error {
+	lb, ok := s.backing.(*localBacking)
+	if !ok {
+		return nil
+	}
+	// Through the path, not the open handle. The segment's handle is O_APPEND,
+	// which on Windows is opened for FILE_APPEND_DATA alone and cannot resize
+	// the file — Truncate on it fails with "Access is denied", and a recovery
+	// that fails is the unopenable log all over again.
+	if err := os.Truncate(lb.f.Name(), keep); err != nil {
+		return errors.Wrapf(err, "truncate torn tail (%d of %d bytes)",
+			size-keep, size)
+	}
+	return lb.f.Sync()
 }
 
 // setupIndex creates and initializes an index.
@@ -562,7 +618,7 @@ func (s *segment) setupIndex() (err error) {
 	if err != nil {
 		return err
 	}
-	if lastEntry != nil && s.indexOvershootsLog(lastEntry) && !s.indexDescribesLog() {
+	if lastEntry != nil && s.indexOvershootsLog(lastEntry) && s.rebuildOverIndex() {
 		// The rebuild sets firstOffset/lastOffset and their timestamps as it
 		// walks, so there is nothing left for the code below to read back out.
 		// Re-running InitializePosition here would not work anyway: it reads
@@ -570,7 +626,7 @@ func (s *segment) setupIndex() (err error) {
 		// seeds that to the whole file where a rebuilt index holds only what the
 		// log actually contains.
 		return errors.Wrap(s.rebuildIndexFromLog(),
-			"rebuild index over rewritten log failed")
+			"rebuild index over a log it does not describe failed")
 	}
 	// If lastEntry is nil, the index is empty.
 	if lastEntry == nil {
@@ -634,25 +690,57 @@ func (s *segment) indexOvershootsLog(last *entry) bool {
 	return last.Position+int64(last.Size) > s.position
 }
 
+// rebuildOverIndex decides what to do about an index that reaches past its log:
+// derive a new one from the log that is actually there, or keep the one on disk.
+//
+// Three accidents produce the overshoot, and only one of them can be answered by
+// keeping the index.
+//
+//   - A TORN WRITE cut the log's tail. Whether the entries above the cut can be
+//     kept turns on whether the BYTES they describe can be: a raw segment's torn
+//     frame is dropped from the file by reconcileIndexTailRaw, so the entries for
+//     it must go too, and the rebuild does both in one walk. A block segment's
+//     tail was already dropped by scanBlocks, which is what droppedTornTail
+//     records. Either way there is a shortened log to derive from, and deriving
+//     is the whole answer.
+//   - A CRASH BETWEEN Replace's TWO RENAMES left the source's index over the
+//     rewrite. Every entry is wrong, including the ones that happen to fit,
+//     because the rewrite dropped records and shifted everything after them.
+//   - Nothing at all, on a block segment: the sparse anchors are logical
+//     positions and the last one legitimately sits at the final block's start.
+//     indexDescribesLog is what recognises that and leaves it alone — the one
+//     case where the index on disk is the truth and a rebuild would be work
+//     spent to arrive back where it started.
+//
+// This USED to keep the index for any torn write, on the reasoning that later
+// recovery would trim the log's tail and leave the surviving entries exactly
+// right. Nothing trimmed it. RecoverTail returns early whenever the checkpoint
+// sits at or above the recovered tail — which a torn last record is precisely
+// the case for — and it truncates by OFFSET, which a half-written frame does not
+// have. So the entries above the cut survived, the log grew past them on the
+// next append, and readers walked into the remnant.
+func (s *segment) rebuildOverIndex() bool {
+	if s.droppedTornTail {
+		// The bytes those entries anchor into are already gone. It is not worth
+		// asking whether the index describes the log: it described the log as it
+		// was a moment ago, and the part that no longer fits is exactly the part
+		// that must go.
+		return true
+	}
+	if !s.blockMode {
+		return true
+	}
+	return !s.indexDescribesLog()
+}
+
 // indexDescribesLog asks whether the index belongs to the log beside it, by
 // checking the deepest entry that still fits inside the log against the frame
 // that entry points at.
 //
-// Overshooting alone does not say which of two things happened, and they want
-// opposite treatment:
-//
-//   - A TORN WRITE cut the log's tail. The index describes this log; it simply
-//     covers records the log no longer ends with. Existing recovery trims that,
-//     and the surviving entries are exactly right — rebuilding would be
-//     needless work and would run before the tail truncation that makes the
-//     segment consistent.
-//   - A CRASH BETWEEN Replace's TWO RENAMES left the source's index over the
-//     rewrite. Every entry is wrong, including the ones that happen to fit,
-//     because the rewrite dropped records and shifted everything after them.
-//
-// One frame read tells them apart. The deepest fitting entry is used rather
-// than the first, because drift accumulates: an early entry can still land on
-// the right frame by coincidence when the first dropped record is further in.
+// One frame read tells a stale index apart from an index that is merely sparse.
+// The deepest fitting entry is used rather than the first, because drift
+// accumulates: an early entry can still land on the right frame by coincidence
+// when the first dropped record is further in.
 func (s *segment) indexDescribesLog() bool {
 	for i := s.Index.numEntries() - 1; i >= 0; i-- {
 		var e entry
@@ -767,8 +855,21 @@ func (s *segment) reconcileIndexTail() error {
 }
 
 // reconcileIndexTailRaw scans raw message-set frames past the last indexed one
-// and appends their index entries, advancing lastOffset. A partial (torn) tail
-// frame is left for RecoverTail to truncate.
+// and appends their index entries, advancing lastOffset.
+//
+// A partial (torn) tail frame is DROPPED from the file, for the same reason
+// scanBlocks drops a torn block: the handle is O_APPEND, so the next record
+// would be written after the remnant rather than over it, and the reader —
+// resuming at the recovered position — would walk straight into it and fail its
+// checksum. That does not cost the torn record alone. It costs the whole
+// segment from the recovered position on, because a reader cannot get past the
+// bad frame to reach anything written after it, so a log that read back cleanly
+// before the append reads back as nothing at all afterwards.
+//
+// Which makes leaving it to RecoverTail (the old plan) not merely late but
+// unreachable: it returns early whenever the checkpoint is at or above the
+// recovered tail, which a torn last record is exactly the case for, and its
+// Truncate takes an OFFSET — and a half-written frame is not a record with one.
 func (s *segment) reconcileIndexTailRaw() error {
 	var startPos int64
 	if n := s.Index.numEntries(); n > 0 {
@@ -778,15 +879,26 @@ func (s *segment) reconcileIndexTailRaw() error {
 		}
 		startPos = last.Position + int64(last.Size)
 	}
-	hdr := make([]byte, msgSetHeaderLen)
-	for startPos+int64(msgSetHeaderLen) <= s.position {
+	var (
+		hdr  = make([]byte, msgSetHeaderLen)
+		torn bool
+	)
+	for startPos < s.position {
+		if startPos+int64(msgSetHeaderLen) > s.position {
+			torn = true // fewer bytes left than a header: cut inside one
+			break
+		}
 		if _, err := s.backing.ReadAt(hdr, startPos); err != nil {
-			break // short/torn header at the tail
+			// A read that FAILED says nothing about what is on disk, so the tail
+			// stays: dropping bytes on a transient IO error would turn a
+			// retryable open into permanent data loss.
+			break
 		}
 		m := messageSet(hdr)
 		frameLen := int64(msgSetHeaderLen) + int64(m.Size())
 		if startPos+frameLen > s.position {
-			break // partial tail frame — RecoverTail truncates it
+			torn = true // header whole, the payload it promises is not
+			break
 		}
 		e := &entry{
 			Offset:      m.Offset(),
@@ -804,6 +916,14 @@ func (s *segment) reconcileIndexTailRaw() error {
 		s.lastOffset, s.lastWriteTime = e.Offset, e.Timestamp
 		startPos += frameLen
 	}
+	if !torn {
+		return nil
+	}
+	if err := s.discardTornTail(startPos, s.position); err != nil {
+		return err
+	}
+	s.position = startPos
+	s.physPosition = startPos
 	return nil
 }
 
