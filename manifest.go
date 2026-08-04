@@ -91,6 +91,35 @@ func readTierManifest(store SegmentStore) ([]TierObject, error) {
 			"commitlog: tier manifest is version %d, this build understands %d",
 			m.Version, manifestVersion)
 	}
+	// The keys in here are the one part of the manifest that becomes an ACTION
+	// rather than a description: they end up in s.storeKey and s.indexKey, and
+	// segment.Delete hands those straight to store.Delete. A key naming a place
+	// outside the store is therefore a delete outside the store, so it is refused
+	// at the boundary rather than left to each SegmentStore implementation to
+	// notice — FileSegmentStore does check now, but the interface has never
+	// promised it and a store built on object storage has no reason to.
+	//
+	// The whole manifest is refused, not the offending entry. A manifest holding
+	// a key this package could not have minted is not a manifest whose other
+	// entries have been established as trustworthy, and adopting the rest would
+	// bury the fact that something wrote it that should not have.
+	for _, o := range m.Segments {
+		if err := validStoreKey(o.LogKey); err != nil {
+			return nil, errors.Wrapf(err,
+				"commitlog: tier manifest segment %d names an invalid log object",
+				o.BaseOffset)
+		}
+		// An empty IndexKey is meaningful — it says the index stayed on local
+		// disk — so it is the one value exempt from the check.
+		if o.IndexKey == "" {
+			continue
+		}
+		if err := validStoreKey(o.IndexKey); err != nil {
+			return nil, errors.Wrapf(err,
+				"commitlog: tier manifest segment %d names an invalid index object",
+				o.BaseOffset)
+		}
+	}
 	sort.Slice(m.Segments, func(i, j int) bool {
 		return m.Segments[i].BaseOffset < m.Segments[j].BaseOffset
 	})

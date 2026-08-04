@@ -408,6 +408,18 @@ run_guard "reader advances past its segment" util.go   '	next, _ := findSegment(
 run_guard "leader epoch parsed unsigned" leader_epoch_cache.go   '		leaderEpoch, err := strconv.ParseUint(scanner.Text(), 10, 64)'   '		signedEpoch, err := strconv.ParseInt(scanner.Text(), 10, 64)
 		leaderEpoch := uint64(signedEpoch)'   '^TestALeaderEpochCheckpointWithANegativeEpochIsRefused$'
 
+# A store key names an object INSIDE the store. The manifest is the one place
+# keys arrive from outside, and they become an action rather than a description:
+# s.storeKey is handed to store.Delete. Neutralizing the boundary check lets a
+# manifest name "../../x", which for FileSegmentStore is an os.Remove of a file
+# the store never held -- filepath.Join CLEANS the traversal rather than refusing
+# it, which is what made the escape silent.
+run_guard "manifest refuses a foreign key" manifest.go   '		if err := validStoreKey(o.LogKey); err != nil {'   '		if err := error(nil); err != nil {'   '^TestATierManifestNamingAKeyOutsideTheStoreIsRefused$'
+
+# The same rule one layer down, where the key becomes a path. This is the guard
+# that makes the consequence concrete rather than the policy.
+run_guard "store key stays inside the store" segment_store.go   '	if strings.ContainsAny(key, `/\`) {'   '	if false {'   '^TestAFileSegmentStoreKeyCannotReachOutsideItsDirectory$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

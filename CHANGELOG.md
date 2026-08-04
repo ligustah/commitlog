@@ -5,6 +5,38 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed**: a tier manifest could name a store object outside the store, and
+  deleting that segment deleted the named path.
+
+  The keys in a manifest are the one part of it that becomes an *action* rather
+  than a description. `readTierManifest` decodes `LogKey` and `IndexKey` out of
+  an object in the store, `adoptTierManifestLocked` writes them into a local
+  offload marker, and they end up as `s.storeKey` / `s.indexKey` — which
+  `segment.Delete` hands straight to `store.Delete`. For `FileSegmentStore` that
+  is an `os.Remove` of the store directory joined with the key, so a manifest
+  naming `../../x` removed a file the store never held. `filepath.Join` *cleans*
+  a traversal rather than refusing it, which is what made the escape silent.
+
+  `FileSegmentStore` documented the assumption it relied on — *"Keys are
+  log-relative segment identifiers (no separators), so the join stays within
+  dir"* — and that is true of every key this package mints. It was never checked
+  for keys arriving from outside.
+
+  A key must now be a bare filename. The manifest reader refuses the **whole**
+  manifest rather than the offending entry: a manifest holding a key this package
+  could not have minted is not one whose other entries have been established as
+  trustworthy. `FileSegmentStore` enforces the same rule where a key becomes a
+  path, since `SegmentStore` is an interface and an object-storage implementation
+  has no reason to care about separators. An empty `IndexKey` stays legal — it
+  means the index was kept on local disk.
+
+  Hardening rather than a live exploit: a writer that can put a manifest in the
+  store can already put objects in it. But corrupting a log through its own
+  objects is inherent to owning the bytes, and deleting a path outside the store
+  directory is not.
+
 ## v0.50.2 — 2026-08-04
 
 - **Fixed**: a leader epoch checkpoint holding a negative epoch was accepted as

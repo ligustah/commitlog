@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -178,14 +179,53 @@ func NewFileSegmentStore(dir string) (*FileSegmentStore, error) {
 	return &FileSegmentStore{dir: dir}, nil
 }
 
-// objectPath maps a key to a file path. Keys are log-relative segment
-// identifiers (no separators), so the join stays within dir.
-func (s *FileSegmentStore) objectPath(key string) string {
-	return filepath.Join(s.dir, key)
+// validStoreKey reports whether a key names an object INSIDE a store, rather
+// than a path that reaches out of one.
+//
+// Every key this package mints is a bare filename — newStoreKeys emits
+// "%020d.<rand><suffix>", and the manifest's is a constant — so requiring one is
+// no constraint on our own writers. It is a constraint on keys that arrive from
+// OUTSIDE: readTierManifest decodes LogKey and IndexKey out of an object in the
+// store, and those end up in s.storeKey, which segment.Delete hands to
+// store.Delete. For FileSegmentStore that is an os.Remove of dir joined with the
+// key, so "../../x" removes a file the store never held.
+//
+// That is a different power from the one a store writer already has. Corrupting
+// a log through its own objects is inherent to owning the bytes; deleting a path
+// outside the store directory is not, and nothing else on that route was ever
+// going to catch it — filepath.Join CLEANS the traversal away rather than
+// refusing it, which is what made the escape silent.
+func validStoreKey(key string) error {
+	if key == "" {
+		return errors.New("store key is empty")
+	}
+	if key == "." || key == ".." {
+		return errors.Errorf("store key %q is a directory reference", key)
+	}
+	if strings.ContainsAny(key, `/\`) {
+		return errors.Errorf("store key %q contains a path separator", key)
+	}
+	if strings.ContainsRune(key, 0) {
+		return errors.Errorf("store key %q contains a NUL byte", key)
+	}
+	return nil
+}
+
+// objectPath maps a key to a file path within dir, refusing any key that would
+// not stay there. See validStoreKey.
+func (s *FileSegmentStore) objectPath(key string) (string, error) {
+	if err := validStoreKey(key); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.dir, key), nil
 }
 
 func (s *FileSegmentStore) Put(key string, r io.Reader, size int64) error {
-	tmp := s.objectPath(key) + ".tmp"
+	path, err := s.objectPath(key)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return errors.Wrap(err, "create store object")
@@ -206,11 +246,15 @@ func (s *FileSegmentStore) Put(key string, r io.Reader, size int64) error {
 	}
 	// Rename is the commit point: an offloaded object is either fully present or
 	// absent, never half-written.
-	return os.Rename(tmp, s.objectPath(key))
+	return os.Rename(tmp, path)
 }
 
 func (s *FileSegmentStore) ReadAt(key string, p []byte, off int64) (int, error) {
-	f, err := os.Open(s.objectPath(key))
+	path, err := s.objectPath(key)
+	if err != nil {
+		return 0, err
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
@@ -219,7 +263,11 @@ func (s *FileSegmentStore) ReadAt(key string, p []byte, off int64) (int, error) 
 }
 
 func (s *FileSegmentStore) Stream(key string, off int64) (io.ReadCloser, error) {
-	f, err := os.Open(s.objectPath(key))
+	path, err := s.objectPath(key)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +281,11 @@ func (s *FileSegmentStore) Stream(key string, off int64) (io.ReadCloser, error) 
 }
 
 func (s *FileSegmentStore) Size(key string) (int64, error) {
-	fi, err := os.Stat(s.objectPath(key))
+	path, err := s.objectPath(key)
+	if err != nil {
+		return 0, err
+	}
+	fi, err := os.Stat(path)
 	if err != nil {
 		return 0, err
 	}
@@ -256,7 +308,11 @@ func (s *FileSegmentStore) List() ([]string, error) {
 }
 
 func (s *FileSegmentStore) Delete(key string) error {
-	err := os.Remove(s.objectPath(key))
+	path, err := s.objectPath(key)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(path)
 	if os.IsNotExist(err) {
 		return nil
 	}
