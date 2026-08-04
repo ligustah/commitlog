@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.50.3 — 2026-08-04
 
 - **Fixed**: a tier manifest could name a store object outside the store, and
   deleting that segment deleted the named path.
