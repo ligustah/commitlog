@@ -348,23 +348,30 @@ run_guard "reopen resolves segment overlaps" commitlog.go   '	if err := l.resolv
 # TruncateBefore unlinks with l.mu released, and the unlinks are the bulk of a
 # retention pass. Taking the lock for them is the regression this catches -- note
 # that it does NOT restore the old behaviour wholesale (the rewrite still runs
-# unlocked), which is the point: the test asserts a RATE against an undisturbed
-# baseline, so it bites on partial starvation and not only on total starvation.
+# unlocked), which is the point: what is caught is partial starvation, not only
+# total starvation.
 #
 # Putting the lock back at the TOP of the call, which is what the original bug
 # literally was, cannot be expressed here: the publish step takes l.mu itself, so
 # the neutralised build would deadlock rather than fail, and guardcheck would
-# report a timeout instead of a red test.
+# report a timeout instead of a red test. The unlinks run after that publish,
+# which is why holding the lock to the end of the call is expressible.
+#
+# The test asks the unlink itself whether the lock is free, from inside the
+# store's Delete. It used to assert a read RATE against a baseline, which made
+# coverage depend on how loaded the machine was -- see the header comment in
+# truncate_lock_determinism_test.go.
 run_guard "truncation unlinks outside the lock" commitlog.go   '	for i := 0; i < boundaryIdx; i++ {
 		if err := oldSegments[i].Delete(); err != nil {'   '	l.mu.Lock()
 	defer l.mu.Unlock()
 	for i := 0; i < boundaryIdx; i++ {
-		if err := oldSegments[i].Delete(); err != nil {'   '^TestReadsAreServedWhileATruncationRuns$'
+		if err := oldSegments[i].Delete(); err != nil {'   '^TestATruncationUnlinksWithTheSegmentLockAvailable$'
 
 # An append can roll while the truncation has the lock down, and the surviving
 # list it publishes has to carry what split() appended. Losing it drops records
-# that were acknowledged, silently.
-run_guard "truncation carries segments rolled under it" commitlog.go   '	if len(newSegments) > len(oldSegments) {'   '	if false {'   '^TestATruncationDoesNotLoseASegmentRolledUnderIt$'
+# that were acknowledged, silently. The test enters that window from INSIDE the
+# boundary rewrite rather than racing for it.
+run_guard "truncation carries segments rolled under it" commitlog.go   '	if len(newSegments) > len(oldSegments) {'   '	if false {'   '^TestATruncationCarriesASegmentRolledDuringItsRewrite$'
 
 # Truncate unlinks with l.mu released, and on a follower reconciling after an
 # unclean election the unlinks are most of the call. The neutralization takes the
@@ -372,7 +379,7 @@ run_guard "truncation carries segments rolled under it" commitlog.go   '	if len(
 # than a defer, because Truncate publishes under l.mu further down and a deferred
 # unlock would deadlock there. Same limitation as the TruncateBefore guard above:
 # what this catches is the unlinks moving back under the lock, not the whole call
-# doing so, and the test asserts a RATE so partial starvation is enough.
+# doing so. Observed the same way -- the unlink asks whether the lock is free.
 run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 	for i := idx + 1; i < len(snapshot); i++ {
 		if err := snapshot[i].Delete(); err != nil {
@@ -388,7 +395,7 @@ run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 		}
 		deleted++
 	}
-	l.mu.Unlock()'   '^TestReadsAreServedWhileATruncateRuns$'
+	l.mu.Unlock()'   '^TestATruncateUnlinksWithTheSegmentLockAvailable$'
 
 # A reader that consumed a segment must advance PAST it, by asking for the
 # segment holding its next OFFSET. The neutralization restores the old query --
