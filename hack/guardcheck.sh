@@ -398,6 +398,16 @@ run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 # read batch.
 run_guard "reader advances past its segment" util.go   '	next, _ := findSegment(segments, seg.NextOffset())'   '	next := findSegmentByBaseOffset(segments, seg.BaseOffset+1)'   '^TestASegmentAdvanceSkipsTheTrimOfTheSegmentJustRead$'
 
+# A leader epoch arriving from the checkpoint file must be parsed as UNSIGNED.
+# The neutralization restores the old parse-then-convert, which is the whole bug:
+# "-1" is a valid int64, becomes 2^64-1 as a uint64, and that is a well-formed
+# epoch higher than any a leader will ever assign -- so a corrupt file opens
+# cleanly and pins latestEpoch() at the ceiling for good. Written as two lines so
+# the package still COMPILES without the guard; a build failure would be reported
+# as a harness error, not as coverage.
+run_guard "leader epoch parsed unsigned" leader_epoch_cache.go   '		leaderEpoch, err := strconv.ParseUint(scanner.Text(), 10, 64)'   '		signedEpoch, err := strconv.ParseInt(scanner.Text(), 10, 64)
+		leaderEpoch := uint64(signedEpoch)'   '^TestALeaderEpochCheckpointWithANegativeEpochIsRefused$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

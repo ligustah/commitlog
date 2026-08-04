@@ -1,6 +1,7 @@
 package commitlog
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -90,4 +91,44 @@ func TestReadLeaderEpochOffsets(t *testing.T) {
 	offsets, err := readLeaderEpochOffsets(f)
 	require.NoError(t, err)
 	require.Equal(t, expected, offsets)
+}
+
+// A checkpoint holding a negative epoch is corrupt and must be refused.
+//
+// An epoch is uint64 everywhere in this package, so nothing can write one. The
+// hazard is entirely on the way back in: this parsed with ParseInt and then
+// converted, which turned "-1" into 2^64-1 — a well-formed epoch larger than
+// any real one. It becomes latestEpoch() permanently, outranks every epoch a
+// leader will ever assign, and reads back indistinguishable from a genuine
+// value. The parse is the only place the damage is still visible.
+func TestALeaderEpochCheckpointWithANegativeEpochIsRefused(t *testing.T) {
+	dir := tempDir(t)
+	defer remove(t, dir)
+
+	l, err := newLeaderEpochCache("foo", dir)
+	require.NoError(t, err)
+	require.NoError(t, l.Assign(1, 0))
+	require.NoError(t, l.Assign(2, 10))
+
+	file := filepath.Join(dir, leaderEpochFileName)
+	good, err := os.ReadFile(file)
+	require.NoError(t, err)
+
+	// Same file, one epoch flipped negative.
+	corrupt := bytes.Replace(good, []byte("2 10"), []byte("-1 10"), 1)
+	require.NotEqual(t, good, corrupt, "the corruption must actually apply")
+	require.NoError(t, os.WriteFile(file, corrupt, 0666))
+
+	f, err := os.Open(file)
+	require.NoError(t, err)
+	defer f.Close()
+
+	_, err = readLeaderEpochOffsets(f)
+	require.Error(t, err, "a negative epoch parsed as 2^64-1 instead of failing")
+	require.Contains(t, err.Error(), "invalid leader epoch value")
+
+	// And the log refuses to open on it, rather than opening with a poisoned
+	// epoch — this is the path that actually runs at startup.
+	_, err = newLeaderEpochCache("foo", dir)
+	require.Error(t, err)
 }

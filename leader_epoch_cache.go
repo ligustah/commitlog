@@ -288,7 +288,15 @@ func readLeaderEpochOffsets(file io.Reader) ([]*epochOffset, error) {
 	)
 
 	for scanner.Scan() {
-		leaderEpoch, err := strconv.ParseInt(scanner.Text(), 10, 64)
+		// ParseUint, not ParseInt. An epoch is uint64 in every other line of
+		// this file, and this is the one place a value from OUTSIDE the process
+		// becomes one. ParseInt accepted "-1" and the conversion to uint64 made
+		// it 2^64-1: the highest epoch representable, so a corrupt checkpoint
+		// parsed as a valid one that outranks every real epoch and pins
+		// latestEpoch() there for good. Nothing downstream can tell that value
+		// from a genuine epoch, and the file carries no checksum, so refusing
+		// it here is the only chance to notice.
+		leaderEpoch, err := strconv.ParseUint(scanner.Text(), 10, 64)
 		if err != nil {
 			return nil, pkgErrors.Wrap(err, "invalid leader epoch value")
 		}
@@ -300,13 +308,13 @@ func readLeaderEpochOffsets(file io.Reader) ([]*epochOffset, error) {
 			return nil, pkgErrors.Wrap(err, "invalid epoch start offset value")
 		}
 
-		if _, ok := epochs[uint64(leaderEpoch)]; ok {
+		if _, ok := epochs[leaderEpoch]; ok {
 			// Duplicate entry.
 			return nil, fmt.Errorf("duplicate leader epoch %d", leaderEpoch)
 		}
-		epochs[uint64(leaderEpoch)] = startOffset
+		epochs[leaderEpoch] = startOffset
 		epochOffsets = append(epochOffsets, &epochOffset{
-			leaderEpoch: uint64(leaderEpoch),
+			leaderEpoch: leaderEpoch,
 			startOffset: startOffset,
 		})
 	}
