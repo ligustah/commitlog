@@ -49,8 +49,35 @@ library from that fork onward.
   search is how it came to have its own set of bugs; there is one copy now.
   `math.MaxInt64` saturates to the newest offset rather than wrapping.
 
+- **Fixed**: an append read the clock *before* it took the append lock, so a
+  later offset could carry an earlier timestamp.
+
+  Offsets are handed out under `appendMu`; the clock read that stamps them was
+  not. Two appenders could interleave as "A reads T2, B reads T1 and wins the
+  lock, A writes T2 after it", and the log then held a record whose timestamp
+  went backwards as its offset went forwards.
+
+  That inverts the one precondition every timestamp lookup runs on.
+  `findEntryByTimestamp` and `findSegmentIndexByTimestamp` both binary-search,
+  and a binary search over a sequence that is not sorted does not degrade
+  gracefully — it answers, with whatever the halving lands on. One inversion is
+  enough, and the records are stamped wrong on disk for good.
+
+  Reported by durable_streams while it was chaos-testing `Stream.OffsetAtTime`
+  against a moving retention floor.
+
 - **Internal**: three guards in `hack/guardcheck.sh` are no longer proved by
-  timing.
+  timing, and the four new guards added here are not either.
+
+  A lock discipline is the hard case: the outcome it protects — monotonic
+  stamps, an unstarved reader — is only observable when two goroutines race for
+  it, and a test that has to win a race asserts a *rate*. That is what these
+  had. It goes quiet on a loaded runner, which is the moment it matters.
+
+  Each is stated as the discipline instead, asked of the code from inside an
+  operation it must perform: mutexes are not reentrant, so `TryLock` on the
+  operation's own goroutine answers "is this lock held right now" with no
+  timing in it at all.
 
   The tests anchoring the two "unlink outside the lock" guards and the "carry a
   segment rolled under a truncation" guard asserted a read *rate* while a

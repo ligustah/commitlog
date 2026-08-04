@@ -471,6 +471,15 @@ run_guard "the last segment is reachable" commitlog.go   '	for i := at; i < len(
 # to its last member.
 run_guard "as-of asks for strictly after" commitlog.go   '	after, err := l.earliestOffsetAfterTimestampLocked(timestamp + 1)'   '	after, err := l.earliestOffsetAfterTimestampLocked(timestamp)'   '^TestLatestOffsetBeforeTimestampLandsOnTheLastRecordOfATie$'
 
+# Offsets are handed out under appendMu, so the clock read that stamps them has
+# to happen under appendMu too, or a later offset can carry an earlier timestamp.
+# The neutralization gives the lock back for exactly the clock read, which is
+# what the code literally did -- and which the deferred Unlock still balances, so
+# it compiles and runs rather than deadlocking.
+run_guard "append stamps under the append lock" commitlog.go   '	now := timestamp()'   '	l.appendMu.Unlock()
+	now := timestamp()
+	l.appendMu.Lock()'   '^TestAnAppendStampsItsTimeUnderTheAppendLock$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
