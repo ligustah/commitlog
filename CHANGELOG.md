@@ -49,6 +49,9 @@ library from that fork onward.
   search is how it came to have its own set of bugs; there is one copy now.
   `math.MaxInt64` saturates to the newest offset rather than wrapping.
 
+  Found and diagnosed by durable_streams, which hit them while chaos-testing
+  `Stream.OffsetAtTime` against a moving retention floor.
+
 - **Fixed**: an append read the clock *before* it took the append lock, so a
   later offset could carry an earlier timestamp.
 
