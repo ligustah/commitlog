@@ -49,6 +49,24 @@ library from that fork onward.
   search is how it came to have its own set of bugs; there is one copy now.
   `math.MaxInt64` saturates to the newest offset rather than wrapping.
 
+- **Internal**: three guards in `hack/guardcheck.sh` are no longer proved by
+  timing.
+
+  The tests anchoring the two "unlink outside the lock" guards and the "carry a
+  segment rolled under a truncation" guard asserted a read *rate* while a
+  truncation ran, so on a loaded runner the neutralised code still passed them
+  and CI reported the guards as uncovered while nothing was wrong. A guard whose
+  coverage depends on how fast the machine is goes quiet exactly when nobody is
+  watching.
+
+  They act from inside the truncation now instead of racing it. An offloaded
+  segment reads and deletes through its `SegmentStore`, so a wrapping store is
+  called synchronously on the truncation's own goroutine: the unlink guards ask
+  there whether `l.mu` is free (Go's mutexes are not reentrant, so a lock held
+  across the delete loop fails `TryRLock`), and the carry guard appends from
+  inside the boundary rewrite. Nothing sleeps, races or measures a rate. All 30
+  guards are covered.
+
 ## v0.51.0 — 2026-08-04
 
 - **Added**: `Log.LocalBytes()` reports how many bytes of log data a log occupies
