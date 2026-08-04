@@ -5,6 +5,50 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.51.1 — 2026-08-04
+
+- **Fixed**: four ways `EarliestOffsetAfterTimestamp` and
+  `LatestOffsetBeforeTimestamp` answered with the wrong record.
+
+  All four need a clock *coarser* than the rate records are appended at, which is
+  every real clock: a run of records then shares one instant. Every test this
+  package had gave each record a timestamp of its own, and with distinct
+  timestamps none of the four can happen — which is why they survived.
+
+  These two functions are how a consumer turns a wall-clock resume point into an
+  offset, so a wrong answer is not a wrong number; it is records skipped or
+  re-read, silently, by something that has already moved on.
+
+  - **A resume point skipped its own instant's records in the previous segment.**
+    The segment search is by *base* timestamp and strictly greater, so when a
+    roll lands inside a run sharing an instant, the new segment's base is exactly
+    the timestamp the previous segment's tail still carries. Asking for it
+    answered with the later segment's first record. Measured on a log with runs
+    of four: asking for the first run's instant answered offset 3 instead of 0 —
+    three records handed to a reader as already consumed.
+
+  - **A time in the gap before the last segment answered past the end of the
+    log.** The fallback searched on only while `idx < len(segments)-1`, so the
+    final segment was never reached. A consumer resuming from that answer reads
+    nothing and waits, having been told the whole final segment is in its past.
+    Reachable whenever a roll coincides with a pause — an ordinary stream, idle
+    a moment and then written to again.
+
+  - **One step forward was not always enough.** The segment after the answer's
+    may itself hold nothing at or after the target (the active segment, in the
+    window just after a roll, is empty), and landing on it reported its
+    not-found as a real error. It is a bounded loop now, normally stopping on
+    the first or second iteration.
+
+  - **`LatestOffsetBeforeTimestamp` answered with the *first* record of a run
+    where its contract asks for the last**, because `findEntryByTimestamp`
+    answers with the first entry carrying a timestamp.
+
+  The last one is now *defined* as "one below the earliest record strictly after
+  T" rather than searched for separately. Carrying a second copy of the segment
+  search is how it came to have its own set of bugs; there is one copy now.
+  `math.MaxInt64` saturates to the newest offset rather than wrapping.
+
 ## v0.51.0 — 2026-08-04
 
 - **Added**: `Log.LocalBytes()` reports how many bytes of log data a log occupies
