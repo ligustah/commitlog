@@ -446,6 +446,30 @@ run_guard "offload marker keys checked" segment.go   '		if err := validMarkerKey
 # this check runs on Linux, so there is nothing here that could go red for it.
 run_guard "a missing file is not retried" util.go   '		if err == nil || os.IsNotExist(err) || i >= atomicWriteRetries {'   '		if err == nil || i >= atomicWriteRetries {'   '^TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound$'
 
+# The three timestamp-lookup guards below all need a clock COARSER than the
+# append rate, so that a run of records shares one instant. Every test that
+# predates them gave each record a timestamp of its own, which is the state in
+# which none of these three can be observed at all.
+
+# The segment search is by BASE timestamp and strictly greater, so a roll landing
+# inside a run of records sharing an instant puts that instant on the new
+# segment's base -- and the answer becomes the later segment's first record, with
+# every record of the same instant below it skipped. A resume point goes straight
+# to a reader, so what that costs is those records, silently.
+run_guard "resume walks back over a tie" commitlog.go   '	for at > 0 && l.segments[at-1].LastWriteTime() >= timestamp {'   '	for false && l.segments[at-1].LastWriteTime() >= timestamp {'   '^TestEarliestOffsetAfterTimestampWhenAnInstantSpansSegments$'
+
+# The fallback for "nothing in the chosen segment is at or after the target" has
+# to be able to reach the LAST segment. Bounded at len-1 it cannot, and a target
+# in the gap before it -- a roll coinciding with a pause -- answers with the next
+# assignable offset, telling a consumer the whole final segment is in its past.
+run_guard "the last segment is reachable" commitlog.go   '	if next := at + 1; next < len(l.segments) {'   '	if next := at + 1; next < len(l.segments)-1 {'   '^TestEarliestOffsetAfterTimestampInTheGapBeforeTheLastSegment$'
+
+# LatestOffsetBeforeTimestamp is "one below the earliest record STRICTLY after
+# T". Drop the +1 and "after" stops being strict: the run carrying T is excluded
+# along with T, and the answer walks back to the record before the run instead of
+# to its last member.
+run_guard "as-of asks for strictly after" commitlog.go   '	after, err := l.earliestOffsetAfterTimestampLocked(timestamp + 1)'   '	after, err := l.earliestOffsetAfterTimestampLocked(timestamp)'   '^TestLatestOffsetBeforeTimestampLandsOnTheLastRecordOfATie$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
