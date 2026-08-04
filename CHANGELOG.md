@@ -5,6 +5,25 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed**: a leader epoch checkpoint holding a negative epoch was accepted as
+  the highest epoch representable instead of being refused.
+
+  An epoch is `uint64` everywhere in this package, so nothing here can write a
+  negative one — the hazard was entirely on the way back in.
+  `readLeaderEpochOffsets` parsed with `ParseInt` and then converted, so `-1` in
+  the file became `2^64-1`: a well-formed epoch above any a leader will ever
+  assign. The cache opened cleanly, `latestEpoch()` sat at the ceiling
+  permanently, and nothing downstream can tell that value from a genuine one.
+  The file carries no checksum, so the parse is the only place the corruption is
+  still visible. It now parses unsigned and refuses the line.
+
+  Found by applying a report from durable_streams to this repo: they had just
+  shipped the same shape one layer up, where a partition index skipped its
+  lower-bound check and `-1` became `4294967295`, keying an offset log no reader
+  would ever consult.
+
 ## v0.50.1 — 2026-08-04
 
 - **Fixed**: one read spanning a truncation could return the same offset twice,
