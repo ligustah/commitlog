@@ -252,6 +252,17 @@ type CommitLog interface {
 	// empty.
 	OldestOffset() int64
 
+	// LocalBytes reports how many bytes of log data this log holds on LOCAL
+	// disk — what copying it elsewhere would cost.
+	//
+	// Offloaded segments are excluded: their bytes are in a SegmentStore any
+	// other process reads the same way, so a copy does not move them. Indexes
+	// are excluded too, being derived rather than transferred.
+	//
+	// Arithmetic over the segment list, not a filesystem walk, so it is cheap
+	// enough to ask on a timer.
+	LocalBytes() int64
+
 	// EarliestOffsetAfterTimestamp returns the earliest offset whose timestamp
 	// is greater than or equal to the given timestamp.
 	EarliestOffsetAfterTimestamp(timestamp int64) (int64, error)

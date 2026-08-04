@@ -938,6 +938,42 @@ func (l *commitLog) OldestOffset() int64 {
 	return l.segments[len(l.segments)-1].FirstOffset()
 }
 
+// LocalBytes reports how many bytes of log data this log occupies on LOCAL
+// disk.
+//
+// It exists for the caller that has to decide what MOVING a log would cost, and
+// its two exclusions follow from that question rather than from convenience:
+//
+//   - offloaded segments do not count. Their bytes are in a SegmentStore that
+//     whoever takes the log over reads the same way this process does, so the
+//     move does not copy them. A tiered log with a terabyte in object storage
+//     and one live segment costs one live segment to move, and reporting the
+//     terabyte would refuse every move of exactly the logs that are cheapest.
+//   - indexes do not count. They are derived: a copy rebuilds its own, so
+//     their bytes are never transferred.
+//
+// Computed from the positions the segments already hold, so this is arithmetic
+// over a lock and not a walk of the filesystem — cheap enough to ask on a
+// timer, which is the only way anything watching a whole broker can ask it.
+//
+// Segments mid-replacement are followed to their replacement and dropped if
+// gone, the same rule OldestOffset uses: during a compaction or a retention
+// pass the head of the list can be a segment whose files no longer exist, and
+// counting it would report space that has already been given back.
+func (l *commitLog) LocalBytes() int64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var n int64
+	for _, s := range l.segments {
+		seg, ok := s.current()
+		if !ok || seg.isOffloaded() {
+			continue
+		}
+		n += seg.Position()
+	}
+	return n
+}
+
 // EarliestOffsetAfterTimestamp returns the earliest offset whose timestamp is
 // greater than or equal to the given timestamp.
 func (l *commitLog) EarliestOffsetAfterTimestamp(timestamp int64) (int64, error) {

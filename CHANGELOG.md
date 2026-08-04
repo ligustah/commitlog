@@ -5,6 +5,28 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.51.0 — 2026-08-04
+
+- **Added**: `Log.LocalBytes()` reports how many bytes of log data a log occupies
+  on *local* disk.
+
+  It exists for the caller that has to decide what MOVING a log would cost — a
+  broker weighing whether to reassign a partition — and its two exclusions follow
+  from that question rather than from convenience. Offloaded segments do not
+  count: their bytes are in a `SegmentStore` that whoever takes the log over
+  reads the same way this process does, so the move does not copy them. A tiered
+  log with a terabyte in object storage and one live segment costs one live
+  segment to move, and reporting the terabyte would refuse every move of exactly
+  the logs that are cheapest to make. Indexes do not count either, being derived:
+  a copy rebuilds its own, so their bytes are never transferred.
+
+  Computed from the positions the segments already hold, so it is arithmetic
+  under a lock rather than a walk of the filesystem — cheap enough to ask on a
+  timer, which is the only way anything watching a whole broker can ask it.
+  Segments mid-replacement are followed to their replacement and dropped if gone,
+  the same rule `OldestOffset` uses, so a compaction or retention pass in flight
+  cannot report space that has already been given back.
+
 ## v0.50.5 — 2026-08-04
 
 - **Fixed**: recovery could fail to open a log at all when the previous process
