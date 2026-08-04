@@ -420,6 +420,15 @@ run_guard "manifest refuses a foreign key" manifest.go   '		if err := validStore
 # that makes the consequence concrete rather than the policy.
 run_guard "store key stays inside the store" segment_store.go   '	if strings.ContainsAny(key, `/\`) {'   '	if false {'   '^TestAFileSegmentStoreKeyCannotReachOutsideItsDirectory$'
 
+# The other route into s.storeKey. A manifest becomes a marker, but offloadTo
+# writes markers directly too, and openOffloadedSegment reads them either way.
+# Neutralizing this leaves the store-key rule true of one path in and not the
+# other -- which is the shape of gap that reads as covered.
+run_guard "offload marker keys checked" segment.go   '		if err := validMarkerKeys(m); err != nil {
+			return offloadMeta{}, errors.Wrapf(err, "offload marker %s", path)
+		}
+		return m, nil'   '		return m, nil'   '^TestAnOffloadMarkerNamingAKeyOutsideTheStoreIsRefused$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

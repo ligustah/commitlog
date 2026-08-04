@@ -5,6 +5,26 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed**: the store-key rule added in v0.50.3 covered the tier manifest but
+  not the offload marker, which is the other route to the same value.
+
+  `readOffloadMarker` produces the `offloadMeta` that becomes `s.storeKey` and
+  `s.indexKey`, and `openOffloadedSegment` reads a marker whether it was written
+  by `offloadTo` or synthesised from a manifest entry by
+  `adoptTierManifestLocked`. Validating only the manifest left the rule true of
+  one path in and not the other. The legacy marker format — the whole file taken
+  as the key — was unchecked too.
+
+  A marker sits in the log's own directory, so this is a weaker case than the
+  manifest: anyone who can write there can already delete the log's segments. It
+  is checked so the rule holds wherever a store key comes from, rather than in
+  the one place it was first noticed. A bad key now refuses to open the log,
+  which is the right trade — a log that will not open is recoverable, a delete
+  that has already happened is not. Keys this package mints are unaffected in
+  both marker formats.
+
 ## v0.50.3 — 2026-08-04
 
 - **Fixed**: a tier manifest could name a store object outside the store, and

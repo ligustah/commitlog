@@ -248,9 +248,41 @@ func readOffloadMarker(path string) (offloadMeta, error) {
 		if err := json.Unmarshal(b, &m); err != nil {
 			return offloadMeta{}, errors.Wrap(err, "parse offload marker")
 		}
+		if err := validMarkerKeys(m); err != nil {
+			return offloadMeta{}, errors.Wrapf(err, "offload marker %s", path)
+		}
 		return m, nil
 	}
-	return offloadMeta{LogKey: string(b)}, nil
+	m := offloadMeta{LogKey: string(b)}
+	if err := validMarkerKeys(m); err != nil {
+		return offloadMeta{}, errors.Wrapf(err, "offload marker %s", path)
+	}
+	return m, nil
+}
+
+// validMarkerKeys applies the store-key rule to a marker, for the same reason
+// readTierManifest applies it to a manifest: these keys reach store.Delete.
+//
+// A marker sits in the log's OWN directory, so this is a weaker case than the
+// manifest — anyone who can write here can already remove the log's segments.
+// It is checked anyway because the two routes converge: adoptTierManifestLocked
+// turns manifest entries into markers, and a marker is what openOffloadedSegment
+// reads either way. Validating only the manifest would leave the rule true of
+// one path into s.storeKey and not the other, which is the kind of gap that
+// reads as covered.
+//
+// Refusing here fails open(), which is the right answer for a key naming a path
+// outside the store: a log that will not open is recoverable, and a delete that
+// has already happened is not. Legacy markers — the whole file as the key — are
+// unaffected, since a key this package minted has no separator in it.
+func validMarkerKeys(m offloadMeta) error {
+	if err := validStoreKey(m.LogKey); err != nil {
+		return err
+	}
+	if m.IndexKey == "" {
+		return nil
+	}
+	return validStoreKey(m.IndexKey)
 }
 
 // offloadTo uploads the segment's local log bytes to store under key, swaps the

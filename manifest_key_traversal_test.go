@@ -81,6 +81,48 @@ func TestATierManifestNamingAKeyOutsideTheStoreIsRefused(t *testing.T) {
 	}
 }
 
+// The other route into s.storeKey. A manifest becomes a marker, but a marker is
+// also written directly by offloadTo, and openOffloadedSegment reads it either
+// way — so validating only the manifest would leave the rule true of one path
+// and not the other.
+//
+// A marker lives in the log's own directory, so this is weaker than the manifest
+// case: anyone who can write here can already delete the log's segments. It is
+// checked so that "a store key names an object inside the store" holds wherever
+// a store key comes from, rather than in the one place it was noticed.
+func TestAnOffloadMarkerNamingAKeyOutsideTheStoreIsRefused(t *testing.T) {
+	dir := tempDir(t)
+	defer remove(t, dir)
+
+	// v2 marker: JSON.
+	path := filepath.Join(dir, "00000000000000000000"+offloadedSuffix)
+	body, err := json.Marshal(offloadMeta{LogKey: "../escape"})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, body, 0o644))
+	_, err = readOffloadMarker(path)
+	require.Error(t, err, "a marker naming a path outside the store was accepted")
+
+	// v1 marker: the raw key as the whole file. Same rule.
+	require.NoError(t, os.WriteFile(path, []byte("../escape"), 0o644))
+	_, err = readOffloadMarker(path)
+	require.Error(t, err, "a legacy marker naming a path outside the store was accepted")
+
+	// A key this package would have minted still round-trips, in both formats.
+	logKey, indexKey := newStoreKeys(0)
+	body, err = json.Marshal(offloadMeta{LogKey: logKey, IndexKey: indexKey})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, body, 0o644))
+	meta, err := readOffloadMarker(path)
+	require.NoError(t, err)
+	require.Equal(t, logKey, meta.LogKey)
+
+	require.NoError(t, os.WriteFile(path, []byte(logKey), 0o644))
+	meta, err = readOffloadMarker(path)
+	require.NoError(t, err)
+	require.Equal(t, logKey, meta.LogKey)
+	require.Empty(t, meta.IndexKey, "a legacy marker keeps its index local")
+}
+
 // The consequence the check above prevents, stated on its own so it cannot be
 // mistaken for a theoretical concern: a key with a traversal in it removes a
 // file the store never held.
