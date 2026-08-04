@@ -5,6 +5,38 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Fixed**: recovery could fail to open a log at all when the previous process
+  had just been killed, on Windows.
+
+  `open()` recovered the high watermark with a bare `os.ReadFile`. On Windows a
+  handle held by a process that has just been killed is not closed when
+  `TerminateProcess` returns — the OS reclaims it asynchronously — so an open in
+  that window fails with `ERROR_SHARING_VIOLATION` rather than succeeding or
+  reporting the file missing. A log recovering right after a hard kill is exactly
+  that window, so losing the race failed the whole `open()`.
+
+  Reported from sqlcdc: a kill/restart soak lost the race about one restart in
+  thirty, and the replacement daemon wrote one line and exited — *"read high
+  watermark file failed: ... The process cannot access the file because it is
+  being used by another process."*
+
+  This package already carried the knowledge on the write side
+  (`AtomicWriteFileWithRetry`, which exists for the same condition on
+  `ReplaceFile`); the read side never got it. New `ReadFileWithRetry` is its twin
+  — same bound, ~500ms — and is now used for every recovery-time read of a log's
+  own metadata: the high watermark, offload markers, the leader epoch checkpoint,
+  and sidecars (whose writes already retried).
+
+  **A missing file returns immediately**, which is the point rather than an
+  optimisation: absent is a legitimate state — a log with no checkpoint yet, an
+  unwritten sidecar, a first open — and must stay instantly distinguishable from
+  locked, which is a race worth waiting out.
+
+  `ReadFileWithRetry` is exported alongside `AtomicWriteFileWithRetry` for callers
+  that read the same kinds of small files next to a log.
+
 ## v0.50.4 — 2026-08-04
 
 - **Fixed**: the store-key rule added in v0.50.3 covered the tier manifest but

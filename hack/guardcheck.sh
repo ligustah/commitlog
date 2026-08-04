@@ -429,6 +429,16 @@ run_guard "offload marker keys checked" segment.go   '		if err := validMarkerKey
 		}
 		return m, nil'   '		return m, nil'   '^TestAnOffloadMarkerNamingAKeyOutsideTheStoreIsRefused$'
 
+# A missing file must come back immediately, not be waited out. Neutralizing the
+# fast path makes every legitimate absence -- a log with no checkpoint, an
+# unwritten sidecar, a first open -- pay the full retry bound before reporting
+# what it could have reported at once.
+#
+# This guards the ABSENT half only. The retry half is provable solely on Windows
+# (TestRecoveryReadsRetryThroughTransientHandle takes a deny-all handle), and
+# this check runs on Linux, so there is nothing here that could go red for it.
+run_guard "a missing file is not retried" util.go   '		if err == nil || os.IsNotExist(err) || i >= atomicWriteRetries {'   '		if err == nil || i >= atomicWriteRetries {'   '^TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

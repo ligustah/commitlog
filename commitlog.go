@@ -539,8 +539,10 @@ func (l *commitLog) open() error {
 			}
 			l.segments = append(l.segments, segment)
 		} else if file.Name() == hwFileName {
-			// Recover high watermark.
-			b, err := os.ReadFile(filepath.Join(l.Path, file.Name()))
+			// Recover high watermark. WithRetry because this runs immediately
+			// after the previous process died, which on Windows is precisely when
+			// its handle to this file may still be open; see ReadFileWithRetry.
+			b, err := ReadFileWithRetry(filepath.Join(l.Path, file.Name()))
 			if err != nil {
 				return errors.Wrap(err, "read high watermark file failed")
 			}
@@ -2081,7 +2083,11 @@ func (l *commitLog) PutSidecar(name string, data []byte) error {
 }
 
 func (l *commitLog) GetSidecar(name string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(l.Path, name))
+	// Paired with PutSidecar's AtomicWriteFileWithRetry: a sidecar written with
+	// a retry deserves to be read with one, and the documented contract that an
+	// absent sidecar satisfies os.ErrNotExist is preserved — ReadFileWithRetry
+	// returns that immediately rather than waiting the file out.
+	return ReadFileWithRetry(filepath.Join(l.Path, name))
 }
 
 func (l *commitLog) RemoveSidecar(name string) error {

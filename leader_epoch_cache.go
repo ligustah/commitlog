@@ -42,19 +42,25 @@ func newLeaderEpochCache(name, path string) (*leaderEpochCache, error) {
 		file   = filepath.Join(path, leaderEpochFileName)
 		epochs = []*epochOffset{}
 	)
-	if _, err := os.Stat(file); err == nil {
-		// Load epoch offsets from file.
-		f, err := os.Open(file)
-		if err != nil {
-			return nil, pkgErrors.Wrap(err, "failed to open leader epoch offsets file")
-		}
-		epochs, err = readLeaderEpochOffsets(f)
-		// Close BEFORE the error check: a leaked handle blocks the atomic
-		// checkpoint replace on Windows for the rest of the process.
-		f.Close()
+	// Read the whole file rather than Stat-then-Open. The checkpoint is a few
+	// bytes, so there is nothing to stream, and reading it in one call removes
+	// both the window between the Stat and the Open and the leaked-handle hazard
+	// the old shape had to close around by hand: a handle still open here blocks
+	// the atomic checkpoint replace on Windows for the rest of the process.
+	//
+	// WithRetry for the same reason as the high watermark — this runs while a
+	// just-killed previous process may still hold the file open. Absent stays
+	// absent: a log that has never had a leader epoch is the normal first-open
+	// case, not a race, and ReadFileWithRetry returns that immediately.
+	b, err := ReadFileWithRetry(file)
+	switch {
+	case err == nil:
+		epochs, err = readLeaderEpochOffsets(bytes.NewReader(b))
 		if err != nil {
 			return nil, pkgErrors.Wrap(err, "failed to read leader epoch offsets file")
 		}
+	case !os.IsNotExist(err):
+		return nil, pkgErrors.Wrap(err, "failed to open leader epoch offsets file")
 	}
 	return &leaderEpochCache{
 		epochOffsets:   epochs,

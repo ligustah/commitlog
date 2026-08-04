@@ -239,7 +239,9 @@ type offloadMeta struct {
 // (option 1) is the raw log key, returned as offloadMeta{LogKey} with IndexKey
 // empty so the caller keeps using the local index.
 func readOffloadMarker(path string) (offloadMeta, error) {
-	b, err := os.ReadFile(path)
+	// Recovery-time read of the log's own metadata, so it carries the same
+	// just-killed-process exposure as the high watermark; see ReadFileWithRetry.
+	b, err := ReadFileWithRetry(path)
 	if err != nil {
 		return offloadMeta{}, err
 	}

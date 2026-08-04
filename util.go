@@ -196,6 +196,37 @@ const (
 // the file with nothing. Any reimplementation that streams instead of buffering
 // is silently wrong on exactly the path this exists for.
 //
+// ReadFileWithRetry reads a file, retrying briefly, and is the read-side twin of
+// AtomicWriteFileWithRetry — same platform reason, same bound.
+//
+// On Windows a handle held by a process that has just been killed is not closed
+// when TerminateProcess returns; the OS reclaims it asynchronously. An open in
+// that window fails with ERROR_SHARING_VIOLATION ("The process cannot access the
+// file because it is being used by another process") rather than succeeding or
+// reporting the file missing. A log recovering right after a hard kill of the
+// previous process is exactly that window, and the read it does is of its own
+// metadata — so losing the race made the whole open() fail. Reported from sqlcdc
+// as one daemon restart in ~30 that did not come up at all.
+//
+// A MISSING file returns immediately, and that distinction is the point rather
+// than an optimization: absent is a legitimate state (a log with no checkpoint
+// yet, an unwritten sidecar) and must stay instantly distinguishable from
+// locked, which is a race worth waiting out. Everything else is retried, matching
+// the write side — the errors that are permanent cost one bounded wait, once, at
+// startup, and the ones that are not are the reason this exists.
+//
+// Exported alongside AtomicWriteFileWithRetry for callers that read the same
+// kinds of small files next to a log.
+func ReadFileWithRetry(path string) ([]byte, error) {
+	for i := 0; ; i++ {
+		b, err := os.ReadFile(path)
+		if err == nil || os.IsNotExist(err) || i >= atomicWriteRetries {
+			return b, err
+		}
+		time.Sleep(atomicWriteRetryDelay)
+	}
+}
+
 // Exported for callers outside this package that write small config or
 // checkpoint files next to a log and hit the same Windows failure.
 func AtomicWriteFileWithRetry(path string, r io.Reader) error {
