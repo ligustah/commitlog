@@ -712,6 +712,9 @@ func (l *commitLog) Append(msgs []*Message) ([]int64, error) {
 	if l.IsReadonly() {
 		return nil, ErrCommitLogReadonly
 	}
+	// Reading the tail and writing to it must be one step; see appendMu.
+	l.appendMu.Lock()
+	defer l.appendMu.Unlock()
 	// Stamp append time on messages that carry no timestamp (Kafka's
 	// LogAppendTime as the fallback for an unset CreateTime). Every
 	// time-based feature — age retention, MaxSegmentAge rolling, the
@@ -721,15 +724,22 @@ func (l *commitLog) Append(msgs []*Message) ([]int64, error) {
 	// (age retention deletes everything, the compaction horizon protects
 	// nothing). AppendMessageSet takes pre-encoded bytes and cannot be
 	// stamped; replicating callers are expected to carry source timestamps.
+	//
+	// Read UNDER appendMu, which is what makes the stamp agree with the offset
+	// it is stored at. Offsets are assigned under this lock; reading the clock
+	// outside it let two appenders interleave as "A reads T2, B reads T1 and
+	// wins the lock, A writes T2 after it" — so a later offset carried an
+	// EARLIER timestamp. Every timestamp lookup binary-searches on the
+	// assumption that offset order is timestamp order, and a search over
+	// non-monotonic data does not fail, it answers. The window was as wide as
+	// the scheduler cared to make it, and the records it corrupts are stamped
+	// wrong on disk for good.
 	now := timestamp()
 	for _, m := range msgs {
 		if m.Timestamp == 0 {
 			m.Timestamp = now
 		}
 	}
-	// Reading the tail and writing to it must be one step; see appendMu.
-	l.appendMu.Lock()
-	defer l.appendMu.Unlock()
 	if _, err := l.checkAndPerformSplit(); err != nil {
 		return nil, err
 	}
