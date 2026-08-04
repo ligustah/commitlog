@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.50.5 — 2026-08-04
 
 - **Fixed**: recovery could fail to open a log at all when the previous process
   had just been killed, on Windows.
