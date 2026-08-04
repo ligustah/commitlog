@@ -458,11 +458,12 @@ run_guard "a missing file is not retried" util.go   '		if err == nil || os.IsNot
 # to a reader, so what that costs is those records, silently.
 run_guard "resume walks back over a tie" commitlog.go   '	for at > 0 && l.segments[at-1].LastWriteTime() >= timestamp {'   '	for false && l.segments[at-1].LastWriteTime() >= timestamp {'   '^TestEarliestOffsetAfterTimestampWhenAnInstantSpansSegments$'
 
-# The fallback for "nothing in the chosen segment is at or after the target" has
-# to be able to reach the LAST segment. Bounded at len-1 it cannot, and a target
-# in the gap before it -- a roll coinciding with a pause -- answers with the next
-# assignable offset, telling a consumer the whole final segment is in its past.
-run_guard "the last segment is reachable" commitlog.go   '	if next := at + 1; next < len(l.segments) {'   '	if next := at + 1; next < len(l.segments)-1 {'   '^TestEarliestOffsetAfterTimestampInTheGapBeforeTheLastSegment$'
+# The forward scan for "nothing in the chosen segment is at or after the target"
+# has to be able to reach the LAST segment. Bounded at len-1 it cannot, and a
+# target in the gap before it -- a roll coinciding with a pause -- answers with
+# the next assignable offset, telling a consumer the whole final segment is in
+# its past.
+run_guard "the last segment is reachable" commitlog.go   '	for i := at; i < len(l.segments); i++ {'   '	for i := at; i < len(l.segments)-1; i++ {'   '^TestEarliestOffsetAfterTimestampInTheGapBeforeTheLastSegment$'
 
 # LatestOffsetBeforeTimestamp is "one below the earliest record STRICTLY after
 # T". Drop the +1 and "after" stops being strict: the run carrying T is excluded

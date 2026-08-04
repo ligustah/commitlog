@@ -1005,7 +1005,6 @@ func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, 
 	// Search the previous segment for the first entry whose timestamp is
 	// greater than or equal to the given timestamp. If this is the first
 	// segment, just search it.
-	var seg *segment
 	at := 0
 	if idx > 0 {
 		at = idx - 1
@@ -1031,26 +1030,10 @@ func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, 
 	for at > 0 && l.segments[at-1].LastWriteTime() >= timestamp {
 		at--
 	}
-	seg = l.segments[at]
-	entry, err := seg.findEntryByTimestamp(timestamp)
-	if err == nil {
-		return entry.Offset, nil
-	}
-	// ErrEntryNotFound only. io.EOF was accepted here too, which meant a
-	// truncated index — position claiming more entries than are mapped — was
-	// answered with an offset instead of an error. errors.Is, so a wrapped
-	// not-found still reads as one.
-	if !errors.Is(err, ErrEntryNotFound) {
-		return 0, errors.Wrap(err, "failed to find log entry for timestamp")
-	}
-	// This indicates there are no entries in the segment whose timestamp
-	// is greater than or equal to the target timestamp. In this case, search
-	// the next segment if there is one. If there isn't, the timestamp is
-	// beyond the end of the log so return the next assignable offset.
-	//
-	// The next segment is the one after the segment just searched, and the bound
-	// is the length. It used to be segments[idx] under idx < len-1, which was
-	// wrong twice over:
+	// Then forward from there, taking the first segment that holds an entry at
+	// or after the target. A loop rather than "this segment, or else the next
+	// one", which is what it used to be under idx < len(segments)-1, and which
+	// was wrong three ways:
 	//
 	//   - The bound excluded the LAST segment, so a target landing in the gap
 	//     between the previous segment's tail and the last segment's base — a
@@ -1059,19 +1042,34 @@ func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, 
 	//     offset. Everything in that final segment was then in the caller's past
 	//     by construction: it resumes from the end of the log and waits, having
 	//     been told records sitting right there have already been handled.
-	//   - And idx is not the next segment when idx is 0, which is what an empty
-	//     log looks like: the empty segment sorts after every timestamp, so the
-	//     search lands on it rather than past it, and the fallback would search
-	//     the very segment that just came up empty and report its not-found as a
-	//     real error.
-	if next := at + 1; next < len(l.segments) {
-		seg = l.segments[next]
-		entry, err := seg.findEntryByTimestamp(timestamp)
-		if err != nil {
+	//   - "The next one" was segments[idx], which is not the segment after the
+	//     one searched when idx is 0 — the state an empty log is in, since an
+	//     empty segment sorts after every timestamp and the search lands on it
+	//     rather than past it. That re-searched the segment that had just come up
+	//     empty.
+	//   - And one step was not always enough. The segment after the answer's may
+	//     itself be empty — the active segment in the window just after a roll —
+	//     and a single step landed on it and reported its not-found as a real
+	//     error rather than reading past it.
+	//
+	// Bounded by the segment count and normally stopping at the first or second
+	// iteration: everything skipped is a segment holding no record at or after
+	// the target, which past the answer's segment means an empty one.
+	for i := at; i < len(l.segments); i++ {
+		entry, err := l.segments[i].findEntryByTimestamp(timestamp)
+		if err == nil {
+			return entry.Offset, nil
+		}
+		// ErrEntryNotFound only. io.EOF was accepted here too, which meant a
+		// truncated index — position claiming more entries than are mapped — was
+		// answered with an offset instead of an error. errors.Is, so a wrapped
+		// not-found still reads as one.
+		if !errors.Is(err, ErrEntryNotFound) {
 			return 0, errors.Wrap(err, "failed to find log entry for timestamp")
 		}
-		return entry.Offset, nil
 	}
+	// Nothing in the log is at or after the target, so it is beyond the end:
+	// answer with the next assignable offset.
 	return l.segments[len(l.segments)-1].NextOffset(), nil
 }
 
