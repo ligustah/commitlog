@@ -498,6 +498,107 @@ func TestEarliestOffsetAfterTimestamp(t *testing.T) {
 	require.Equal(t, int64(3), offset)
 }
 
+// A resume point must not skip the records of its own instant that happen to
+// sit in the previous segment.
+//
+// Every case above gives each message a timestamp of its own, and with distinct
+// timestamps the search cannot get this wrong. Real logs are not like that: the
+// clock is coarser than the rate records are appended at, so a run of them
+// shares one instant, and a segment roll lands wherever the byte budget says —
+// including in the middle of such a run. The new segment's base timestamp is
+// then exactly the one the previous segment's tail is still carrying.
+//
+// The search is by base timestamp and strictly greater, so asking for that
+// instant used to land on the later segment and answer with its first record.
+// Every record of the same instant in the earlier segment — the ones the caller
+// asked for first — was skipped, and a resume point goes straight to a reader.
+// Measured here before the fix: asking for the first run's instant answered 3
+// instead of 0, so a consumer resuming from it lost three records.
+func TestEarliestOffsetAfterTimestampWhenAnInstantSpansSegments(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 100,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	// Runs of four sharing a timestamp, against a segment that holds fewer than
+	// four: every run is guaranteed to straddle a roll.
+	const runLength = 4
+	for i := range 12 {
+		_, err := l.Append([]*Message{{
+			Value:     []byte(strconv.Itoa(i)),
+			Timestamp: int64((i/runLength + 1) * 10),
+		}})
+		require.NoError(t, err)
+	}
+
+	for run := range 3 {
+		ts := int64((run + 1) * 10)
+		want := int64(run * runLength)
+		offset, err := l.EarliestOffsetAfterTimestamp(ts)
+		require.NoError(t, err)
+		require.Equal(t, want, offset,
+			"timestamp %d is carried by offsets %d..%d; resuming from it must start at the first",
+			ts, want, want+runLength-1)
+	}
+
+	// And the gaps between runs, which resolve to the start of the next run for
+	// the same reason.
+	offset, err := l.EarliestOffsetAfterTimestamp(15)
+	require.NoError(t, err)
+	require.Equal(t, int64(runLength), offset)
+}
+
+// A time that falls in the gap before the LAST segment must resolve into that
+// segment, not past the end of the log.
+//
+// The fallback for "no entry in the chosen segment is at or after the target"
+// searched the next segment only while idx < len(segments)-1, so when the
+// segment holding the answer was the last one it was never looked at and the
+// answer was the next assignable offset. A consumer resuming from that reads
+// nothing and waits, having been told the whole final segment is in its past.
+//
+// Reachable whenever a roll and a pause coincide: the previous segment's tail is
+// stamped before the pause, the new segment's first record after it, and any
+// resume point aimed into the pause lands in the gap between them. Which is
+// ordinary — a stream idle for a moment and then written to again.
+func TestEarliestOffsetAfterTimestampInTheGapBeforeTheLastSegment(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 100,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	// Spaced out, so between any two consecutive records there is a time no
+	// record carries — which is where a resume point aimed at a quiet moment
+	// lands.
+	for i := range 12 {
+		_, err := l.Append([]*Message{{
+			Value:     []byte(strconv.Itoa(i)),
+			Timestamp: int64(i+1) * 10,
+		}})
+		require.NoError(t, err)
+	}
+
+	last := l.segments[len(l.segments)-1]
+	prev := l.segments[len(l.segments)-2]
+	require.Positive(t, last.FirstWriteTime(),
+		"the last segment is empty, so the case this test is for was not built")
+
+	// Inside the gap the roll falls in: after everything the previous segment
+	// holds, before anything the last one does.
+	target := prev.LastWriteTime() + 1
+	require.Less(t, target, last.FirstWriteTime(), "the gap is not a gap")
+
+	offset, err := l.EarliestOffsetAfterTimestamp(target)
+	require.NoError(t, err)
+	require.Equal(t, last.BaseOffset, offset,
+		"a resume point in the gap before the last segment must start at that "+
+			"segment's first record, not past the end of the log")
+}
+
 // Ensure EarliestOffsetAfterTimestamp returns the next assignable offset
 // when the log is empty.
 func TestEarliestOffsetAfterTimestampEmptyLog(t *testing.T) {
@@ -568,6 +669,47 @@ func TestLatestOffsetBeforeTimestamp(t *testing.T) {
 	offset, err = l.LatestOffsetBeforeTimestamp(25)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), offset)
+}
+
+// The mirror of the tie question, for the as-of function.
+//
+// Every case above gives each record a timestamp of its own, so "the latest
+// offset whose timestamp is at or before T" and "the first offset whose
+// timestamp is T" are the same record and the difference never shows. Under a
+// clock coarser than the append rate they are not the same record: a run shares
+// an instant, and this function's contract is the LAST of that run.
+func TestLatestOffsetBeforeTimestampLandsOnTheLastRecordOfATie(t *testing.T) {
+	opts := Options{
+		Path:            tempDir(t),
+		MaxSegmentBytes: 100,
+	}
+	l, cleanup := setupWithOptions(t, opts)
+	defer cleanup()
+
+	const runLength = 4
+	for i := range 12 {
+		_, err := l.Append([]*Message{{
+			Value:     []byte(strconv.Itoa(i)),
+			Timestamp: int64((i/runLength + 1) * 10),
+		}})
+		require.NoError(t, err)
+	}
+
+	for run := range 3 {
+		ts := int64((run + 1) * 10)
+		want := int64(run*runLength + runLength - 1)
+		offset, err := l.LatestOffsetBeforeTimestamp(ts)
+		require.NoError(t, err)
+		require.Equal(t, want, offset,
+			"timestamp %d is carried by offsets %d..%d; the latest at or before "+
+				"it is the last of them", ts, want-runLength+1, want)
+	}
+
+	// And a time between two runs, which is the same question asked of a
+	// timestamp no record carries: still the last record of the earlier run.
+	offset, err := l.LatestOffsetBeforeTimestamp(15)
+	require.NoError(t, err)
+	require.Equal(t, int64(runLength-1), offset)
 }
 
 // Ensure Truncate removes log entries up to the given offset and that the

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -979,7 +980,14 @@ func (l *commitLog) LocalBytes() int64 {
 func (l *commitLog) EarliestOffsetAfterTimestamp(timestamp int64) (int64, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	return l.earliestOffsetAfterTimestampLocked(timestamp)
+}
 
+// earliestOffsetAfterTimestampLocked is EarliestOffsetAfterTimestamp with the
+// read lock already held, so LatestOffsetBeforeTimestamp can be defined in terms
+// of it rather than carrying a second copy of the segment search — which is how
+// the copy it did carry came to have a different set of bugs.
+func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, error) {
 	// Find the first segment whose base timestamp is greater than the given
 	// timestamp.
 	// findSegmentIndexByTimestamp cannot return io.EOF: it handles the empty
@@ -998,11 +1006,32 @@ func (l *commitLog) EarliestOffsetAfterTimestamp(timestamp int64) (int64, error)
 	// greater than or equal to the given timestamp. If this is the first
 	// segment, just search it.
 	var seg *segment
-	if idx == 0 {
-		seg = l.segments[0]
-	} else {
-		seg = l.segments[idx-1]
+	at := 0
+	if idx > 0 {
+		at = idx - 1
 	}
+	// And keep walking back while the segment BEFORE this one still ends at or
+	// after the target, because then it holds the earlier answer.
+	//
+	// The search above is by BASE timestamp and strictly greater, so a target
+	// equal to some segment's base lands on that segment — and a timestamp does
+	// not stop at a segment boundary. Records are stamped from a clock coarser
+	// than the rate they are appended at, so a run of them shares an instant;
+	// when a roll falls inside such a run, the new segment's base is exactly the
+	// timestamp the previous segment's tail is still carrying. Asking for it
+	// then answered with the first record of the LATER segment, and every record
+	// of that instant in the earlier one — the ones the caller asked for first —
+	// was skipped. A resume point is handed straight to a reader, so what that
+	// costs is those records, silently.
+	//
+	// Bounded by a segment that ends before the target, which is where the
+	// answer provably is not. In practice it steps back once: a tie has to span
+	// the boundary to be here at all, and one clock tick does not usually span
+	// whole segments.
+	for at > 0 && l.segments[at-1].LastWriteTime() >= timestamp {
+		at--
+	}
+	seg = l.segments[at]
 	entry, err := seg.findEntryByTimestamp(timestamp)
 	if err == nil {
 		return entry.Offset, nil
@@ -1018,8 +1047,25 @@ func (l *commitLog) EarliestOffsetAfterTimestamp(timestamp int64) (int64, error)
 	// is greater than or equal to the target timestamp. In this case, search
 	// the next segment if there is one. If there isn't, the timestamp is
 	// beyond the end of the log so return the next assignable offset.
-	if idx < len(l.segments)-1 {
-		seg = l.segments[idx]
+	//
+	// The next segment is the one after the segment just searched, and the bound
+	// is the length. It used to be segments[idx] under idx < len-1, which was
+	// wrong twice over:
+	//
+	//   - The bound excluded the LAST segment, so a target landing in the gap
+	//     between the previous segment's tail and the last segment's base — a
+	//     roll that coincides with a pause, which is just a stream written to
+	//     again after a quiet moment — was answered with the next assignable
+	//     offset. Everything in that final segment was then in the caller's past
+	//     by construction: it resumes from the end of the log and waits, having
+	//     been told records sitting right there have already been handled.
+	//   - And idx is not the next segment when idx is 0, which is what an empty
+	//     log looks like: the empty segment sorts after every timestamp, so the
+	//     search lands on it rather than past it, and the fallback would search
+	//     the very segment that just came up empty and report its not-found as a
+	//     real error.
+	if next := at + 1; next < len(l.segments) {
+		seg = l.segments[next]
 		entry, err := seg.findEntryByTimestamp(timestamp)
 		if err != nil {
 			return 0, errors.Wrap(err, "failed to find log entry for timestamp")
@@ -1035,53 +1081,43 @@ func (l *commitLog) LatestOffsetBeforeTimestamp(timestamp int64) (int64, error) 
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	// Find the first segment whose base timestamp is greater than the given
-	// timestamp.
-	idx, err := findSegmentIndexByTimestamp(l.segments, timestamp)
+	// Nothing in the log is at or before a time the whole log starts after.
+	//
+	// FirstWriteTime() of the oldest surviving segment, which is where the log
+	// begins now rather than where it began: retention has taken everything
+	// under it, and answering with a record that is gone would be worse than
+	// refusing.
+	if timestamp < l.segments[0].FirstWriteTime() {
+		return 0, ErrTimestampBeforeLog
+	}
+
+	// The latest record at or before T is the one BELOW the earliest record
+	// strictly after T, which is the other function's whole job. Defined that way
+	// rather than searched for directly, because searching for it directly is
+	// what this function used to do and it got the same class of thing wrong:
+	// findEntryByTimestamp answers with the FIRST entry carrying a timestamp, so
+	// an exact match returned the first record of a run sharing an instant where
+	// the contract asks for the last — and the segment it searched was picked
+	// without the walk-back, so a run spanning a boundary missed by however much
+	// of it was on the other side. Neither showed in any test because every case
+	// gave each record a timestamp of its own.
+	//
+	// timestamp+1 rather than timestamp: "after" here has to be strict, or the
+	// run carrying T would be excluded along with it.
+	if timestamp == math.MaxInt64 {
+		// Saturated rather than wrapped. There is nothing after the largest
+		// representable instant, so the answer is the newest record — and +1
+		// would turn that into the one below the oldest.
+		//
+		// LastOffset(), not the bare field: this runs concurrently with appends,
+		// which mutate lastOffset under the segment's write lock.
+		return l.segments[len(l.segments)-1].LastOffset(), nil
+	}
+	after, err := l.earliestOffsetAfterTimestampLocked(timestamp + 1)
 	if err != nil {
-		return 0, errors.Wrap(err, "failed to find log segment for timestamp")
+		return 0, err
 	}
-	// Search the previous segment for the first entry whose timestamp is
-	// greater than or equal to the given timestamp. If this is the first
-	// segment, just search it.
-	var seg *segment
-	if idx == 0 {
-		seg = l.segments[0]
-		// if the given timestamp is before the start of the stream return an
-		// error.
-		if timestamp < seg.FirstWriteTime() {
-			return 0, ErrTimestampBeforeLog
-		}
-	} else {
-		seg = l.segments[idx-1]
-	}
-
-	// Find entry equal to or greater than the given timestamp.
-	entry, err := seg.findEntryByTimestamp(timestamp)
-	if err == nil {
-		// If it's an exact match, return the offset.
-		if entry.Timestamp == timestamp {
-			return entry.Offset, nil
-		}
-
-		// Otherwise we want the previous offset.
-		return entry.Offset - 1, nil
-	}
-
-	// ErrEntryNotFound only — see EarliestOffsetAfterTimestamp. This one is the
-	// sharper of the two: the fallback below answers with the segment's NEWEST
-	// offset, so accepting a read failure here told a caller asking "where was I
-	// at time T" that it was already caught up.
-	if !errors.Is(err, ErrEntryNotFound) {
-		return 0, errors.Wrap(err, "failed to find log entry for timestamp")
-	}
-
-	// LastOffset(), not the bare field: this runs concurrently with appends,
-	// which mutate lastOffset under the segment's write lock. Reading it
-	// directly was a data race against every live writer — and this is a path
-	// callers run unattended on a timer, so it raced whenever a probe happened
-	// to land while a record was being written.
-	return seg.LastOffset(), nil
+	return after - 1, nil
 }
 
 // SetHighWatermark sets the high watermark on the log. All messages up to and
