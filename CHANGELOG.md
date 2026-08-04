@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.50.2 — 2026-08-04
 
 - **Fixed**: a leader epoch checkpoint holding a negative epoch was accepted as
   the highest epoch representable instead of being refused.
