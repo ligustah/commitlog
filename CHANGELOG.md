@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.50.4 — 2026-08-04
 
 - **Fixed**: the store-key rule added in v0.50.3 covered the tier manifest but
   not the offload marker, which is the other route to the same value.
