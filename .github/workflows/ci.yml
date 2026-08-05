@@ -145,23 +145,32 @@ jobs:
       fail-fast: false
       matrix:
         # One execution budget per target, because a single count cannot be
-        # right for all of them: measured rates on this runner span 33/sec
-        # (FuzzCompactionRecovery, which builds and recovers a whole log per
-        # execution) to 328/sec (FuzzTornLogServesOnlyAPrefix). Each count below
-        # is what that target achieved in the 90s this job used to spend, so the
-        # sweep does the same work it always did. A flat 20000 gave the slowest
-        # target 11 minutes and the fastest one 61 seconds.
+        # right for all of them: these targets differ by an order of magnitude
+        # per execution, FuzzCompactionRecovery building and recovering a whole
+        # log each time. A flat 20000 gave it 11 minutes and gave the cheapest
+        # target 61 seconds.
         #
-        # Re-tune from a green run when a target's cost changes: subtract the
-        # ~40s of checkout, toolchain and build from the job duration, and the
-        # remainder is what these counts bought.
+        # Each count is sized from the SLOWEST rate that target has been
+        # observed at, not its average, so ~90s — what this job used to spend —
+        # is the worst case rather than the lucky one. That distinction is the
+        # whole tuning rule, because throughput is not stable run to run: as the
+        # corpus grows, observed rates moved by up to 5x between two consecutive
+        # runs (FuzzOffloadCrashConsistency 42/sec then 222/sec,
+        # FuzzOffloadCompactionRetention 149/sec then 35/sec). Sizing from one
+        # sample is fitting noise, and doing exactly that is what produced a
+        # 414s job here.
+        #
+        # So these bound WORK, and wall clock varies by design; the job timeout
+        # above is what bounds a slow runner. To re-tune, subtract the ~40s of
+        # checkout, toolchain and build from a job's duration and divide — then
+        # keep the lower of that and the count already here.
         include:
           - {target: FuzzCompactionRecovery, execs: 3000}
+          - {target: FuzzOffloadCompactionRetention, execs: 3000}
           - {target: FuzzOffloadCrashConsistency, execs: 4000}
           - {target: FuzzCorruptedRecordIsNeverServedSilently, execs: 11000}
-          - {target: FuzzOffloadCompactionRetention, execs: 13000}
           - {target: FuzzCorruptDigestNeverChangesTheAnswer, execs: 20000}
-          - {target: FuzzTornLogServesOnlyAPrefix, execs: 29000}
+          - {target: FuzzTornLogServesOnlyAPrefix, execs: 23000}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
