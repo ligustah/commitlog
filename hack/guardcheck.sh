@@ -551,11 +551,6 @@ run_guard "a ceiling of zero is not unset" clean.go   '		spec.ceiling = l.HighWa
 		if spec.Ceiling != nil {'   '		spec.ceiling = l.HighWatermark()
 		if spec.Ceiling != nil && *spec.Ceiling > 0 {'   '^TestACeilingOfZeroCompactsNothing$'
 
-# A negative Ceiling cannot mean anything -- offsets are non-negative -- and it is
-# refused rather than clamped, because clamping is how the old sentinel turned a
-# caller's narrowest bound into the high watermark.
-run_guard "a negative ceiling is refused" clean.go   '	if spec.Ceiling != nil && *spec.Ceiling < 0 {'   '	if false {'   '^TestANegativeCeilingIsRefused$'
-
 # The read retry waits out an amount of TIME, because what it waits for -- Windows
 # reclaiming a dead process's handles -- takes time that depends on the machine,
 # not on how many times it is asked. The neutralization shortens the budget

@@ -50,11 +50,12 @@ library from that fork onward.
   value is a real offset cannot spare its zero to mean unset. Reported by
   durable_streams, who hit it.
 
-  A negative `Ceiling` is now refused by `CleanWithSpec` rather than clamped.
-  Whether a ceiling is really the caller's LSO is a fact only the caller has —
-  the specs treat it as an input they must trust — but its SIGN is not one of
-  those facts, and clamping is precisely how the old sentinel laundered it. Both
-  behaviours have guards.
+  A negative `Ceiling` stays legitimate and is not validated. `HighWatermark`
+  returns -1 for "nothing committed yet" and callers pass it straight through, so
+  -1 arrives whenever a log is cleaned before its first commit — meaning, as any
+  ceiling does, retain everything at or above it. Even the sign of this field is
+  a fact the caller has and this layer does not, which is what
+  `docs/layering.md` already said about it. A guard holds the zero case.
 
 ## v0.54.0 — 2026-08-05
 

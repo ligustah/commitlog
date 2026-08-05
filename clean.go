@@ -12,8 +12,6 @@ package commitlog
 import (
 	"log/slog"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 func (l *commitLog) cleanerLoop() {
@@ -195,17 +193,6 @@ func (l *commitLog) Clean() error {
 // CleanWithSpec applies retention and a transaction-aware compaction pass.
 // See the interface doc for the returned verified floor.
 func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
-	// Almost nothing about a Ceiling is checkable here — whether it is really
-	// the caller's LSO is a fact only the caller has, which is why the specs
-	// treat it as an input they must trust (tla/README.md, docs/layering.md).
-	// Its SIGN is not one of those facts: offsets are non-negative, so a
-	// negative ceiling is not a policy this log disagrees with, it is a value
-	// that cannot mean anything. Refused rather than clamped, because clamping
-	// is how it used to arrive at the high watermark — the widest possible
-	// bound — from the caller's attempt at the narrowest.
-	if spec.Ceiling != nil && *spec.Ceiling < 0 {
-		return -1, errors.Errorf("commitlog: CleanSpec.Ceiling is negative (%d)", *spec.Ceiling)
-	}
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.mu.RLock()

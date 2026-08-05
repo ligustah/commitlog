@@ -60,17 +60,31 @@ func TestNoCeilingCompactsToTheHighWatermark(t *testing.T) {
 			"leaving one copy per key")
 }
 
-// A negative Ceiling is not a policy this log disagrees with, it is a value that
-// cannot mean anything: offsets are non-negative. It is refused rather than
-// clamped, because clamping is exactly how the old sentinel turned a caller's
-// narrowest bound into the widest one.
-func TestANegativeCeilingIsRefused(t *testing.T) {
+// A NEGATIVE Ceiling is legitimate, and this test exists because a first draft
+// of the pointer change refused it as obviously meaningless.
+//
+// It is not meaningless. HighWatermark returns -1 for "nothing is committed
+// yet", and `Ceiling: bound(l.HighWatermark())` is what callers write — so -1
+// arrives whenever a log is cleaned before anything is committed. It means what
+// every ceiling means: retain everything at or above it. Since every offset is
+// above -1, that is "compact nothing", which is exactly right for a log with no
+// committed data.
+//
+// The lesson is the one docs/layering.md already states: Ceiling is an input
+// this layer must trust. Even its sign turns out to be a fact the caller has and
+// this layer does not.
+func TestACeilingBelowEveryOffsetIsLegitimate(t *testing.T) {
 	l, app := specLog(t)
-	app(&Message{Key: []byte("k"), Value: []byte("v1")})
 
+	app(&Message{Key: []byte("k"), Value: []byte("v1")})
+	app(&Message{Key: []byte("k"), Value: []byte("v2")})
+	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
+
+	before := readAllMsgs(t, l)
 	for _, off := range []int64{-1, -42} {
-		verified, err := l.CleanWithSpec(CleanSpec{Ceiling: bound(off)})
-		require.Errorf(t, err, "Ceiling %d was accepted", off)
-		require.Equalf(t, int64(-1), verified, "Ceiling %d returned a floor", off)
+		_, err := l.CleanWithSpec(CleanSpec{Ceiling: bound(off)})
+		require.NoErrorf(t, err, "Ceiling %d was refused", off)
 	}
+	require.Equal(t, before, readAllMsgs(t, l),
+		"a ceiling below every offset compacts nothing")
 }
