@@ -1,6 +1,8 @@
 package commitlog
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,12 +22,16 @@ import (
 // supervisor or a broker does cost that many again, every attempt, for the life
 // of the process.
 //
-// The damage used here is a segment marked offloaded with no SegmentStore to
-// serve it. It is picked for being an unambiguous refusal that owes nothing to
-// any recovery path — the leak belongs to every early return in open(), not to
-// the torn-tail work that happened to expose it, and a test that reached it
-// through a torn tail would stop testing this the moment that case learned to
-// recover.
+// The damage used here is a tier manifest naming a segment whose index was
+// offloaded, opened with no RemoteIndexCache to fetch it. It is picked for being
+// an unambiguous refusal that owes nothing to any recovery path — the leak
+// belongs to every early return in open(), not to the torn-tail work that
+// happened to expose it, and a test that reached it through a torn tail would
+// stop testing this the moment that case learned to recover.
+//
+// It also refuses LAST: the manifest is adopted after every local segment has
+// been opened, so the whole directory is held when the error is returned, which
+// is exactly the suffix that leaked.
 func TestALogThatFailsToOpenHoldsNothingAfterwards(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(Options{Path: dir, MaxSegmentBytes: 1024})
@@ -39,19 +45,26 @@ func TestALogThatFailsToOpenHoldsNothingAfterwards(t *testing.T) {
 	}
 	require.NoError(t, l.Close())
 
-	// Mark the LAST segment offloaded, so every segment below it is opened
-	// before the refusal — that suffix is exactly what leaked.
+	// The manifest describes a segment ABOVE everything local, so every local
+	// segment is opened before adoption reaches it — that suffix is exactly what
+	// leaked.
 	base, _, _ := activeSegment(t, dir)
 	require.Positive(t, base, "the damage must sit above at least one whole segment")
-	marker := filepath.Join(dir, fmt.Sprintf("%020d%s", base, offloadedSuffix))
-	require.NoError(t, os.WriteFile(marker, []byte("{}"), 0o644))
+	store, err := NewFileSegmentStore(filepath.Join(tempDir(t), "store"))
+	require.NoError(t, err)
+	logKey, indexKey := newStoreKeys(base + 1_000_000)
+	body, err := json.Marshal(tierManifest{Version: manifestVersion, Segments: []TierObject{{
+		BaseOffset: base + 1_000_000, LogKey: logKey, IndexKey: indexKey,
+	}}})
+	require.NoError(t, err)
+	require.NoError(t, store.Put(manifestKey, bytes.NewReader(body), int64(len(body))))
 
 	// Repeatedly, because one leaked handle and a hundred are the same bug and
 	// only the hundred is visible: a retry loop is how this is met in practice.
 	for i := range 60 {
-		reopened, err := New(Options{Path: dir, MaxSegmentBytes: 1024})
-		require.Error(t, err, "attempt %d: the log opened despite an offloaded "+
-			"segment it has no store for", i)
+		reopened, err := New(Options{Path: dir, MaxSegmentBytes: 1024, SegmentStore: store})
+		require.Error(t, err, "attempt %d: the log opened despite a manifest "+
+			"segment whose index it cannot fetch", i)
 		require.Nil(t, reopened)
 	}
 

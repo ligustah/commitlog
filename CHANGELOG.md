@@ -29,6 +29,15 @@ library from that fork onward.
   `open()` reads the manifest before the directory now, because the manifest is
   what tells an offloaded segment's local index apart from an orphaned one.
 
+  The marker machinery is gone with it: the suffix, the path, the reader, its
+  key check, and the removal in `segment.Delete`. Two guards named that code and
+  come out with it — a key that leaves the store and a marker that is not JSON
+  were both refused there, and the manifest reader refuses the same two things
+  at the one remaining way in. A log reopened without the store it was offloaded
+  to still refuses to open, and now does so on the descriptor rather than on a
+  marker, which is the right way round: a store-backed log is unopenable without
+  its store whether or not anything has been offloaded yet.
+
 - **Breaking**: a `SegmentStore` must report an absent key as `ErrObjectNotFound`
   from `Size`, `ReadAt` and `Stream`. Absence is no longer inferred from a read
   failing.

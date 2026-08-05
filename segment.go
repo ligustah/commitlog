@@ -3,7 +3,6 @@ package commitlog
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -24,11 +23,6 @@ const (
 	truncatedSuffix = ".truncated"
 	trimmedSuffix   = ".trimmed"
 	indexSuffix     = ".index"
-	// offloadedSuffix marks a sealed segment whose log bytes live in a
-	// SegmentStore rather than a local .log file. The marker file's content is
-	// the store key. Its presence (with the local .log absent) tells open() to
-	// reopen the segment through the store, keeping the local index.
-	offloadedSuffix = ".offloaded"
 )
 
 var (
@@ -160,10 +154,6 @@ func (s *segment) withIndex(fn func(idx *index) error) error {
 	return fn(idx)
 }
 
-func (s *segment) offloadMarkerPath() string {
-	return filepath.Join(s.path, fmt.Sprintf(fileFormat, s.BaseOffset, offloadedSuffix))
-}
-
 // newStoreKeys returns the object keys for one UPLOAD of the segment at
 // baseOffset: the zero-padded base offset, so keys sort and group the way the
 // local log filenames do, followed by a value unique to this attempt.
@@ -188,7 +178,7 @@ func (s *segment) offloadMarkerPath() string {
 // coordination, and unlike coordination it cannot be got subtly wrong.
 //
 // The cost is that a key cannot be recomputed, only remembered. That is already
-// true: the offload marker records keys VERBATIM and is the only thing that
+// true: the tier manifest records keys VERBATIM and is the only thing that
 // resolves them, so nothing anywhere derives a key for an existing object.
 func newStoreKeys(baseOffset int64) (logKey, indexKey string) {
 	u := newUploadID()
@@ -218,74 +208,25 @@ func newUploadID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// offloadMeta is the JSON content of an .offloaded marker. It carries enough to
-// place the segment at boot without reading its (now remote) index: boundaries
-// for offset/time routing, and the log object size so the store backing opens
-// without a size round-trip.
+// offloadMeta is what a segment knows about its own store objects: which keys
+// hold them, and enough to place the segment without reading its (now remote)
+// index — boundaries for offset/time routing, and the log object's size so the
+// store backing opens without a size round-trip.
 //
-// An empty IndexKey still means "index kept local" (option 1) — that is a live
-// configuration, not an old format. What is gone is the marker layout that was
-// the raw log key with no JSON around it.
+// It is an in-process value, never serialised. TierObject is the serialised
+// form, and tierObject/meta convert between them.
+//
+// An empty IndexKey means "index kept local" (option 1).
 type offloadMeta struct {
-	LogKey         string `json:"log_key"`
-	IndexKey       string `json:"index_key,omitempty"` // empty => index kept local (option 1)
-	FirstOffset    int64  `json:"first_offset"`
-	LastOffset     int64  `json:"last_offset"`
-	FirstWriteTime int64  `json:"first_write_time"`
-	LastWriteTime  int64  `json:"last_write_time"`
-	Position       int64  `json:"position"`
-	PhysPosition   int64  `json:"phys_position"`
-	BlockMode      bool   `json:"block_mode"`
-}
-
-// readOffloadMarker reads a .offloaded marker, which is JSON.
-//
-// It used to accept a second layout — the bare log key with no JSON around it —
-// distinguished by whether the first byte was '{'. Nothing has written that
-// since the marker started carrying the segment's boundaries, and keeping the
-// fallback cost more than the format it read: ANY file that failed to start
-// with '{' was accepted as a log key, so a truncated or garbage marker became a
-// segment pointing at an object named after the garbage, rather than an error.
-// Requiring JSON is both the simpler rule and the one that refuses corruption.
-func readOffloadMarker(path string) (offloadMeta, error) {
-	// Recovery-time read of the log's own metadata, so it carries the same
-	// just-killed-process exposure as the high watermark; see ReadFileWithRetry.
-	b, err := ReadFileWithRetry(path)
-	if err != nil {
-		return offloadMeta{}, err
-	}
-	var m offloadMeta
-	if err := json.Unmarshal(b, &m); err != nil {
-		return offloadMeta{}, errors.Wrapf(err, "parse offload marker %s", path)
-	}
-	if err := validMarkerKeys(m); err != nil {
-		return offloadMeta{}, errors.Wrapf(err, "offload marker %s", path)
-	}
-	return m, nil
-}
-
-// validMarkerKeys applies the store-key rule to a marker, for the same reason
-// readTierManifest applies it to a manifest: these keys reach store.Delete.
-//
-// A marker sits in the log's OWN directory, so this is a weaker case than the
-// manifest — anyone who can write here can already remove the log's segments.
-// It is checked anyway because the two routes converge: adoptTierManifestLocked
-// turns manifest entries into markers, and a marker is what openOffloadedSegment
-// reads either way. Validating only the manifest would leave the rule true of
-// one path into s.storeKey and not the other, which is the kind of gap that
-// reads as covered.
-//
-// Refusing here fails open(), which is the right answer for a key naming a path
-// outside the store: a log that will not open is recoverable, and a delete that
-// has already happened is not.
-func validMarkerKeys(m offloadMeta) error {
-	if err := validStoreKey(m.LogKey); err != nil {
-		return err
-	}
-	if m.IndexKey == "" {
-		return nil
-	}
-	return validStoreKey(m.IndexKey)
+	LogKey         string
+	IndexKey       string // empty => index kept local (option 1)
+	FirstOffset    int64
+	LastOffset     int64
+	FirstWriteTime int64
+	LastWriteTime  int64
+	Position       int64
+	PhysPosition   int64
+	BlockMode      bool
 }
 
 // offloadTo uploads the segment's log bytes to store under key and swaps the
@@ -464,12 +405,12 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 }
 
 // openOffloadedSegment opens a sealed segment whose log bytes live in store (the
-// local .log is gone). meta comes from the .offloaded marker, and its IndexKey
-// says where the index is. Empty (option 1) means the local index is still
-// present and is loaded normally, so the segment behaves like any other sealed
-// one for reads. Set (option 2) means the index was offloaded too: boundaries
-// come from the marker, the index stays remote (fetched into cache on first
-// seek), and Index is nil.
+// local .log is gone). meta comes from the tier manifest, and its IndexKey says
+// where the index is. Empty (option 1) means the local index is still present
+// and is loaded normally, so the segment behaves like any other sealed one for
+// reads. Set (option 2) means the index was offloaded too: boundaries come from
+// the manifest, the index stays remote (fetched into cache on first seek), and
+// Index is nil.
 func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compress.Codec, store SegmentStore, meta offloadMeta, cache *RemoteIndexCache) (*segment, error) {
 	s := &segment{
 		maxBytes:    maxBytes,
@@ -481,14 +422,14 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		waiters:     make(map[interface{}]chan struct{}),
 		sealed:      true,
 		store:       store,
-		// Taken from the marker VERBATIM. Nothing recomputes a key from the
+		// Taken from the manifest VERBATIM. Nothing recomputes a key from the
 		// base offset — it could not, since each upload allocated its own — so
 		// objects written by any earlier version stay resolvable.
 		storeKey: meta.LogKey,
 	}
 
 	if meta.IndexKey == "" {
-		// Option 1: index kept local. Size unknown from the marker, so the
+		// Option 1: index kept local. Size unknown from the manifest, so the
 		// backing fetches it; then load the local index as usual.
 		sb, err := newStoreBacking(store, meta.LogKey)
 		if err != nil {
@@ -501,10 +442,10 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		return s, s.setupIndex()
 	}
 
-	// Option 2: index offloaded. The marker records the log object size, so the
+	// Option 2: index offloaded. The manifest records the log object size, so the
 	// backing opens without a size round-trip. initPositions still reconstructs
 	// the block layout from the log (as option 1 does); the boundaries the index
-	// would supply come from the marker instead, and no index is read on open.
+	// would supply come from the manifest instead, and no index is read on open.
 	sb, err := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
 	if err != nil {
 		return nil, errors.Wrap(err, "open store backing")
@@ -1867,9 +1808,9 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 	}
 	if s.indexKey != "" && s.indexCache != nil {
 		// s.indexKey is still the OLD object's key here -- the swap to
-		// newIndexKey happens below, after the marker is committed -- so this
-		// names the entry that is about to describe an object nobody should
-		// read again.
+		// newIndexKey happens below, after the manifest naming it was published
+		// -- so this names the entry that is about to describe an object nobody
+		// should read again.
 		s.indexCache.Invalidate(s.indexKey)
 	}
 
@@ -2269,16 +2210,15 @@ func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entr
 }
 
 // Delete closes the segment and then deletes its log and index files. For an
-// offloaded segment it removes the store object and the .offloaded marker
-// instead of a local .log (the log file is already gone); the local index is
-// still removed.
+// offloaded segment it removes the store object instead of a local .log (the log
+// file is already gone); the local index is still removed.
 //
 // The store object is NOT fenced against the log's current writer identity, and
 // that is deliberate. The writer fence exists for keys a caller learned from a
 // store LISTING, where nothing establishes that the object is theirs (see
 // CommitLog.DeleteStoreObjects). A segment the log HOLDS is a different claim
-// entirely: its own offload marker names the object, which is stronger evidence
-// of ownership than the stamp and is what the log has always acted on.
+// entirely: the manifest it opened over names the object, which is stronger
+// evidence of ownership than the stamp and is what the log has always acted on.
 //
 // Fencing here instead breaks retention outright. After ownership moves, every
 // segment already in the tier carries the PREVIOUS identity's stamp, so a fenced
@@ -2286,11 +2226,11 @@ func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entr
 // grow without bound — strictly worse than the orphaned object the fence was
 // protecting against.
 //
-// The rule this rests on — that a log owns what its own markers name — is the
+// The rule this rests on — that a log owns what its own manifest names — is the
 // same one that lets a caller reclaim superseded keys, and it costs nothing
-// even where several processes share a store: if two of them held markers
-// naming the SAME object, neither could safely delete it whatever stamp it
-// carried, so the fence would not have saved that topology either.
+// even where several processes share a store: if two manifests named the SAME
+// object, neither log could safely delete it whatever stamp it carried, so the
+// fence would not have saved that topology either.
 func (s *segment) Delete() error {
 	s.Lock()
 	defer s.Unlock()
@@ -2326,9 +2266,6 @@ func (s *segment) Delete() error {
 			if err := s.store.Delete(s.indexKey); err != nil {
 				return errors.Wrap(err, "delete offloaded index object")
 			}
-		}
-		if err := os.Remove(s.offloadMarkerPath()); err != nil && !os.IsNotExist(err) {
-			return errors.Wrap(err, "remove offload marker")
 		}
 	} else if exists(s.backing.Name()) {
 		if err := os.Remove(s.backing.Name()); err != nil {

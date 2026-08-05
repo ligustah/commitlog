@@ -429,7 +429,7 @@ func newStoreBacking(store SegmentStore, key string) (*storeBacking, error) {
 
 // newStoreBackingSize opens a read-only backing over key with an already-known
 // object size, skipping the store round-trip newStoreBacking makes. Used on boot
-// from a v2 offload marker (which records the log object's size) so placing a
+// from a tier manifest entry (which records the log object's size) so placing a
 // cold segment touches the store zero times.
 func newStoreBackingSize(store SegmentStore, key string, size int64) (*storeBacking, error) {
 	return &storeBacking{store: store, key: key, size: size, bufOff: -1}, nil

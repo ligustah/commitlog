@@ -29,17 +29,18 @@ const manifestVersion = 1
 // which segment, and the offset and time ranges each covers.
 //
 // It exists because a tier that holds bytes it cannot describe is not
-// self-contained. Without it the mapping from offset range to object lives only
-// in local marker files beside the log, so the objects are readable but
-// uninterpretable on their own — a process that has the store and not the
-// directory cannot say what it is looking at, and the bookkeeping has to be
-// carried out of band by whoever has consensus. That is commitlog's own segment
-// index, and it belongs with the segments.
+// self-contained. Without it the mapping from offset range to object would have
+// to live beside the log, so the objects would be readable but uninterpretable
+// on their own — a process that has the store and not the directory could not
+// say what it was looking at, and the bookkeeping would have to be carried out
+// of band by whoever has consensus. That is commitlog's own segment index, and
+// it belongs with the segments.
 //
-// The manifest is written AFTER the objects it names, so it is the commit point
-// for the tier exactly as the local marker is for the log directory: an object
-// that no manifest names was never committed, which makes a crash between an
-// upload and its manifest a recognisable orphan rather than an ambiguity.
+// It is also the COMMIT POINT for the tier, written after the objects it names
+// and before anything acts on them being committed: an object no manifest names
+// was never committed, which makes a crash between an upload and its publish a
+// recognisable orphan rather than an ambiguity, and local bytes are never
+// dropped against an entry that is not yet published.
 type tierManifest struct {
 	Version  int          `json:"version"`
 	Segments []TierObject `json:"segments"`
@@ -191,8 +192,8 @@ func (l *commitLog) TierManifest() ([]TierObject, error) {
 // offloaded records, without being handed state by anyone.
 //
 // It only ADDS. A base offset the log already holds is left exactly as it is —
-// local bytes and local markers win, because they describe what this process
-// has actually got, and an import is not the place to overrule that.
+// the local segment wins, because it describes what this process has actually
+// got, and an import is not the place to overrule that.
 //
 // Caller holds l.mu.
 func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (int, error) {

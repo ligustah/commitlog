@@ -21,9 +21,9 @@ package commitlog
 //
 // Every upload goes to its own key (see newStoreKeys), so two writers cannot
 // address the same object. There is no lost update to worry about: they produce
-// two objects, each described by its own writer's markers. What that costs is
-// storage, not data — the segment is uploaded twice, and the copy nobody's
-// markers name is garbage until something reclaims it.
+// two objects, and whichever manifest was published last says which one the tier
+// holds. What that costs is storage, not data — the segment is uploaded twice,
+// and the copy the manifest does not name is garbage until something reclaims it.
 //
 // This is also why an overlapping handover is survivable rather than
 // catastrophic. A demoted leader acts on a lagging view of membership and may
@@ -34,13 +34,14 @@ package commitlog
 // The hazard that IS destructive is deletion, and it does not arise from
 // racing: it arrives by permission. DeleteStoreObjects is unfenced — it removes
 // exactly the keys it is given. UnreferencedObjects on a SHARED store lists
-// every object this log's markers do not name, which includes everything
-// another live process uploaded. Feeding one to the other on a shared store
+// every object neither this log's manifest nor its own segments name, which
+// includes everything another live process has uploaded since this log last read
+// the manifest. Feeding one to the other on a shared store
 // deletes data that process is serving. See both methods for the detail; the
 // short version is that "unreferenced by me" is not "unreferenced".
 //
 // A log DOES delete on its own, in one narrow case: an object its own rewrite
-// superseded, which it uploaded, which its markers named, and which nothing it
+// superseded, which it uploaded, which it published, and which nothing it
 // serves reads any more. That is the narrowest claim available — it is not
 // "unreferenced by me", it is "written by me and since replaced by me" — and it
 // only ever happens while this log owns tier writes. A reader in ANOTHER process
@@ -220,13 +221,13 @@ type CommitLog interface {
 	DeleteStoreObjects(keys []string) ([]string, error)
 
 	// TierManifest returns what the STORE says its tier holds, read from the
-	// store itself rather than from this log's local bookkeeping.
+	// store itself rather than from this log's in-memory segments.
 	//
 	// The tier describes itself: a manifest object, written after the segment
 	// objects it names, records which object holds which segment and the offset
 	// and time ranges each covers. So "what is in this tier" is answerable by
-	// anyone holding the store, and a log opening over a store it has no local
-	// markers for picks the offloaded segments up automatically.
+	// anyone holding the store, and a log opening over a store it has never seen
+	// before picks the offloaded segments up automatically.
 	//
 	// Being written last also makes it the tier's commit point: an object no
 	// manifest names was never committed — a crash between an upload and its

@@ -464,27 +464,6 @@ run_guard "tier absence must be asserted" manifest.go   '	if errors.Is(err, ErrO
 # "any JSON object is a manifest".
 run_guard "a manifest must be this version" manifest.go   '	if m.Version != manifestVersion {'   '	if m.Version > manifestVersion {'   '^TestAManifestThatIsNotThisVersionIsRefused$'
 
-# The other route into s.storeKey. A manifest becomes a marker, but offloadTo
-# writes markers directly too, and openOffloadedSegment reads them either way.
-# Neutralizing this leaves the store-key rule true of one path in and not the
-# other -- which is the shape of gap that reads as covered.
-run_guard "offload marker keys checked" segment.go   '	if err := validMarkerKeys(m); err != nil {
-		return offloadMeta{}, errors.Wrapf(err, "offload marker %s", path)
-	}
-	return m, nil'   '	return m, nil'   '^TestAnOffloadMarkerNamingAKeyOutsideTheStoreIsRefused$'
-
-# The marker has ONE layout. It used to have two, and the fallback was reached by
-# "the first byte is not '{'" -- which every corrupt marker also satisfies, so a
-# truncated file became a store key instead of an error. Neutralizing the parse
-# error restores exactly that: garbage in, plausible-looking segment out.
-run_guard "a marker must be JSON" segment.go   '	var m offloadMeta
-	if err := json.Unmarshal(b, &m); err != nil {
-		return offloadMeta{}, errors.Wrapf(err, "parse offload marker %s", path)
-	}'   '	var m offloadMeta
-	if err := json.Unmarshal(b, &m); err != nil {
-		m = offloadMeta{LogKey: string(b)}
-	}'   '^TestAMarkerThatIsNotJSONIsRefused$'
-
 # A missing file must come back immediately, not be waited out. Neutralizing the
 # fast path makes every legitimate absence -- a log with no checkpoint, an
 # unwritten sidecar, a first open -- pay the full retry bound before reporting

@@ -291,7 +291,7 @@ func logIsNew(opts Options) (bool, error) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasSuffix(name, logFileSuffix) || strings.HasSuffix(name, offloadedSuffix) {
+		if strings.HasSuffix(name, logFileSuffix) {
 			return false, nil
 		}
 	}

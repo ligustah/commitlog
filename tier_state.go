@@ -9,23 +9,21 @@ import (
 // TierObject describes where one segment's bytes live in a SegmentStore, and
 // everything needed to place that segment without reading the object.
 //
-// It is the log's tier bookkeeping in transferable form. That bookkeeping is
-// kept LOCALLY (an .offloaded marker per segment), which is fine while one
-// process owns a store and fatal when ownership moves: the new owner holds no
-// markers for anything its predecessor uploaded, so it cannot read those
-// objects through the log, cannot avoid uploading a second copy of the same
-// bytes, and cannot ever reclaim them.
+// It is the log's tier bookkeeping, and the tier manifest is a list of these.
+// Keeping it IN the store is what makes a change of owner work: the new owner
+// reads the manifest and knows what its predecessor uploaded, so it can serve
+// those objects, avoid uploading a second copy of the same bytes, and reclaim
+// them.
 //
-// Handing it over explicitly is what makes a change of owner work. The
-// alternative — the new owner scanning the store and inferring what is current
-// — is not sound in general: every upload allocates its own key, so a store can
-// hold several objects claiming one base offset (a rewrite's predecessor, an
-// upload orphaned by a crash before its marker) with nothing in the store
-// saying which is current. Both cases are invisible to a scan.
+// The alternative — the new owner scanning the store and inferring what is
+// current — is not sound in general: every upload allocates its own key, so a
+// store can hold several objects claiming one base offset (a rewrite's
+// predecessor, an upload orphaned by a crash before its publish) with nothing in
+// the objects themselves saying which is current. Both cases are invisible to a
+// scan.
 //
-// So the state travels with the ownership decision, from whatever makes that
-// decision. It is the same division as CleanSpec's Ceiling: the log honours a
-// decision it cannot itself make.
+// It is also the form the type is exported in, so a caller that moves ownership
+// can hand the state over directly rather than through the store.
 type TierObject struct {
 	// BaseOffset identifies the segment. It is the key the caller matches on.
 	BaseOffset int64
@@ -245,9 +243,8 @@ func (l *commitLog) DeleteStoreObjects(keys []string) ([]string, error) {
 	return deleted, nil
 }
 
-// UnreferencedObjects lists store objects no marker of this log names. See the
-// interface doc — in particular, that "unreferenced" is judged only from THIS
-// log's markers.
+// UnreferencedObjects lists store objects nothing this log can see names. See
+// the interface doc — in particular, what "unreferenced" is judged from.
 func (l *commitLog) UnreferencedObjects() ([]string, error) {
 	if l.SegmentStore == nil {
 		return nil, nil

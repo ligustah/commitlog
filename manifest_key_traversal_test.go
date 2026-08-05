@@ -17,9 +17,8 @@ import (
 // join stays within dir." That holds for keys this package MINTS — newStoreKeys
 // emits "%020d.<rand><suffix>". It does not hold for keys that arrive from
 // OUTSIDE, and the tier manifest is exactly that: readTierManifest decodes
-// LogKey and IndexKey out of an object in the store, adoptTierManifestLocked
-// writes them into a local offload marker, and openOffloadedSegment lands them
-// in s.storeKey / s.indexKey. From there segment.Delete calls
+// LogKey and IndexKey out of an object in the store and openOffloadedSegment
+// lands them in s.storeKey / s.indexKey. From there segment.Delete calls
 // store.Delete(s.storeKey), which for FileSegmentStore is an os.Remove of the
 // joined path.
 //
@@ -29,8 +28,10 @@ import (
 // and "delete a path outside the store directory" are different powers, and only
 // the first is one the store is entitled to.
 //
-// The manifest is where the check belongs: refuse a key this package would never
-// have minted, at the point it enters.
+// The manifest is where the check belongs, and it is the only place it needs to
+// be: the manifest is the sole record of an offload, so every store key a
+// segment holds came through here. Refuse a key this package would never have
+// minted, at the point it enters.
 func TestATierManifestNamingAKeyOutsideTheStoreIsRefused(t *testing.T) {
 	dir := tempDir(t)
 	defer remove(t, dir)
@@ -78,81 +79,6 @@ func TestATierManifestNamingAKeyOutsideTheStoreIsRefused(t *testing.T) {
 			continue
 		}
 		require.Errorf(t, err, "manifest IndexKey %q was accepted", bad)
-	}
-}
-
-// The other route into s.storeKey. A manifest becomes a marker, but a marker is
-// also written directly by offloadTo, and openOffloadedSegment reads it either
-// way — so validating only the manifest would leave the rule true of one path
-// and not the other.
-//
-// A marker lives in the log's own directory, so this is weaker than the manifest
-// case: anyone who can write here can already delete the log's segments. It is
-// checked so that "a store key names an object inside the store" holds wherever
-// a store key comes from, rather than in the one place it was noticed.
-func TestAnOffloadMarkerNamingAKeyOutsideTheStoreIsRefused(t *testing.T) {
-	dir := tempDir(t)
-	defer remove(t, dir)
-
-	path := filepath.Join(dir, "00000000000000000000"+offloadedSuffix)
-	body, err := json.Marshal(offloadMeta{LogKey: "../escape"})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, body, 0o644))
-	_, err = readOffloadMarker(path)
-	require.Error(t, err, "a marker naming a path outside the store was accepted")
-
-	// The index key is the second way out, and it is optional — empty means the
-	// index stayed local — so it needs its own case rather than riding along.
-	body, err = json.Marshal(offloadMeta{LogKey: "log", IndexKey: "../escape"})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, body, 0o644))
-	_, err = readOffloadMarker(path)
-	require.Error(t, err, "a marker whose INDEX key left the store was accepted")
-
-	// A key this package would have minted still round-trips.
-	logKey, indexKey := newStoreKeys(0)
-	body, err = json.Marshal(offloadMeta{LogKey: logKey, IndexKey: indexKey})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, body, 0o644))
-	meta, err := readOffloadMarker(path)
-	require.NoError(t, err)
-	require.Equal(t, logKey, meta.LogKey)
-	require.Equal(t, indexKey, meta.IndexKey)
-}
-
-// The marker used to have two layouts: JSON, or the bare log key. Which one you
-// got was decided by whether the first byte was '{' — so every file that was not
-// JSON took the second branch, including files that were not markers at all.
-//
-// Nothing has written the bare layout since the marker started carrying the
-// segment's boundaries, so the branch existed only to read data no one has. What
-// it actually did was launder corruption: a truncated write, a half-flushed
-// file, a marker filled with NULs — all of them satisfy "does not start with
-// '{'", so all of them opened as a segment whose store key was the garbage.
-//
-// This is the same shape as the epoch checkpoint's signed parse: the parse is
-// the only integrity check the file gets, so a parse that accepts anything is no
-// check at all. One layout, and a marker that is not it is an error.
-func TestAMarkerThatIsNotJSONIsRefused(t *testing.T) {
-	dir := tempDir(t)
-	defer remove(t, dir)
-
-	path := filepath.Join(dir, "00000000000000000000"+offloadedSuffix)
-	logKey, _ := newStoreKeys(0)
-
-	// Each of these was previously accepted as a log key, silently.
-	for name, body := range map[string][]byte{
-		"the bare log key":  []byte(logKey),
-		"empty":             {},
-		"NUL-filled":        make([]byte, 64),
-		"truncated JSON":    []byte(`{"log_key":"` + logKey),
-		"unrelated content": []byte("not a marker at all\n"),
-	} {
-		t.Run(name, func(t *testing.T) {
-			require.NoError(t, os.WriteFile(path, body, 0o644))
-			_, err := readOffloadMarker(path)
-			require.Error(t, err, "a marker that is not JSON was read as a store key")
-		})
 	}
 }
 

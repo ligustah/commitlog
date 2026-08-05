@@ -2,7 +2,6 @@ package commitlog
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -125,6 +124,14 @@ func TestOffload_ReadThroughAndRecovery(t *testing.T) {
 
 // Reopening a log that has offloaded segments without a SegmentStore is a clear
 // error, not a silent data loss.
+//
+// Nothing local says the segments were offloaded — the manifest is the only
+// record of that, and it is in the store this open does not have. What refuses
+// is the DESCRIPTOR, which is in the store too: a directory that plainly holds a
+// log, with no descriptor to say what log it is, is not something to guess at.
+// So the refusal does not depend on noticing the offload, which is the right way
+// round: a store-backed log opened without its store is unopenable whether or
+// not anything has been offloaded yet.
 func TestOffload_ReopenWithoutStoreErrors(t *testing.T) {
 	dir := t.TempDir()
 	l, _ := offloadTestLog(t, dir)
@@ -142,8 +149,8 @@ func TestOffload_ReopenWithoutStoreErrors(t *testing.T) {
 	}
 }
 
-// TruncateBefore over offloaded segments removes both the store objects and the
-// local index/marker.
+// TruncateBefore over offloaded segments removes the store objects, and the
+// manifest stops naming them.
 func TestOffload_TruncateRemovesStoreObjects(t *testing.T) {
 	dir := t.TempDir()
 	l, store := offloadTestLog(t, dir)
@@ -172,14 +179,20 @@ func TestOffload_TruncateRemovesStoreObjects(t *testing.T) {
 			t.Fatalf("store objects not reclaimed: before=%d after=%d", len(before), len(after))
 		}
 	}
-	// Marker files for deleted segments are gone too.
-	markers, _ := filepath.Glob(filepath.Join(dir, "log", "*"+offloadedSuffix))
-	for _, m := range markers {
-		if _, err := os.Stat(m); err == nil {
-			// A surviving marker must correspond to a surviving store object.
-			if len(after) == 0 {
-				t.Fatalf("stale offload marker %s with empty store", m)
-			}
+	// And the manifest no longer names them. It is the only record of an
+	// offload, so an entry outliving its object is a dangling reference: a
+	// reader that trusts the manifest opens a key that is gone.
+	live := map[string]bool{}
+	for _, k := range after {
+		live[k] = true
+	}
+	manifest, err := l.TierManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range manifest {
+		if !live[o.LogKey] {
+			t.Fatalf("manifest still names %s, which the truncate deleted", o.LogKey)
 		}
 	}
 }

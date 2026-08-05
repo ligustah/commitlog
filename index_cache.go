@@ -109,7 +109,7 @@ func (c *RemoteIndexCache) cacheFileName(objectKey string) string {
 // offset 5 began at 7, in order, with no error.
 //
 // An object key cannot do that. newStoreKeys mints a fresh 128-bit id for every
-// upload attempt, and openOffloadedSegment takes the key from the offload marker
+// upload attempt, and openOffloadedSegment takes the key from the manifest
 // verbatim, so it is unique across logs and across incarnations by construction —
 // with no nonce to persist and no invalidation for a caller to remember.
 func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey string, baseOffset int64) (*index, func(), error) {
