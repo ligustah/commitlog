@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.52.0 — 2026-08-05
 
 - **Breaking**: a log with a `SegmentStore` keeps its descriptor IN the store,
   beside the tier manifest, not in its local directory. An existing local
