@@ -441,6 +441,24 @@ run_guard "newness comes from the store" descriptor.go   '	if opts.SegmentStore 
 		_, err := readStoreDescriptor(opts.SegmentStore)'   '	if false {
 		_, err := readStoreDescriptor(opts.SegmentStore)'   '^TestAdoptingATierIsCheckedAgainstTheLogsOwnSettings$'
 
+# Absence is an ANSWER here, so only the store may give it. Neutralizing this
+# restores the inference that shipped -- any Size failure means "no descriptor"
+# -- and a log with no descriptor is a NEW log, which records the settings it
+# was handed without comparing them to anything. Same ending as the guard above,
+# reached from a bad minute for the store rather than an empty directory.
+run_guard "descriptor absence must be asserted" descriptor.go   '	if errors.Is(err, ErrObjectNotFound) {
+		return descriptor{}, os.ErrNotExist
+	}'   '	if err != nil {
+		return descriptor{}, os.ErrNotExist
+	}'   '^TestAStoreThatCannotAnswerIsNotANewLog$'
+
+# The same inference in the manifest reader, with a worse ending. "No manifest"
+# means an empty tier, an empty tier means this log holds nothing offloaded, and
+# the next publish rebuilds the manifest without those entries -- after which
+# every object they named is unreferenced, and the collect-then-delete cycle the
+# API documents removes live data.
+run_guard "tier absence must be asserted" manifest.go   '	if errors.Is(err, ErrObjectNotFound) {'   '	if err != nil {'   '^TestAStoreThatCannotAnswerIsNotAnEmptyTier$'
+
 # The version field is the manifest's whole integrity check, and `>` let version
 # 0 -- what an absent field decodes to -- through. Restoring `>` is restoring
 # "any JSON object is a manifest".

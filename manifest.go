@@ -76,13 +76,20 @@ func (l *commitLog) writeTierManifest() error {
 // has no manifest, which means an empty tier.
 func readTierManifest(store SegmentStore) ([]TierObject, error) {
 	size, err := store.Size(manifestKey)
-	if err != nil {
+	if errors.Is(err, ErrObjectNotFound) {
 		// Absent is not an error: a store with nothing offloaded has no
-		// manifest.
+		// manifest. Only the store may say this, and only by saying it — any
+		// other failure means we do not know what the tier holds, and "we do
+		// not know" must not read as "nothing".
 		return nil, nil
 	}
+	if err != nil {
+		return nil, errors.Wrap(err, "stat tier manifest")
+	}
 	if size <= 0 {
-		return nil, nil
+		// writeTierManifest always writes a JSON object, so a zero-length one
+		// was not written by this package.
+		return nil, errors.New("commitlog: tier manifest is empty")
 	}
 	body := make([]byte, size)
 	if _, err := store.ReadAt(manifestKey, body, 0); err != nil {

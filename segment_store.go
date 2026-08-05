@@ -116,6 +116,19 @@ func (l *localBacking) Size() (int64, error) {
 // retry.
 var ErrRestoreRequired = errors.New("commitlog: segment offloaded to a restore-required tier; restore before reading")
 
+// ErrObjectNotFound is returned by Size, ReadAt and Stream when the store holds
+// no object under the key. It is the ONLY way a store may say "absent", and
+// implementations must return it (possibly wrapped, so callers use errors.Is)
+// rather than any other error.
+//
+// This exists because absence is an ANSWER here, not a failure. A store with no
+// descriptor means the log is new, and a new log records its settings without
+// checking them. A store with no manifest means the tier is empty, and an empty
+// tier means every object in the store is garbage. Both are correct conclusions
+// from a real absence and catastrophic ones from a timeout, so a caller must
+// never be able to reach them by treating any error as absence.
+var ErrObjectNotFound = errors.New("commitlog: no such object in the segment store")
+
 // SegmentStore is a backing store for offloaded (sealed, read-only) segment log
 // objects — a tier below local disk. A sealed segment's log bytes are put under
 // a key; reads fetch byte ranges from that key. The filesystem implementation
@@ -141,11 +154,12 @@ type SegmentStore interface {
 	Put(key string, r io.Reader, size int64) error
 	// ReadAt reads len(p) bytes at off from the object under key, with
 	// io.ReaderAt semantics (a short read returns io.EOF). A restore-required
-	// store returns ErrRestoreRequired.
+	// store returns ErrRestoreRequired; an absent key returns ErrObjectNotFound.
 	ReadAt(key string, p []byte, off int64) (int, error)
 	// Stream returns a reader over the object under key from off to its end,
 	// for a caller that knows it is going to read all of it. The caller must
-	// Close it. A restore-required store returns ErrRestoreRequired.
+	// Close it. A restore-required store returns ErrRestoreRequired; an absent
+	// key returns ErrObjectNotFound.
 	//
 	// This exists because ReadAt alone cannot express "I want the whole
 	// object", and against an object store that distinction is the bill: cost
@@ -161,7 +175,10 @@ type SegmentStore interface {
 	// os.Open — which keeps implementations free of adapter code. Put already
 	// takes an io.Reader, so the two directions stay symmetric.
 	Stream(key string, off int64) (io.ReadCloser, error)
-	// Size returns the byte length of the object under key.
+	// Size returns the byte length of the object under key, or
+	// ErrObjectNotFound if there is none. This is how the package asks whether
+	// an object exists, so returning any other error for an absent key makes
+	// absence indistinguishable from failure.
 	Size(key string) (int64, error)
 	// List returns the keys present in the store.
 	List() ([]string, error)
@@ -264,6 +281,9 @@ func (s *FileSegmentStore) ReadAt(key string, p []byte, off int64) (int, error) 
 		return 0, err
 	}
 	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return 0, ErrObjectNotFound
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -277,6 +297,9 @@ func (s *FileSegmentStore) Stream(key string, off int64) (io.ReadCloser, error) 
 		return nil, err
 	}
 	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, ErrObjectNotFound
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -295,6 +318,9 @@ func (s *FileSegmentStore) Size(key string) (int64, error) {
 		return 0, err
 	}
 	fi, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return 0, ErrObjectNotFound
+	}
 	if err != nil {
 		return 0, err
 	}

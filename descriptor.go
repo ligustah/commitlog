@@ -132,12 +132,21 @@ func readDescriptor(path string) (descriptor, error) {
 // tells "this store has never held a log" from "the descriptor is unreadable"
 // exactly as it does for the file.
 //
-// Absence is inferred from Size failing, which is the same signal readTierManifest
-// uses for a missing manifest: the SegmentStore interface has no exists().
+// Absence must be ASSERTED by the store, via ErrObjectNotFound. Any other
+// failure is propagated, because the caller acts on absence: logIsNew turns it
+// into "this log is new", and a new log records the settings it was handed
+// without checking them. A store that timed out would otherwise let a node
+// adopting someone else's tier install a retention policy nobody configured.
 func readStoreDescriptor(store SegmentStore) (descriptor, error) {
 	size, err := store.Size(descriptorKey)
-	if err != nil || size <= 0 {
+	if errors.Is(err, ErrObjectNotFound) {
 		return descriptor{}, os.ErrNotExist
+	}
+	if err != nil {
+		return descriptor{}, errors.Wrap(err, "stat log descriptor in store")
+	}
+	if size <= 0 {
+		return descriptor{}, errors.New("commitlog: log descriptor in store is empty")
 	}
 	body := make([]byte, size)
 	if _, err := store.ReadAt(descriptorKey, body, 0); err != nil {

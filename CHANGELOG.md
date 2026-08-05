@@ -7,6 +7,26 @@ library from that fork onward.
 
 ## Unreleased
 
+- **Breaking**: a `SegmentStore` must report an absent key as `ErrObjectNotFound`
+  from `Size`, `ReadAt` and `Stream`. Absence is no longer inferred from a read
+  failing.
+
+  It was, for want of an `exists()` on the interface — the comment on
+  `readStoreDescriptor` said so. Both callers act on absence, and both act on it
+  in a way that is only correct when the absence is real. No descriptor means the
+  log is NEW, and a new log records the settings it was handed without comparing
+  them to anything: v0.52.0's bug, arriving through a timeout instead of an empty
+  directory. No manifest means the tier is EMPTY, so the log adopts nothing and
+  the next publish rebuilds the manifest without those entries — after which
+  every object they named is unreferenced, and the collect-then-`DeleteStoreObjects`
+  cycle this API documents deletes live data.
+
+  The protection for the second one was already written and already correct.
+  `UnreferencedObjects` refuses to build a garbage list it cannot check against
+  the manifest, and explains why beside the code. It was unreachable: the reader
+  had turned the failure into an ordinary empty manifest before the caller could
+  see it. A guard now holds each half open.
+
 - **Internal**: documentation only. Round 2 of the complexity sweep found the
   same thing round 1 did, in prose rather than in code: comments that describe a
   format, an API or a tolerance this package no longer has.
