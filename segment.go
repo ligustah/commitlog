@@ -491,10 +491,13 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 	s.blocksPending = meta.BlockMode
 
 	if meta.IndexKey == "" {
-		// Option 1: index kept local, loaded as usual. setupIndex recovers a
-		// block segment's last offset by decoding its final block, so for those
-		// the table is built here after all — the deferral wins the raw case and
-		// all of option 2, and this path still skips the stat and the magic read.
+		// Option 1: index kept local, loaded as usual — which means setupIndex,
+		// which means fetching the block table now rather than at the first read.
+		// That is a few KB per segment, and it is not avoidable here: this index
+		// is on LOCAL DISK, so a crash can leave it torn or ahead of the object,
+		// and setupIndex validating it against the log is exactly the recovery
+		// that catches it. Option 2's index is in the store, written once, and
+		// has nothing to recover — which is why that path reads nothing at all.
 		return s, s.setupIndex()
 	}
 
