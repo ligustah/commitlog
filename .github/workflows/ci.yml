@@ -151,5 +151,16 @@ jobs:
         with:
           go-version: stable
           cache: true
-      - name: Fuzz ${{ matrix.target }} (90s)
-        run: go test -run '^$' -fuzz='^${{ matrix.target }}$' -fuzztime=90s -timeout=15m .
+      # Bounded by EXECUTIONS, not by wall clock, and the difference is not a
+      # preference. A duration budget makes the fuzzing coordinator run under a
+      # context with a deadline, and a worker still executing when that deadline
+      # lands surfaces the cancellation as a test failure: a bare "context
+      # deadline exceeded" at exactly elapsed 1m30s, with no failing input
+      # written to testdata/fuzz. That is a red job with nothing to pull, on any
+      # target, and it cost re-runs on green commits. An execution budget builds
+      # no deadline at all, so there is nothing to race. It also makes the smoke
+      # test do the same WORK on every runner rather than the same wall clock,
+      # which is what a fixed budget was for; the job timeout above is what keeps
+      # a slow runner bounded.
+      - name: Fuzz ${{ matrix.target }} (20000 execs)
+        run: go test -run '^$' -fuzz='^${{ matrix.target }}$' -fuzztime=20000x -timeout=15m .
