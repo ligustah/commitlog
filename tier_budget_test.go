@@ -74,7 +74,7 @@ func TestTierBudgetDoesNotStarveLocalCompaction(t *testing.T) {
 	// A tier budget already spent, with local rewrites still affordable.
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
-		Ceiling:           bound(hw + 1),
+		Ceiling:           At(hw + 1),
 		TombstoneGCBelow:  hw + 1,
 		RewriteBudget:     time.Hour,
 		TierRewriteBudget: time.Nanosecond,
@@ -149,7 +149,7 @@ func TestTierBudgetDefaultsToTheRewriteBudget(t *testing.T) {
 	// No tier budget set, a generous shared one: tiered rewrites still happen.
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
-		Ceiling:          bound(hw + 1),
+		Ceiling:          At(hw + 1),
 		TombstoneGCBelow: hw + 1,
 		RewriteBudget:    time.Hour,
 	})

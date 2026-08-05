@@ -54,6 +54,38 @@ func (l *commitLog) cleanerLoop() {
 	}
 }
 
+// Bound is an optional log offset. Its zero value is "no bound supplied", which
+// is what a CleanSpec literal that omits the field gets, and At(0) is a bound AT
+// offset zero — a distinction the fields using it cannot live without.
+//
+// It exists because those fields were an int64 whose zero value had to mean
+// unset, and that was a live bug: 0 is the narrowest ceiling a caller can ask
+// for and the strictest floor, so the one spec asking for maximum protection was
+// the one that got none. A *int64 fixes that and brings its own problems — a nil
+// to handle at every use, an address to take at every call site, and a pointer
+// the caller can mutate after handing it over. A two-word value has none of
+// those: it is comparable, it copies, and there is nothing to dereference.
+type Bound struct {
+	off int64
+	set bool
+}
+
+// At returns a Bound at off. Any offset is valid, including 0 and including a
+// negative one: HighWatermark() answers -1 for "nothing committed yet", callers
+// pass that straight through, and there it correctly means "bound everything".
+func At(off int64) Bound { return Bound{off: off, set: true} }
+
+// Get returns the offset and whether one was supplied.
+func (b Bound) Get() (int64, bool) { return b.off, b.set }
+
+// Or returns the offset, or fallback when no bound was supplied.
+func (b Bound) Or(fallback int64) int64 {
+	if !b.set {
+		return fallback
+	}
+	return b.off
+}
+
 // CleanSpec parameterizes a transaction-aware clean. The commitlog provides
 // the mechanism; a transactional layer (e.g. durable_streams) supplies the
 // policy: which records' transactions aborted, where the decided prefix
@@ -61,21 +93,20 @@ func (l *commitLog) cleanerLoop() {
 type CleanSpec struct {
 	// Ceiling is the compaction bound: records at or above it are always
 	// retained verbatim and never counted latest-per-key (they may be
-	// undecided). Transactional callers pass their LSO so open transactions can
-	// never shadow or be compacted. Nil — the zero value — means no bound was
-	// supplied and the pass uses the high watermark, which is what a
-	// non-transactional caller wants: everything is decided.
+	// undecided). Transactional callers pass At(lso) so open transactions can
+	// never shadow or be compacted. The zero Bound means no bound was supplied
+	// and the pass uses the high watermark, which is what a non-transactional
+	// caller wants: everything is decided.
 	//
-	// A POINTER for the same reason RetentionFloor is one, and it is worth
-	// stating twice because the sentinel version of this field was a live bug.
-	// Zero is a REAL ceiling — "compact nothing" — and it is precisely what a
-	// caller whose oldest open transaction begins at offset 0 must pass. The
-	// field was an int64 whose zero value had to mean unset, so that caller
-	// silently got the high watermark instead: the one spec that asked for
-	// maximum protection was the one that compacted undecided records, and
-	// TestCleanSpecCeilingAboveUndecidedLosesKey is what that costs. Nil cannot
-	// be confused with an offset.
-	Ceiling *int64
+	// A Bound rather than an int64, for the reason Bound documents and which is
+	// worth stating twice because the sentinel version of this field was a live
+	// bug. At(0) is a REAL ceiling — "compact nothing" — and it is precisely what
+	// a caller whose oldest open transaction begins at offset 0 must pass. When
+	// the field was an int64 whose zero value meant unset, that caller silently
+	// got the high watermark instead: the one spec that asked for maximum
+	// protection was the one that compacted undecided records, and
+	// TestCleanSpecCeilingAboveUndecidedLosesKey is what that costs.
+	Ceiling Bound
 	// ceiling is Ceiling resolved against the log's high watermark. clean() sets
 	// it and the compaction pass reads only it, so no code below this line has
 	// to know the fallback or handle a nil.
@@ -154,8 +185,8 @@ type CleanSpec struct {
 	TierWriter string
 	// RetentionFloor is the lowest offset RETENTION may not delete: a segment
 	// is eligible for deletion only if every record in it lies strictly below
-	// it. Nil — the zero value — means no floor, which is what every caller had
-	// before this existed.
+	// it. The zero Bound means no floor, which is what every caller had before
+	// this existed.
 	//
 	// It bounds the DELETE cleaner only. Compaction is already bounded by
 	// Ceiling, and a caller's floor is at or above its ceiling by construction:
@@ -168,13 +199,12 @@ type CleanSpec struct {
 	// retention limit had its own staged records collected out from under it,
 	// and its commit then referred to offsets that no longer existed.
 	//
-	// A POINTER rather than a sentinel, deliberately. Every obvious sentinel is
-	// a real floor: 0 protects the whole log, which is exactly what a
-	// transaction that began at offset 0 needs, and a caller writing
-	// `RetentionFloor: floor` from a tracker that returns 0 for that case would
-	// silently get "no protection" from an int64 field whose zero value had to
-	// mean unset. Nil cannot be confused with an offset.
-	RetentionFloor *int64
+	// A Bound rather than a sentinel, deliberately. Every obvious sentinel is a
+	// real floor: 0 protects the whole log, which is exactly what a transaction
+	// that began at offset 0 needs, and a caller writing `RetentionFloor: At(f)`
+	// from a tracker that returns 0 for that case would silently get "no
+	// protection" from an int64 field whose zero value had to mean unset.
+	RetentionFloor Bound
 }
 
 // Clean applies retention and compaction rules against the log, if applicable.
@@ -332,10 +362,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int6
 	verified := int64(-1)
 	if l.Compact {
 		// spec is a value, so this resolution is this pass's alone.
-		spec.ceiling = l.HighWatermark()
-		if spec.Ceiling != nil {
-			spec.ceiling = *spec.Ceiling
-		}
+		spec.ceiling = spec.Ceiling.Or(l.HighWatermark())
 		compacted, v, err := l.compactCleaner.CompactSpec(spec, cleaned)
 		if err != nil {
 			// Keep the delete stage's result: its removals are already on

@@ -89,7 +89,7 @@ func TestCompactionDoesNotResignCorruptRecords(t *testing.T) {
 	// would wedge an unattended cleaner behind one bad record.
 	hw := cl2.HighWatermark()
 	_, err = cl2.CleanWithSpec(CleanSpec{
-		Ceiling:      bound(hw + 1),
+		Ceiling:      At(hw + 1),
 		StripBelow:   hw + 1,
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	})

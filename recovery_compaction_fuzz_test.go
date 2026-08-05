@@ -180,7 +180,7 @@ func FuzzCompactionRecovery(f *testing.F) {
 
 		hw := l.HighWatermark()
 		spec := CleanSpec{
-			Ceiling:            bound(hw + 1),
+			Ceiling:            At(hw + 1),
 			StripBelow:         hw + 1,
 			StripHeaders:       []string{"pid", "epoch", "seq"},
 			Aborted:            func(off int64) bool { return aborted[off] },

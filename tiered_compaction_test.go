@@ -65,7 +65,7 @@ func TestCompactionRewritesOffloadedSegments(t *testing.T) {
 
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
-		Ceiling:          bound(hw + 1),
+		Ceiling:          At(hw + 1),
 		TombstoneGCBelow: hw + 1,
 	})
 	require.NoError(t, err)
@@ -108,7 +108,7 @@ func TestCompactionRewritesOffloadedSegments(t *testing.T) {
 	// A later pass reclaims them. Nothing holds the backings by now, so this one
 	// deletes rather than deferring again — the queue drains on its own instead
 	// of growing until a caller thinks to empty it.
-	_, err = l.CleanWithSpec(CleanSpec{Ceiling: bound(hw + 1), TombstoneGCBelow: hw + 1})
+	_, err = l.CleanWithSpec(CleanSpec{Ceiling: At(hw + 1), TombstoneGCBelow: hw + 1})
 	require.NoError(t, err)
 
 	keys, err = store.List()
@@ -146,7 +146,7 @@ func TestCompactionWithoutAStoreQueuesNothingToReclaim(t *testing.T) {
 	}
 	l.SetHighWatermark(last)
 
-	_, err := l.CleanWithSpec(CleanSpec{Ceiling: bound(last + 1)})
+	_, err := l.CleanWithSpec(CleanSpec{Ceiling: At(last + 1)})
 	require.NoError(t, err)
 	l.tierMu.Lock()
 	require.Empty(t, l.reclaim, "no store means nothing can be superseded")

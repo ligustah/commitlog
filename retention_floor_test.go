@@ -18,10 +18,6 @@ import (
 // whole of it lies strictly below the floor. Deletion is per segment, so a
 // segment holding one protected record is protected entire.
 
-// floorOf is the pointer the spec takes. A helper because the pointer is the
-// point — see CleanSpec.RetentionFloor for why this is not an int64 field.
-func floorOf(off int64) *int64 { return &off }
-
 // oneMessagePerSegment builds n segments at base offsets 0..n-1, one record
 // each, so a segment's base offset IS the offset it holds. That makes every
 // assertion below a statement about offsets rather than about indices.
@@ -47,7 +43,7 @@ func TestTheMessageLimitStopsAtTheRetentionFloor(t *testing.T) {
 	// Unbounded, this limit keeps five segments (offsets 15..19) — that is what
 	// the same fixture does with a nil floor, and it is what the floor has to
 	// override rather than coincide with.
-	actual, err := cleaner.Clean(segs, false, floorOf(12))
+	actual, err := cleaner.Clean(segs, false, At(12))
 	require.NoError(t, err)
 
 	require.Equal(t, int64(12), actual[0].BaseOffset,
@@ -66,7 +62,7 @@ func TestTheBytesLimitStopsAtTheRetentionFloor(t *testing.T) {
 	opts.Retention.Bytes = 2 * segs[0].Position()
 	cleaner := newDeleteCleaner(opts)
 
-	actual, err := cleaner.Clean(segs, false, floorOf(7))
+	actual, err := cleaner.Clean(segs, false, At(7))
 	require.NoError(t, err)
 
 	require.Equal(t, int64(7), actual[0].BaseOffset)
@@ -94,7 +90,7 @@ func TestTheAgeLimitStopsAtTheRetentionFloor(t *testing.T) {
 	}
 
 	// Unbounded, this expires the first ten (see TestDeleteCleanerAge).
-	actual, err := cleaner.Clean(segs, false, floorOf(4))
+	actual, err := cleaner.Clean(segs, false, At(4))
 	require.NoError(t, err)
 
 	require.Equal(t, int64(4), actual[0].BaseOffset)
@@ -105,7 +101,7 @@ func TestTheAgeLimitStopsAtTheRetentionFloor(t *testing.T) {
 // began at offset 0 is an ordinary transaction — the first one a fresh log
 // ever sees — and it is the case every plausible int64 sentinel would get
 // wrong, because 0 is both "the beginning of the log" and the zero value of
-// the field. That is why the spec takes a pointer, and this is the test that
+// the field. That is why the spec takes a Bound, and this is the test that
 // fails if someone later decides a plain int64 would have been tidier.
 func TestARetentionFloorOfZeroProtectsTheWholeLog(t *testing.T) {
 	opts := deleteCleanerOptions{Name: "floor"}
@@ -115,7 +111,7 @@ func TestARetentionFloorOfZeroProtectsTheWholeLog(t *testing.T) {
 
 	segs := oneMessagePerSegment(t, 20)
 
-	actual, err := cleaner.Clean(segs, false, floorOf(0))
+	actual, err := cleaner.Clean(segs, false, At(0))
 	require.NoError(t, err)
 	require.Len(t, actual, 20, "a floor at offset 0 leaves nothing eligible")
 	require.Equal(t, segs, actual)
@@ -132,7 +128,7 @@ func TestNoRetentionFloorLeavesTheLimitsAlone(t *testing.T) {
 
 	segs := oneMessagePerSegment(t, 20)
 
-	actual, err := cleaner.Clean(segs, false, nil)
+	actual, err := cleaner.Clean(segs, false, Bound{})
 	require.NoError(t, err)
 	require.Len(t, actual, 5)
 	require.Equal(t, int64(15), actual[0].BaseOffset)
@@ -148,7 +144,7 @@ func TestAFloorAboveTheLogStillKeepsTheActiveSegment(t *testing.T) {
 
 	segs := oneMessagePerSegment(t, 5)
 
-	actual, err := cleaner.Clean(segs, false, floorOf(9999))
+	actual, err := cleaner.Clean(segs, false, At(9999))
 	require.NoError(t, err)
 	require.Len(t, actual, 1)
 	require.Equal(t, int64(4), actual[0].BaseOffset)
@@ -185,7 +181,7 @@ func TestTierRetentionStopsAtTheRetentionFloor(t *testing.T) {
 	c := tierCleaner(t, func(o *deleteCleanerOptions) {
 		o.Retention.TierBytes = segs[2].Position()
 	})
-	out, err := c.Clean(segs, false, floorOf(15))
+	out, err := c.Clean(segs, false, At(15))
 	require.NoError(t, err)
 
 	require.True(t, deleted[int64(0)], "the oldest object is entirely below the floor")
@@ -220,7 +216,7 @@ func TestAFloorInTheLocalHalfLeavesTheTierEligible(t *testing.T) {
 	// is at offset 25, in the last (local, active) segment — above every tiered
 	// record, so the tier is unconstrained by it.
 	c := tierCleaner(t, func(o *deleteCleanerOptions) { o.Retention.TierBytes = 1 })
-	_, err := c.Clean(segs, false, floorOf(25))
+	_, err := c.Clean(segs, false, At(25))
 	require.NoError(t, err)
 
 	require.True(t, deleted[int64(0)])
@@ -249,7 +245,7 @@ func TestCleanWithSpecHonoursTheRetentionFloor(t *testing.T) {
 	require.Zero(t, l.OldestOffset(), "the fixture must start with a full history")
 
 	floor := l.NewestOffset() / 2
-	_, err = l.CleanWithSpec(CleanSpec{RetentionFloor: &floor})
+	_, err = l.CleanWithSpec(CleanSpec{RetentionFloor: At(floor)})
 	require.NoError(t, err)
 	require.LessOrEqual(t, l.OldestOffset(), floor,
 		"retention deleted past the floor the spec set")

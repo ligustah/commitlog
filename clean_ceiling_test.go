@@ -15,7 +15,7 @@ import (
 // record in the log is undecided, and the answer it got was that every record
 // was compactable. Nothing in the spec was wrong; the sentinel ate it.
 //
-// This is the same shape as RetentionFloor, which is a *int64 for the same
+// This is the same shape as RetentionFloor, which is a Bound for the same
 // reason and says so in its own doc. Both are bounds whose zero value is a real
 // offset, so neither can spare its zero to mean "unset".
 func TestACeilingOfZeroCompactsNothing(t *testing.T) {
@@ -28,7 +28,7 @@ func TestACeilingOfZeroCompactsNothing(t *testing.T) {
 	app(&Message{Key: []byte("pad"), Value: []byte("pad")}) // active segment padding
 
 	before := readAllMsgs(t, l)
-	requireCleanOK(t, l, CleanSpec{Ceiling: bound(0)})
+	requireCleanOK(t, l, CleanSpec{Ceiling: At(0)})
 	after := readAllMsgs(t, l)
 
 	require.Equal(t, before, after, "a Ceiling of 0 bounds compaction at offset 0, "+
@@ -61,10 +61,10 @@ func TestNoCeilingCompactsToTheHighWatermark(t *testing.T) {
 }
 
 // A NEGATIVE Ceiling is legitimate, and this test exists because a first draft
-// of the pointer change refused it as obviously meaningless.
+// of this change refused it as obviously meaningless.
 //
 // It is not meaningless. HighWatermark returns -1 for "nothing is committed
-// yet", and `Ceiling: bound(l.HighWatermark())` is what callers write — so -1
+// yet", and `Ceiling: At(l.HighWatermark())` is what callers write — so -1
 // arrives whenever a log is cleaned before anything is committed. It means what
 // every ceiling means: retain everything at or above it. Since every offset is
 // above -1, that is "compact nothing", which is exactly right for a log with no
@@ -82,7 +82,7 @@ func TestACeilingBelowEveryOffsetIsLegitimate(t *testing.T) {
 
 	before := readAllMsgs(t, l)
 	for _, off := range []int64{-1, -42} {
-		_, err := l.CleanWithSpec(CleanSpec{Ceiling: bound(off)})
+		_, err := l.CleanWithSpec(CleanSpec{Ceiling: At(off)})
 		require.NoErrorf(t, err, "Ceiling %d was refused", off)
 	}
 	require.Equal(t, before, readAllMsgs(t, l),

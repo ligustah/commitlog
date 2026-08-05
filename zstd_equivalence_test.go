@@ -133,7 +133,7 @@ func runTortureOpts(t *testing.T, seed int64, codec compress.Codec, maxSegBytes 
 			tripped += countConsolidationTrips(l)
 			hw := l.HighWatermark()
 			requireCleanOK(t, l, (CleanSpec{
-				Ceiling: bound(hw), StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
+				Ceiling: At(hw), StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
 				TombstoneGCBelow: hw, TombstoneRetention: time.Nanosecond,
 			}))
 		case 7: // retention: drop a prefix
@@ -167,7 +167,7 @@ func runTortureOpts(t *testing.T, seed int64, codec compress.Codec, maxSegBytes 
 		require.Greater(t, tripped, 0, "no sealed segment ever tripped needsBlockConsolidation — retune the torture")
 	}
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling: bound(fhw), StripBelow: fhw, StripHeaders: []string{"pid", "epoch", "seq"},
+		Ceiling: At(fhw), StripBelow: fhw, StripHeaders: []string{"pid", "epoch", "seq"},
 		TombstoneGCBelow: fhw, TombstoneRetention: time.Nanosecond,
 	}))
 	return readAllVisible(t, l)
@@ -225,11 +225,6 @@ func readAllVisible(t *testing.T, l CommitLog) map[int64]string {
 	}
 	return out
 }
-
-// bound makes an offset addressable, for CleanSpec's pointer-valued bounds.
-// They are pointers because their zero values are real offsets — see
-// CleanSpec.Ceiling and CleanSpec.RetentionFloor.
-func bound(off int64) *int64 { return &off }
 
 // requireCleanOK runs CleanWithSpec discarding the verified floor.
 func requireCleanOK(t *testing.T, l CommitLog, spec CleanSpec) {

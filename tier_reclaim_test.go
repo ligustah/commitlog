@@ -69,7 +69,7 @@ func reclaimFixtureStore(t *testing.T, wrap func(*FileSegmentStore) SegmentStore
 func cleanAll(t *testing.T, l *commitLog) {
 	t.Helper()
 	hw := l.HighWatermark()
-	_, err := l.CleanWithSpec(CleanSpec{Ceiling: bound(hw + 1), TombstoneGCBelow: hw + 1})
+	_, err := l.CleanWithSpec(CleanSpec{Ceiling: At(hw + 1), TombstoneGCBelow: hw + 1})
 	require.NoError(t, err)
 }
 
@@ -479,7 +479,7 @@ func TestConcurrentScansAndReclamationInterleaveSafely(t *testing.T) {
 
 	for i := 0; i < 40; i++ {
 		hw := l.HighWatermark()
-		_, err := l.CleanWithSpec(CleanSpec{Ceiling: bound(hw + 1), TombstoneGCBelow: hw + 1})
+		_, err := l.CleanWithSpec(CleanSpec{Ceiling: At(hw + 1), TombstoneGCBelow: hw + 1})
 		require.NoError(t, err)
 	}
 	close(stop)

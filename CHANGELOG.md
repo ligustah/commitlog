@@ -7,6 +7,16 @@ library from that fork onward.
 
 ## Unreleased
 
+### Changed
+
+- **Breaking**: `CleanSpec.Ceiling` and `CleanSpec.RetentionFloor` are `Bound`,
+  not `*int64`. The zero `Bound` is "no bound supplied"; `At(0)` is a bound at
+  offset 0. The pointer solved the sentinel bug v0.55.0 describes, but a caller
+  should not have to take an address to name an offset, handle a nil at every
+  use, or be trusted not to mutate what it handed over. A two-word comparable
+  value has none of that. Migration is `Ceiling: &x` → `Ceiling: At(x)`, and an
+  omitted field still means unset.
+
 ### Fixed
 
 - **A timestamp lookup panicked on a tiered log.** `EarliestOffsetAfterTimestamp`

@@ -126,7 +126,7 @@ func TestTierManifestFollowsTheTier(t *testing.T) {
 	// A compaction pass rewrites offloaded segments onto new objects.
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
-		Ceiling: bound(hw + 1), TombstoneGCBelow: hw + 1,
+		Ceiling: At(hw + 1), TombstoneGCBelow: hw + 1,
 	})
 	require.NoError(t, err)
 

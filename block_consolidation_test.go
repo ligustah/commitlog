@@ -127,7 +127,7 @@ func TestCleanVerifiedFloor(t *testing.T) {
 	// prefix and STOP there, even though StripBelow (≈ an LSO at the tip)
 	// reaches into the active segment.
 	floor, err := l.CleanWithSpec(CleanSpec{
-		Ceiling: bound(hw), StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
+		Ceiling: At(hw), StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, activeBase-1, floor,
@@ -135,13 +135,13 @@ func TestCleanVerifiedFloor(t *testing.T) {
 
 	// A converged second pass proves the same floor via digest skips.
 	floor2, err := l.CleanWithSpec(CleanSpec{
-		Ceiling: bound(hw), StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
+		Ceiling: At(hw), StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, floor, floor2)
 
 	// No strip semantics ⇒ nothing verified.
-	floor3, err := l.CleanWithSpec(CleanSpec{Ceiling: bound(hw)})
+	floor3, err := l.CleanWithSpec(CleanSpec{Ceiling: At(hw)})
 	require.NoError(t, err)
 	require.Equal(t, int64(-1), floor3)
 }
@@ -241,7 +241,7 @@ func TestIncrementalCleanBudget(t *testing.T) {
 	hw := l.NewestOffset()
 	l.SetHighWatermark(hw)
 	spec := CleanSpec{
-		Ceiling: bound(hw), StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
+		Ceiling: At(hw), StripBelow: hw, StripHeaders: []string{"pid", "epoch", "seq"},
 		maxRewrites: 2,
 	}
 
@@ -360,7 +360,7 @@ func TestCleanScansLeaveSegmentCachesCold(t *testing.T) {
 	}
 	l.SetHighWatermark(l.NewestOffset())
 
-	_, err := l.CleanWithSpec(CleanSpec{Ceiling: bound(l.NewestOffset())})
+	_, err := l.CleanWithSpec(CleanSpec{Ceiling: At(l.NewestOffset())})
 	require.NoError(t, err)
 
 	l.mu.RLock()

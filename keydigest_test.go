@@ -112,7 +112,7 @@ func TestConvergedCleanReadsNoSealedRecords(t *testing.T) {
 		})
 	}
 	spec := CleanSpec{
-		Ceiling:      bound(l.HighWatermark()),
+		Ceiling:      At(l.HighWatermark()),
 		StripBelow:   l.HighWatermark(),
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	}
@@ -180,7 +180,7 @@ func TestCleanDigestMergeEquivalence(t *testing.T) {
 			ceiling := hw - int64(rng.Intn(10))
 			stripBelow := ceiling - int64(rng.Intn(6))
 			spec := CleanSpec{
-				Ceiling:      bound(ceiling),
+				Ceiling:      At(ceiling),
 				StripBelow:   stripBelow,
 				StripHeaders: []string{"pid", "epoch", "seq"},
 				Aborted: func(off int64) bool {
@@ -262,7 +262,7 @@ func TestKeyDigestLifecycle(t *testing.T) {
 		app(&Message{Key: []byte("dup"), Value: []byte{byte(i)}}) // all superseded
 	}
 	app(&Message{Key: []byte("live"), Value: []byte("x")})
-	spec := CleanSpec{Ceiling: bound(l.HighWatermark())}
+	spec := CleanSpec{Ceiling: At(l.HighWatermark())}
 	requireCleanOK(t, l, (spec))
 
 	// Digests exist for current sealed segments and bind (load non-nil).
@@ -308,7 +308,7 @@ func TestStripStampDoesNotOverClaim(t *testing.T) {
 	hdrs := []string{"pid", "epoch", "seq"}
 	// First clean strips only below offs[3].
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling: bound(l.HighWatermark()), StripBelow: offs[3], StripHeaders: hdrs}))
+		Ceiling: At(l.HighWatermark()), StripBelow: offs[3], StripHeaders: hdrs}))
 	// Second clean advances the boundary to the HW: every SEALED record
 	// below it must lose its pid header now, stamp notwithstanding (the
 	// active segment is never compacted, so its records keep theirs).
@@ -317,7 +317,7 @@ func TestStripStampDoesNotOverClaim(t *testing.T) {
 	activeBase := l.segments[len(l.segments)-1].BaseOffset
 	l.mu.RUnlock()
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling: bound(hw), StripBelow: hw, StripHeaders: hdrs}))
+		Ceiling: At(hw), StripBelow: hw, StripHeaders: hdrs}))
 	got := readAllMsgs(t, l)
 	for _, off := range offs {
 		if off >= hw || off >= activeBase {
@@ -330,9 +330,9 @@ func TestStripStampDoesNotOverClaim(t *testing.T) {
 	}
 	// And the stamp now covers everything: the next clean is a no-scan skip.
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling: bound(hw), StripBelow: hw, StripHeaders: hdrs}))
+		Ceiling: At(hw), StripBelow: hw, StripHeaders: hdrs}))
 	before := segmentScans.Load()
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling: bound(hw), StripBelow: hw, StripHeaders: hdrs}))
+		Ceiling: At(hw), StripBelow: hw, StripHeaders: hdrs}))
 	require.LessOrEqual(t, segmentScans.Load()-before, int64(1))
 }

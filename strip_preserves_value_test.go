@@ -81,7 +81,7 @@ func TestStrippingHeadersPreservesValuesExactly(t *testing.T) {
 
 	hw := l.HighWatermark()
 	requireCleanOK(t, l, CleanSpec{
-		Ceiling:      bound(hw),
+		Ceiling:      At(hw),
 		StripBelow:   hw,
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	})

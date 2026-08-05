@@ -546,11 +546,14 @@ run_guard "append stamps under the append lock" commitlog.go   '	now := timestam
 
 # Zero is a real ceiling -- "compact nothing" -- and the caller that passes it is
 # a transactional one whose oldest open transaction begins at offset 0. The
-# neutralization is the sentinel this field used to be: treat 0 as unset, and the
-# narrowest bound a caller can ask for arrives as the widest one there is.
-run_guard "a ceiling of zero is not unset" clean.go   '		spec.ceiling = l.HighWatermark()
-		if spec.Ceiling != nil {'   '		spec.ceiling = l.HighWatermark()
-		if spec.Ceiling != nil && *spec.Ceiling > 0 {'   '^TestACeilingOfZeroCompactsNothing$'
+# neutralization is the sentinel this field used to be, reintroduced inside
+# Bound.Or itself: treat 0 as unset, and the narrowest bound a caller can ask for
+# arrives as the widest one there is.
+run_guard "a ceiling of zero is not unset" clean.go   '	if !b.set {
+		return fallback
+	}'   '	if !b.set || b.off == 0 {
+		return fallback
+	}'   '^TestACeilingOfZeroCompactsNothing$'
 
 # The read retry waits out an amount of TIME, because what it waits for -- Windows
 # reclaiming a dead process's handles -- takes time that depends on the machine,

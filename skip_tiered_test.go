@@ -90,7 +90,7 @@ func TestReadOnlyTierMakesNoTierWrites(t *testing.T) {
 	l.SetTierReadOnly(true)
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
-		Ceiling:          bound(hw + 1),
+		Ceiling:          At(hw + 1),
 		TombstoneGCBelow: hw + 1,
 		RewriteBudget:    time.Hour, // generous: only the read-only tier may hold it back
 	})
@@ -175,7 +175,7 @@ func TestReadOnlyTierStillCompactsLocalSegments(t *testing.T) {
 	l.SetTierReadOnly(true)
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
-		Ceiling:          bound(hw + 1),
+		Ceiling:          At(hw + 1),
 		TombstoneGCBelow: hw + 1,
 		RewriteBudget:    time.Hour,
 	})

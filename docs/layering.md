@@ -70,7 +70,7 @@ the stdlib has none. Check the aliases at both ends before moving code.
 `CleanSpec` is parameterized by concepts this package does not own:
 
 ```go
-Ceiling      int64                     // really the LSO
+Ceiling      Bound                     // really the LSO; At(0) is a real bound
 StripBelow   int64                     // ...below which TRANSACTIONAL headers go
 StripHeaders []string                  // "pid", "epoch", "seq"
 Aborted      func(offset int64) bool   // transaction abort decisions

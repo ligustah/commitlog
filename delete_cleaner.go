@@ -53,13 +53,14 @@ func dropOldestPrefix(segments []*segment, idx, maxDrop int) ([]*segment, error)
 // granularity, so a segment holding one protected record is protected entire.
 // The last segment is never eligible, which costs nothing: every local limit
 // already retains it as the active one.
-func deletablePrefix(segments []*segment, floor *int64) int {
-	if floor == nil {
+func deletablePrefix(segments []*segment, floor Bound) int {
+	f, ok := floor.Get()
+	if !ok {
 		return len(segments)
 	}
 	n := 0
 	for i := 1; i < len(segments); i++ {
-		if segments[i].BaseOffset > *floor {
+		if segments[i].BaseOffset > f {
 			break
 		}
 		n = i
@@ -105,7 +106,7 @@ func newDeleteCleaner(opts deleteCleanerOptions) *deleteCleaner {
 // Deletion only occurs at the segment granularity.
 // skipTiered leaves the tier untouched: no tier retention, because deleting a
 // tier's copy is a write to storage that may be shared with other replicas.
-func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool, floor *int64) ([]*segment, error) {
+func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool, floor Bound) ([]*segment, error) {
 	var err error
 	if len(segments) == 0 || (c.noRetentionLimits() && c.noTierLimits()) {
 		return segments, nil
@@ -140,7 +141,7 @@ func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool, floor *int64
 
 // cleanLocal applies the local-disk retention limits, which is what Clean did
 // in full before retention became per-tier.
-func (c *deleteCleaner) cleanLocal(segments []*segment, floor *int64) ([]*segment, error) {
+func (c *deleteCleaner) cleanLocal(segments []*segment, floor Bound) ([]*segment, error) {
 	var err error
 
 	slog.Debug(
