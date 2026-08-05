@@ -64,6 +64,38 @@ jobs:
       - name: Test (race)
         run: go test -race -count=1 -timeout=50m ./...
 
+  # The same detector on Windows, which nothing covered until now: the job above
+  # is Linux-only and `test (windows-latest)` runs without -race. That was the
+  # gap most likely to hold something, because every platform-specific defect
+  # this log has had was a Windows one — the mmap flush/truncate ordering, and
+  # the just-killed-handle window that breaks reads as well as writes.
+  #
+  # It is worth doing per push rather than nightly because it is nearly free in
+  # the only currency that matters here, WALL CLOCK: jobs run in parallel, and
+  # at ~806s this becomes the critical path in place of `test (windows-latest)`
+  # at ~683s. Two minutes, for catching a race at the commit that introduced it
+  # instead of the next morning.
+  #
+  # -race needs cgo and a C compiler; the runner image ships mingw-w64. If that
+  # stops being true the race build fails with a linker error that says nothing
+  # about the cause, so the toolchain is recorded first.
+  race-windows:
+    name: race (windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+      - name: Toolchain
+        run: |
+          go env CGO_ENABLED CC
+          gcc --version
+      - name: Test (race)
+        run: go test -race -count=1 -timeout=50m ./...
+
   # Formatting, vet, and module integrity. .gitattributes stores *.go with LF,
   # so gofmt (which normalizes to LF) agrees on every runner.
   format:
