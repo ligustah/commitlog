@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.53.0 — 2026-08-05
 
 - **Breaking**: the tier manifest is the only record that a segment is
   offloaded. The per-segment local `.offloaded` marker is no longer written or
