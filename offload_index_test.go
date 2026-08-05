@@ -153,7 +153,7 @@ func testOffloadIndexLifecycle(t *testing.T, codec compress.Codec) {
 	t.Cleanup(func() { freshCache.Close() })
 	e.cache = freshCache
 
-	// Reopen from the v2 markers. Boot must not fetch any remote index.
+	// Reopen from the manifest. Boot must not fetch any remote index.
 	e.store.indexReads.Store(0)
 	l2 := e.open()
 	defer l2.Close()

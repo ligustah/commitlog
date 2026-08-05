@@ -46,20 +46,14 @@ type tierManifest struct {
 	Segments []TierObject `json:"segments"`
 }
 
-// writeTierManifest publishes the current set of offloaded segments.
+// writeTierManifest publishes the current set of offloaded segments, with any
+// pending entries taking precedence over the log's own view of the same base
+// offset.
 //
 // It rebuilds from the log's segments rather than patching an existing
 // manifest. The set is small (one entry per offloaded segment), and a rebuild
 // cannot drift: a patch has to be right about what changed, and every path that
 // changes the tier — offload, rewrite, retention — would have to agree.
-//
-// Caller must not hold l.mu.
-func (l *commitLog) writeTierManifest() error {
-	return l.writeTierManifestWith()
-}
-
-// writeTierManifestWith publishes the current set, with pending entries taking
-// precedence over the log's own view of the same base offset.
 //
 // A pending entry is an object that is uploaded and complete but that its
 // segment has not switched to yet, and it exists because the publish is the
@@ -67,11 +61,12 @@ func (l *commitLog) writeTierManifest() error {
 // having happened. A first offload cannot drop its local bytes until then, and a
 // rewrite cannot stop serving the object it supersedes. So at the moment of the
 // commit the log's own view and the tier's necessarily disagree, and the pending
-// entry is the difference — which is why it overrides rather than adds.
+// entry is the difference — which is why it overrides rather than adds. A
+// republish after the segment set changes passes none.
 //
 // Caller must not hold l.mu, and must not hold the segment lock of any segment a
 // pending entry describes: tierState reads every segment under its read lock.
-func (l *commitLog) writeTierManifestWith(pending ...TierObject) error {
+func (l *commitLog) writeTierManifest(pending ...TierObject) error {
 	if l.SegmentStore == nil || !l.tierWritable() {
 		return nil
 	}
