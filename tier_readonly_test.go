@@ -49,7 +49,7 @@ func TestReadOnlyTierWritesNothing(t *testing.T) {
 
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
-		Ceiling: hw + 1, TombstoneGCBelow: hw + 1,
+		Ceiling: bound(hw + 1), TombstoneGCBelow: hw + 1,
 	})
 	require.NoError(t, err)
 	l.tierMu.Lock()

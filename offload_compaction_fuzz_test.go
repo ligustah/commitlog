@@ -106,7 +106,7 @@ func fzNoQueuedLeak(t *testing.T, cl *commitLog, store *fzFaultStore) {
 	for i := 0; i < 8 && queued() > 0; i++ {
 		hw := cl.HighWatermark()
 		if _, err := cl.CleanWithSpec(CleanSpec{
-			Ceiling: hw + 1, TombstoneGCBelow: hw + 1, TombstoneRetention: time.Hour,
+			Ceiling: bound(hw + 1), TombstoneGCBelow: hw + 1, TombstoneRetention: time.Hour,
 		}); err != nil {
 			return // an injected fault; the pass's own assertions cover that
 		}
@@ -214,7 +214,7 @@ func FuzzOffloadCompactionRetention(f *testing.F) {
 			case 1: // compact
 				hw := cl.HighWatermark()
 				_, err := cl.CleanWithSpec(CleanSpec{
-					Ceiling:            hw + 1,
+					Ceiling:            bound(hw + 1),
 					TombstoneGCBelow:   hw + 1,
 					TombstoneRetention: time.Hour,
 				})

@@ -20,7 +20,7 @@ func TestCleanConvergesToNoRewrites(t *testing.T) {
 		})
 	}
 	spec := CleanSpec{
-		Ceiling:      l.HighWatermark(),
+		Ceiling:      bound(l.HighWatermark()),
 		StripBelow:   l.HighWatermark(),
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	}

@@ -69,7 +69,7 @@ func TestCleanSpecTombstoneGC(t *testing.T) {
 	app(&Message{Key: []byte("pad"), Value: []byte("pad")}) // active segment padding
 
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling:            l.HighWatermark(),
+		Ceiling:            bound(l.HighWatermark()),
 		TombstoneGCBelow:   l.HighWatermark(),
 		TombstoneRetention: time.Hour,
 	}))
@@ -106,7 +106,7 @@ func TestCleanSpecTombstoneIsAttributeNotEmptyValue(t *testing.T) {
 	app(&Message{Key: []byte("pad"), Value: []byte("pad")}) // active segment padding
 
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling:            l.HighWatermark(),
+		Ceiling:            bound(l.HighWatermark()),
 		TombstoneGCBelow:   l.HighWatermark(),
 		TombstoneRetention: time.Hour,
 	}))
@@ -133,7 +133,7 @@ func TestCleanSpecAbortedShadowing(t *testing.T) {
 	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
 
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling:      l.HighWatermark(),
+		Ceiling:      bound(l.HighWatermark()),
 		StripBelow:   l.HighWatermark(),
 		StripHeaders: []string{"pid", "epoch", "seq"},
 		Aborted:      func(off int64) bool { return off == offAborted },
@@ -169,7 +169,7 @@ func TestCleanSpecDecideAndStrip(t *testing.T) {
 	wantTs := before[offData] // sanity capture; timestamp checked via reader below
 
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling:      l.HighWatermark(),
+		Ceiling:      bound(l.HighWatermark()),
 		StripBelow:   stripBelow,
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	}))
@@ -212,7 +212,7 @@ func TestCleanSpecStripSurvivesReopen(t *testing.T) {
 		offs = append(offs, o[0])
 	}
 	requireCleanOK(t, cl, (CleanSpec{
-		Ceiling:      cl.HighWatermark(),
+		Ceiling:      bound(cl.HighWatermark()),
 		StripBelow:   cl.HighWatermark(),
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	}))
@@ -257,7 +257,7 @@ func TestCleanSpecBystanderKeySurvives(t *testing.T) {
 	app(&Message{Key: []byte("pad"), Value: []byte("pad")}) // active segment padding
 
 	requireCleanOK(t, l, (CleanSpec{
-		Ceiling:            l.HighWatermark(),
+		Ceiling:            bound(l.HighWatermark()),
 		StripBelow:         l.HighWatermark(),
 		StripHeaders:       []string{"pid", "epoch", "seq"},
 		TombstoneGCBelow:   l.HighWatermark(),
@@ -315,14 +315,14 @@ func TestCleanSpecCeilingAboveUndecidedLosesKey(t *testing.T) {
 
 		// Pass 1: the newer copy is still undecided, but Ceiling sits above it,
 		// so it counts as latest and supersedes the older committed copy.
-		requireCleanOK(t, l, (CleanSpec{Ceiling: l.HighWatermark()}))
+		requireCleanOK(t, l, (CleanSpec{Ceiling: bound(l.HighWatermark())}))
 		got := readAllMsgs(t, l)
 		require.NotContains(t, got, offOld, "pass 1 should have superseded the older copy")
 		require.Contains(t, got, offNew)
 
 		// Pass 2: the transaction is now known aborted, so the survivor goes too.
 		requireCleanOK(t, l, (CleanSpec{
-			Ceiling: l.HighWatermark(),
+			Ceiling: bound(l.HighWatermark()),
 			Aborted: func(off int64) bool { return off == offNew },
 		}))
 		got = readAllMsgs(t, l)
@@ -342,13 +342,13 @@ func TestCleanSpecCeilingAboveUndecidedLosesKey(t *testing.T) {
 
 		// Pass 1 with Ceiling below the undecided record: it is retained and
 		// uncounted, so it supersedes nothing.
-		requireCleanOK(t, l, (CleanSpec{Ceiling: offOld}))
+		requireCleanOK(t, l, (CleanSpec{Ceiling: bound(offOld)}))
 		require.Contains(t, readAllMsgs(t, l), offOld,
 			"an undecided record above the ceiling must not supersede a committed copy")
 
 		// Pass 2: now decided-aborted. The older committed copy must survive.
 		requireCleanOK(t, l, (CleanSpec{
-			Ceiling: l.HighWatermark(),
+			Ceiling: bound(l.HighWatermark()),
 			Aborted: func(off int64) bool { return off == offNew },
 		}))
 		got := readAllMsgs(t, l)
@@ -409,7 +409,7 @@ func TestCleanSpecBudgetedPassCannotResurrect(t *testing.T) {
 
 	hw := l.HighWatermark()
 	spec := CleanSpec{
-		Ceiling:            hw + 1,
+		Ceiling:            bound(hw + 1),
 		TombstoneGCBelow:   hw + 1,
 		TombstoneRetention: time.Hour,
 	}
@@ -484,7 +484,7 @@ func TestCleanSpecBudgetedPassCannotOrphanRecords(t *testing.T) {
 
 	hw := l.HighWatermark()
 	spec := CleanSpec{
-		Ceiling:      hw + 1,
+		Ceiling:      bound(hw + 1),
 		StripBelow:   hw + 1,
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	}

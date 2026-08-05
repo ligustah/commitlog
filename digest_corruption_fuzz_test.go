@@ -106,7 +106,7 @@ func FuzzCorruptDigestNeverChangesTheAnswer(f *testing.F) {
 
 		// A pass persists the sidecars this test then damages.
 		hw := cl.HighWatermark()
-		_, cerr := cl.CleanWithSpec(CleanSpec{Ceiling: hw + 1})
+		_, cerr := cl.CleanWithSpec(CleanSpec{Ceiling: bound(hw + 1)})
 		require.NoError(t, cerr)
 
 		bound := cl.ActiveSegmentBase() - 1

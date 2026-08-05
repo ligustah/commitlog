@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Breaking**: `CleanSpec.Ceiling` is a `*int64`. Nil means no bound was
+  supplied and the pass uses the high watermark, as before; every other value is
+  taken literally.
+
+  It was an `int64` resolved with `if spec.Ceiling <= 0 { spec.Ceiling =
+  l.HighWatermark() }`. But zero is a REAL ceiling — "compact nothing" — and it
+  is exactly what a transactional caller whose oldest open transaction begins at
+  offset 0 must pass. Every record in that log is undecided, and the answer the
+  caller got was that every record was compactable: the one spec asking for the
+  narrowest bound received the widest one there is. `TestCleanSpecCeilingAbove
+  UndecidedLosesKey` is what that costs.
+
+  `RetentionFloor` is a `*int64` for this reason and documents the argument in
+  its own doc comment, twenty lines below in the same struct. A bound whose zero
+  value is a real offset cannot spare its zero to mean unset. Reported by
+  durable_streams, who hit it.
+
+  A negative `Ceiling` is now refused by `CleanWithSpec` rather than clamped.
+  Whether a ceiling is really the caller's LSO is a fact only the caller has —
+  the specs treat it as an input they must trust — but its SIGN is not one of
+  those facts, and clamping is precisely how the old sentinel laundered it. Both
+  behaviours have guards.
+
 ## v0.54.0 — 2026-08-05
 
 - **Added**: `CopyTier(src, dst SegmentStore)` copies a log's whole tier between

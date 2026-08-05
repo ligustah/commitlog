@@ -483,14 +483,14 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 				if stripActive && r.offset < spec.StripBelow && r.flags&digestFlagHasHeaders != 0 {
 					res.stripKeyed[i] = true
 				}
-				if r.offset > spec.Ceiling {
+				if r.offset > spec.ceiling {
 					continue
 				}
 				if spec.Aborted != nil && spec.Aborted(r.offset) {
 					// Aborted copies never shadow a committed value at any
 					// decided offset; the pass removes them only below the
 					// ceiling (the record AT the ceiling is always retained).
-					if r.offset < spec.Ceiling {
+					if r.offset < spec.ceiling {
 						res.abortedKeyed[i] = true
 					}
 					continue
@@ -514,7 +514,7 @@ func (c *compactCleaner) mergeDigests(spec CleanSpec, segments []*segment,
 		// Superseded copies strictly below the ceiling are dropped (the
 		// record AT the ceiling is always the latest for its key).
 		for j, segIdx := range partSeg {
-			if off := partRec[j].offset; off != latestOff && off < spec.Ceiling {
+			if off := partRec[j].offset; off != latestOff && off < spec.ceiling {
 				drop(segIdx, off)
 			}
 		}
@@ -564,7 +564,7 @@ func (c *compactCleaner) canSkip(spec CleanSpec, d *keyDigest, m *mergeResult, i
 	}
 	if spec.Aborted != nil {
 		for _, r := range d.unkeyed {
-			if r.offset < spec.Ceiling && spec.Aborted(r.offset) {
+			if r.offset < spec.ceiling && spec.Aborted(r.offset) {
 				return false
 			}
 		}
@@ -650,7 +650,7 @@ func (c *compactCleaner) classify(spec CleanSpec, offset int64, msg SerializedMe
 	drops *dropSet) disposition {
 
 	// At or above the ceiling: possibly undecided — always retained.
-	if offset >= spec.Ceiling {
+	if offset >= spec.ceiling {
 		return dispRetain
 	}
 	attrs := msg.Attributes()

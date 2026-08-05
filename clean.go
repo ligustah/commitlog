@@ -12,6 +12,8 @@ package commitlog
 import (
 	"log/slog"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 func (l *commitLog) cleanerLoop() {
@@ -61,10 +63,29 @@ func (l *commitLog) cleanerLoop() {
 type CleanSpec struct {
 	// Ceiling is the compaction bound: records at or above it are always
 	// retained verbatim and never counted latest-per-key (they may be
-	// undecided). <=0 falls back to the high watermark. Transactional
-	// callers pass their LSO so open transactions can never shadow or be
-	// compacted.
-	Ceiling int64
+	// undecided). Transactional callers pass their LSO so open transactions can
+	// never shadow or be compacted. Nil — the zero value — means no bound was
+	// supplied and the pass uses the high watermark, which is what a
+	// non-transactional caller wants: everything is decided.
+	//
+	// A POINTER for the same reason RetentionFloor is one, and it is worth
+	// stating twice because the sentinel version of this field was a live bug.
+	// Zero is a REAL ceiling — "compact nothing" — and it is precisely what a
+	// caller whose oldest open transaction begins at offset 0 must pass. The
+	// field was an int64 whose zero value had to mean unset, so that caller
+	// silently got the high watermark instead: the one spec that asked for
+	// maximum protection was the one that compacted undecided records, and
+	// TestCleanSpecCeilingAboveUndecidedLosesKey is what that costs. Nil cannot
+	// be confused with an offset.
+	Ceiling *int64
+	// ceiling is Ceiling resolved against the log's high watermark. clean() sets
+	// it and the compaction pass reads only it, so no code below this line has
+	// to know the fallback or handle a nil.
+	//
+	// Derived rather than passed, exactly like skipTiered: the fallback is the
+	// LOG's high watermark, and a caller must not be able to hand the pass a
+	// resolved bound that disagrees with the one it asked for.
+	ceiling int64
 	// StripBelow: records strictly below it are DECIDED, and nothing above
 	// the log needs their per-record bookkeeping any more. Compaction removes
 	// control records (AttrControl) below it, removes aborted data records,
@@ -174,6 +195,17 @@ func (l *commitLog) Clean() error {
 // CleanWithSpec applies retention and a transaction-aware compaction pass.
 // See the interface doc for the returned verified floor.
 func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
+	// Almost nothing about a Ceiling is checkable here — whether it is really
+	// the caller's LSO is a fact only the caller has, which is why the specs
+	// treat it as an input they must trust (tla/README.md, docs/layering.md).
+	// Its SIGN is not one of those facts: offsets are non-negative, so a
+	// negative ceiling is not a policy this log disagrees with, it is a value
+	// that cannot mean anything. Refused rather than clamped, because clamping
+	// is how it used to arrive at the high watermark — the widest possible
+	// bound — from the caller's attempt at the narrowest.
+	if spec.Ceiling != nil && *spec.Ceiling < 0 {
+		return -1, errors.Errorf("commitlog: CleanSpec.Ceiling is negative (%d)", *spec.Ceiling)
+	}
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.mu.RLock()
@@ -312,8 +344,10 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int6
 	}
 	verified := int64(-1)
 	if l.Compact {
-		if spec.Ceiling <= 0 {
-			spec.Ceiling = l.HighWatermark()
+		// spec is a value, so this resolution is this pass's alone.
+		spec.ceiling = l.HighWatermark()
+		if spec.Ceiling != nil {
+			spec.ceiling = *spec.Ceiling
 		}
 		compacted, v, err := l.compactCleaner.CompactSpec(spec, cleaned)
 		if err != nil {

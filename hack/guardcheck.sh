@@ -543,6 +543,19 @@ run_guard "append stamps under the append lock" commitlog.go   '	now := timestam
 	now := timestamp()
 	l.appendMu.Lock()'   '^TestAnAppendStampsItsTimeUnderTheAppendLock$'
 
+# Zero is a real ceiling -- "compact nothing" -- and the caller that passes it is
+# a transactional one whose oldest open transaction begins at offset 0. The
+# neutralization is the sentinel this field used to be: treat 0 as unset, and the
+# narrowest bound a caller can ask for arrives as the widest one there is.
+run_guard "a ceiling of zero is not unset" clean.go   '		spec.ceiling = l.HighWatermark()
+		if spec.Ceiling != nil {'   '		spec.ceiling = l.HighWatermark()
+		if spec.Ceiling != nil && *spec.Ceiling > 0 {'   '^TestACeilingOfZeroCompactsNothing$'
+
+# A negative Ceiling cannot mean anything -- offsets are non-negative -- and it is
+# refused rather than clamped, because clamping is how the old sentinel turned a
+# caller's narrowest bound into the high watermark.
+run_guard "a negative ceiling is refused" clean.go   '	if spec.Ceiling != nil && *spec.Ceiling < 0 {'   '	if false {'   '^TestANegativeCeilingIsRefused$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

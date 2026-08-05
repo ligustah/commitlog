@@ -212,7 +212,7 @@ func TestReaderKeyPrefixMatchesScan(t *testing.T) {
 	}
 
 	check("freshly built digests")
-	requireCleanOK(t, l, CleanSpec{Ceiling: l.HighWatermark()})
+	requireCleanOK(t, l, CleanSpec{Ceiling: bound(l.HighWatermark())})
 	check("after a clean persisted sidecars")
 	removeAllDigests(t, l)
 	check("with no sidecars at all")
@@ -227,7 +227,7 @@ func TestReaderKeyPrefixIdenticalWithoutDigests(t *testing.T) {
 	}
 	app(&Message{Key: []byte("k:07"), Value: []byte("del"), Attributes: AttrTombstone})
 	app(&Message{Key: []byte("pad"), Value: []byte("padpadpad")})
-	requireCleanOK(t, l, CleanSpec{Ceiling: l.HighWatermark()})
+	requireCleanOK(t, l, CleanSpec{Ceiling: bound(l.HighWatermark())})
 
 	read := func() []readRec {
 		r, err := l.NewReader(KeyPrefix([]byte("k:")))
@@ -512,7 +512,7 @@ func TestReaderKeyPrefixSkipsSegmentsWithoutHits(t *testing.T) {
 		app(&Message{Key: []byte(fmt.Sprintf("pad:%d", i)), Value: []byte("padpadpadpad")})
 	}
 	require.Less(t, offWant, l.ActiveSegmentBase())
-	requireCleanOK(t, l, CleanSpec{Ceiling: l.HighWatermark()})
+	requireCleanOK(t, l, CleanSpec{Ceiling: bound(l.HighWatermark())})
 
 	sealed := len(l.Segments()) - 1
 	require.Greater(t, sealed, 10)
