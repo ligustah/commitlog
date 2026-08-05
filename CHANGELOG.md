@@ -42,6 +42,21 @@ library from that fork onward.
   one was written. A codec is a value the caller hands in, so it is now checked
   where it arrives, with a guard.
 
+- **Fixed**: `Codec.DecompressInto` no longer returns a slice aliasing its input.
+
+  `None` returned `src` itself, so the "decompressed" bytes were the caller's
+  compressed-payload buffer — which on the block path is a recycled read buffer
+  that the next block refills. Nothing was wrong with those bytes when they were
+  returned; they stopped being those bytes later. `decodeBlock` knew, and carried
+  an unexplained pointer-identity check against exactly it.
+
+  That check is the tell. A contract that holds for three codecs of four is not a
+  contract, it is something every caller has to rediscover, and the one that
+  forgets gets a bug with no bad value anywhere in it. The copy moves into the
+  codec, where a caller cannot forget it — and it is the same copy `decodeBlock`
+  was already making the moment it noticed, so the block path does no more work
+  than before.
+
 - **Internal**: `writeTierManifest` and `writeTierManifestWith` were two names
   for one function, separated only by passing no arguments to a variadic.
 
