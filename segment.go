@@ -105,6 +105,12 @@ type segment struct {
 	blocks       []blockRef
 	physPosition int64
 	cache        *blockCache
+	// blocksPending means blocks has not been built yet and must be before any
+	// read maps a logical offset onto the file. Only an OFFLOADED segment sets
+	// it: building the table walks every block header in the object, which for a
+	// segment in a store is the whole object over the network, and opening a log
+	// is not a reason to download its cold tier. See ensureBlocksLoaded.
+	blocksPending bool
 	// Set when opening this segment dropped an unresolvable tail from the log
 	// (a crash mid-append). The index still anchors into the bytes that went,
 	// so it has to be rederived rather than trusted.
@@ -428,32 +434,42 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		storeKey: meta.LogKey,
 	}
 
-	if meta.IndexKey == "" {
-		// Option 1: index kept local. Size unknown from the manifest, so the
-		// backing fetches it; then load the local index as usual.
-		sb, err := newStoreBacking(store, meta.LogKey)
-		if err != nil {
-			return nil, errors.Wrap(err, "open store backing")
-		}
-		s.backing = sb
-		if err := s.initPositions(); err != nil {
-			return nil, err
-		}
-		return s, s.setupIndex()
-	}
-
-	// Option 2: index offloaded. The manifest records the log object size, so the
-	// backing opens without a size round-trip. initPositions still reconstructs
-	// the block layout from the log (as option 1 does); the boundaries the index
-	// would supply come from the manifest instead, and no index is read on open.
+	// Every manifest entry carries the object's size, its logical size and
+	// whether it is block-compressed, for both options — so none of the three is
+	// read back off the object here. This used to call initPositions, which
+	// derives all three from the bytes: a stat, a one-byte read for the format
+	// magic (a 1MiB prefetch, in the store backing, for one byte), and for a
+	// block segment a walk of the entire header chain, which is the whole object.
+	// Opening a log did that once per offloaded segment before serving a single
+	// read — 22MB across a 22-segment snappy tier, measured.
+	//
+	// attachOffloadedLocked is the proof it was never needed: when a live segment
+	// offloads in this process it takes exactly these fields from the same meta
+	// and keeps the block table it already has. Only the segment that came back
+	// from a manifest went and re-derived them.
 	sb, err := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
 	if err != nil {
 		return nil, errors.Wrap(err, "open store backing")
 	}
 	s.backing = sb
-	if err := s.initPositions(); err != nil {
-		return nil, err
+	s.cache = newBlockCache()
+	s.blockMode = meta.BlockMode
+	s.position = meta.Position
+	s.physPosition = meta.PhysPosition
+	// A raw segment has no block table at all, so there is nothing to defer and
+	// nothing to build: reads go straight at the backing.
+	s.blocksPending = meta.BlockMode
+
+	if meta.IndexKey == "" {
+		// Option 1: index kept local, loaded as usual. setupIndex recovers a
+		// block segment's last offset by decoding its final block, so for those
+		// the table is built here after all — the deferral wins the raw case and
+		// all of option 2, and this path still skips the stat and the magic read.
+		return s, s.setupIndex()
 	}
+
+	// Option 2: index offloaded. The boundaries setupIndex would recover come
+	// from the manifest, so nothing is read on open — not the index, not the log.
 	s.firstOffset = meta.FirstOffset
 	s.lastOffset = meta.LastOffset
 	s.firstWriteTime = meta.FirstWriteTime
@@ -462,6 +478,33 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 	s.indexKey = meta.IndexKey
 	s.indexCache = cache
 	return s, nil
+}
+
+// ensureBlocksLoaded builds the block table if opening the segment deferred it.
+//
+// Callers must hold NO segment lock: this takes the write lock to install the
+// table. It is called from the top of the read paths rather than from findBlock,
+// which runs under the read lock and could not upgrade.
+//
+// The double check is the ordinary one — the common case is a plain read-locked
+// bool, and only the first read of a cold segment pays for the walk.
+func (s *segment) ensureBlocksLoaded() error {
+	s.RLock()
+	pending := s.blocksPending
+	s.RUnlock()
+	if !pending {
+		return nil
+	}
+	s.Lock()
+	defer s.Unlock()
+	if !s.blocksPending {
+		return nil
+	}
+	if err := s.scanBlocks(s.physPosition); err != nil {
+		return errors.Wrap(err, "build block table")
+	}
+	s.blocksPending = false
+	return nil
 }
 
 // initPositions inspects the (already-open) log file, detects whether it uses
@@ -747,6 +790,9 @@ func (s *segment) indexDescribesLog() bool {
 func (s *segment) frameOffsetAt(pos int64) (int64, bool) {
 	hdr := make([]byte, msgSetHeaderLen)
 	if s.blockMode {
+		if err := s.ensureBlocksLoaded(); err != nil {
+			return 0, false
+		}
 		blk := s.findBlock(pos)
 		if blk == nil {
 			return 0, false
@@ -785,6 +831,11 @@ func (s *segment) rebuildIndexFromLog() error {
 // that block. Used during recovery to find a block-compressed segment's true
 // last offset, since the sparse index only records each block's first message.
 func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
+	// Runs during open, holding no lock, and an offloaded segment defers its
+	// block table — so this is one of the two places that has to build it.
+	if err := s.ensureBlocksLoaded(); err != nil {
+		return nil, err
+	}
 	blk := s.findBlock(start)
 	if blk == nil {
 		return nil, errIndexCorrupt
@@ -1214,7 +1265,14 @@ func (s *segment) appendBlock(p []byte) error {
 func (s *segment) needsBlockConsolidation() bool {
 	s.RLock()
 	defer s.RUnlock()
-	if !s.blockMode || len(s.blocks) < 1024 {
+	if !s.blockMode || s.blocksPending || len(s.blocks) < 1024 {
+		// A pending table answers false rather than building itself, and that is
+		// the honest answer, not a dodge. What this exists to bound is the memory
+		// a live block table costs — a blockRef and a sparse-index anchor per
+		// block, for as long as the segment exists. An unbuilt table costs none
+		// of it. The segment becomes eligible the moment a read builds one, and
+		// consolidating it before then would download the whole object to fix a
+		// cost nothing is paying.
 		return false
 	}
 	targetBlocks := s.position/cleanBlockTarget + 1
@@ -1225,6 +1283,9 @@ func (s *segment) needsBlockConsolidation() bool {
 // off. For a raw segment this is a direct file read; for a block-compressed
 // segment it maps the logical range onto the decompressed block(s).
 func (s *segment) ReadAt(p []byte, off int64) (n int, err error) {
+	if err := s.ensureBlocksLoaded(); err != nil {
+		return 0, err
+	}
 	s.RLock()
 	defer s.RUnlock()
 	return s.readAtLocked(p, off)
@@ -1361,6 +1422,9 @@ func (ss *scanStream) Close() error {
 // st carries the sweep's open stream, or is nil for a caller that is not
 // sweeping.
 func (s *segment) scanReadAt(c *blockCache, st *scanStream, p []byte, off int64) (n int, err error) {
+	if err := s.ensureBlocksLoaded(); err != nil {
+		return 0, err
+	}
 	s.RLock()
 	defer s.RUnlock()
 	if s.closed {
@@ -1995,6 +2059,11 @@ func (s *segment) current() (*segment, bool) {
 // offset >= the target, yielding an exact per-message entry (position, size,
 // timestamp) just as the dense path does.
 func (s *segment) findEntry(offset int64) (*entry, error) {
+	// Before the read lock: a block-mode search runs scanForward, which reads
+	// through readAtLocked and so cannot build the table itself.
+	if err := s.ensureBlocksLoaded(); err != nil {
+		return nil, err
+	}
 	s.RLock()
 	defer s.RUnlock()
 	// A segment that has left the log answers "re-resolve", not "closed". The
@@ -2047,6 +2116,10 @@ func (s *segment) findEntry(offset int64) (*entry, error) {
 // that may contain the first qualifying message and scans forward to it,
 // returning an exact per-message entry.
 func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
+	// See findEntry: same scanForward, same reason.
+	if err := s.ensureBlocksLoaded(); err != nil {
+		return nil, err
+	}
 	s.RLock()
 	defer s.RUnlock()
 	// A segment that has left the log answers "re-resolve", not "closed". The
