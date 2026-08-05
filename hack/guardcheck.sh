@@ -464,6 +464,14 @@ run_guard "tier absence must be asserted" manifest.go   '	if errors.Is(err, ErrO
 # "any JSON object is a manifest".
 run_guard "a manifest must be this version" manifest.go   '	if m.Version != manifestVersion {'   '	if m.Version > manifestVersion {'   '^TestAManifestThatIsNotThisVersionIsRefused$'
 
+# Codec.Compress has no error to return, so its default arm stores the batch raw
+# under whatever byte it was given -- and parseBlockHeader, the only other place
+# Valid() is called, refuses that byte on the way back. Neutralizing this restores
+# a write path that accepts exactly what the read path rejects: appends are taken,
+# the descriptor records a codec name nothing can parse, and the log never opens
+# again.
+run_guard "an unknown codec is refused where it arrives" commitlog.go   '	if !opts.Compression.Valid() {'   '	if false {'   '^TestAnUnknownCompressionCodecIsRefusedAtOpen$'
+
 # The manifest is the commit point, so a COPY of a tier has to write it last for
 # the same reason an offload does: until it lands, nothing in the destination is
 # claimed by anything, and a copy that dies partway leaves collectable orphans

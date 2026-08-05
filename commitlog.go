@@ -357,6 +357,20 @@ func New(opts Options) (CommitLog, error) {
 	if opts.Path == "" {
 		return nil, errors.New("path is empty")
 	}
+	// Refused HERE because every other place that meets an unknown codec meets it
+	// too late. Compress has no error to return and falls through to storing the
+	// bytes raw, so an unknown codec writes blocks headed with a byte no reader
+	// accepts — parseBlockHeader calls Valid(), the only other call site, and that
+	// runs on the way back. Worse, the descriptor records the codec by name, and
+	// an unknown one renders as "codec(9)", which compress.Parse then refuses: the
+	// log accepts the option, accepts the appends, and cannot open again.
+	//
+	// So the write path accepted exactly what the read path refuses, and said so
+	// only after there were records to lose. A codec is a value the caller hands
+	// in; checking it where it arrives is the whole fix.
+	if !opts.Compression.Valid() {
+		return nil, errors.Errorf("commitlog: unknown compression codec %d", byte(opts.Compression))
+	}
 
 	if opts.MaxSegmentBytes == 0 {
 		opts.MaxSegmentBytes = defaultMaxSegmentBytes

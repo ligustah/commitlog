@@ -49,6 +49,14 @@ var (
 )
 
 // Compress returns the compressed form of src. It never mutates src.
+//
+// The default arm stores src raw, and unlike Decompress it cannot report an
+// unknown codec — there is no error to return. That is safe only because a codec
+// is checked where it ENTERS: commitlog.New refuses one Valid rejects, so a
+// Codec that reaches here is one of the four below. It was not always: an unknown
+// codec used to be accepted, written into every block header, and refused on the
+// way back out by parseBlockHeader, which is the read path saying no to what the
+// write path had already stored.
 func (c Codec) Compress(src []byte) []byte {
 	switch c {
 	case Snappy:

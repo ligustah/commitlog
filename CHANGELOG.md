@@ -27,6 +27,21 @@ library from that fork onward.
   hold. An interrupted copy needs no cleanup — the destination has no manifest,
   so it reads as an empty tier and everything in it is collectable.
 
+- **Fixed**: an unknown `Compression` codec is refused by `New` instead of being
+  written into every block header and refused on the way back.
+
+  `Codec.Compress` has no error to return, so its default arm stored the batch
+  raw under whatever byte it was handed. `Valid()` was called in exactly one
+  place — `parseBlockHeader` — which runs on READ. So the write path accepted
+  precisely what the read path rejects.
+
+  It did not stop at unreadable blocks. The descriptor records the codec by NAME,
+  an unknown one renders as `codec(9)`, and `compress.Parse` refuses that: a log
+  configured with a bad codec took appends, closed cleanly, and could never be
+  opened again. The records were lost to a value that was wrong before the first
+  one was written. A codec is a value the caller hands in, so it is now checked
+  where it arrives, with a guard.
+
 - **Internal**: `writeTierManifest` and `writeTierManifestWith` were two names
   for one function, separated only by passing no arguments to a variadic.
 
