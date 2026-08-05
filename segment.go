@@ -486,6 +486,13 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 // table. It is called from the top of the read paths rather than from findBlock,
 // which runs under the read lock and could not upgrade.
 //
+// "No lock" is a real constraint and not a style note. It is safe at the four
+// call sites it has — ReadAt, scanReadAt, findEntry, findEntryByTimestamp —
+// because each takes the segment lock itself immediately afterward, so a caller
+// already holding it was never allowed to use them. The recovery path, which
+// reaches its helpers under the write lock from swapReplacement, builds the
+// table in setupIndex instead.
+//
 // The double check is the ordinary one — the common case is a plain read-locked
 // bool, and only the first read of a cold segment pays for the walk.
 func (s *segment) ensureBlocksLoaded() error {
@@ -633,6 +640,26 @@ func (s *segment) discardTornTail(keep, size int64) error {
 // - Initialize firstOffset/lastOffset
 // - Initialize firstWriteTime/lastWriteTime
 func (s *segment) setupIndex() (err error) {
+	// Everything below maps a logical position onto the file — lastFrameInBlock
+	// and indexDescribesLog both do — so a deferred block table has to be built
+	// first.
+	//
+	// Built HERE, and without ensureBlocksLoaded, because setupIndex runs on both
+	// sides of the segment lock: openOffloadedSegment calls it on a segment
+	// nothing else can see yet, and swapReplacement calls it holding the WRITE
+	// lock. ensureBlocksLoaded takes RLock to test the flag, and RLock under Lock
+	// on one goroutine is a deadlock — which is precisely what it did, hanging the
+	// suite for the full 30m timeout with the cleaner parked behind it.
+	//
+	// Locking nothing is correct rather than merely convenient: setupIndex already
+	// assigns s.Index, s.firstOffset and s.lastOffset unsynchronized, so every
+	// caller must already have the segment to itself.
+	if s.blocksPending {
+		if err := s.scanBlocks(s.physPosition); err != nil {
+			return errors.Wrap(err, "build block table")
+		}
+		s.blocksPending = false
+	}
 	s.Index, err = newIndex(options{
 		path:       s.indexPath(),
 		baseOffset: s.BaseOffset,
@@ -790,9 +817,8 @@ func (s *segment) indexDescribesLog() bool {
 func (s *segment) frameOffsetAt(pos int64) (int64, bool) {
 	hdr := make([]byte, msgSetHeaderLen)
 	if s.blockMode {
-		if err := s.ensureBlocksLoaded(); err != nil {
-			return 0, false
-		}
+		// No deferred build here either: setupIndex, the only route in, has
+		// already done it. See the note there.
 		blk := s.findBlock(pos)
 		if blk == nil {
 			return 0, false
@@ -831,11 +857,9 @@ func (s *segment) rebuildIndexFromLog() error {
 // that block. Used during recovery to find a block-compressed segment's true
 // last offset, since the sparse index only records each block's first message.
 func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
-	// Runs during open, holding no lock, and an offloaded segment defers its
-	// block table — so this is one of the two places that has to build it.
-	if err := s.ensureBlocksLoaded(); err != nil {
-		return nil, err
-	}
+	// Does NOT build a deferred block table. It is reached only from setupIndex,
+	// which builds it up front precisely so this can run under either lock state
+	// — see the note there.
 	blk := s.findBlock(start)
 	if blk == nil {
 		return nil, errIndexCorrupt
