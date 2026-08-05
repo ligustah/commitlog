@@ -144,7 +144,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [FuzzCompactionRecovery, FuzzOffloadCrashConsistency, FuzzOffloadCompactionRetention, FuzzCorruptedRecordIsNeverServedSilently, FuzzCorruptDigestNeverChangesTheAnswer, FuzzTornLogServesOnlyAPrefix]
+        # One execution budget per target, because a single count cannot be
+        # right for all of them: measured rates on this runner span 33/sec
+        # (FuzzCompactionRecovery, which builds and recovers a whole log per
+        # execution) to 328/sec (FuzzTornLogServesOnlyAPrefix). Each count below
+        # is what that target achieved in the 90s this job used to spend, so the
+        # sweep does the same work it always did. A flat 20000 gave the slowest
+        # target 11 minutes and the fastest one 61 seconds.
+        #
+        # Re-tune from a green run when a target's cost changes: subtract the
+        # ~40s of checkout, toolchain and build from the job duration, and the
+        # remainder is what these counts bought.
+        include:
+          - {target: FuzzCompactionRecovery, execs: 3000}
+          - {target: FuzzOffloadCrashConsistency, execs: 4000}
+          - {target: FuzzCorruptedRecordIsNeverServedSilently, execs: 11000}
+          - {target: FuzzOffloadCompactionRetention, execs: 13000}
+          - {target: FuzzCorruptDigestNeverChangesTheAnswer, execs: 20000}
+          - {target: FuzzTornLogServesOnlyAPrefix, execs: 29000}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -162,5 +179,5 @@ jobs:
       # test do the same WORK on every runner rather than the same wall clock,
       # which is what a fixed budget was for; the job timeout above is what keeps
       # a slow runner bounded.
-      - name: Fuzz ${{ matrix.target }} (20000 execs)
-        run: go test -run '^$' -fuzz='^${{ matrix.target }}$' -fuzztime=20000x -timeout=15m .
+      - name: Fuzz ${{ matrix.target }} (${{ matrix.execs }} execs)
+        run: go test -run '^$' -fuzz='^${{ matrix.target }}$' -fuzztime=${{ matrix.execs }}x -timeout=15m .
