@@ -1018,18 +1018,13 @@ func (l *commitLog) EarliestOffsetAfterTimestamp(timestamp int64) (int64, error)
 func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, error) {
 	// Find the first segment whose base timestamp is greater than the given
 	// timestamp.
-	// findSegmentIndexByTimestamp cannot return io.EOF: it handles the empty
-	// segment itself (see the comment there) and reports anything else as a real
-	// error. There used to be an io.EOF arm here returning the next assignable
-	// offset with a nil error, left behind when that function stopped producing
-	// one. Removed rather than kept as belt-and-braces, because "beyond the end
-	// of the log" is already answered below by the idx == len(segments) path —
-	// so the only thing the arm could still do was convert a future read failure
+	// findSegmentIndexByTimestamp cannot fail: it reads each segment's own base
+	// timestamp rather than its index, and handles the empty segment itself (see
+	// the comment there). It used to return an error, and this had an io.EOF arm
+	// besides — each removed when the thing that could produce it went, because
+	// the only thing an unreachable arm can still do is convert a future failure
 	// into a fabricated offset the caller would trust.
-	idx, err := findSegmentIndexByTimestamp(l.segments, timestamp)
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to find log segment for timestamp")
-	}
+	idx := findSegmentIndexByTimestamp(l.segments, timestamp)
 	// Search the previous segment for the first entry whose timestamp is
 	// greater than or equal to the given timestamp. If this is the first
 	// segment, just search it.

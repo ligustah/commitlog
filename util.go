@@ -2,7 +2,7 @@ package commitlog
 
 import (
 	"bytes"
-	"errors"
+
 	"io"
 	"os"
 	"sort"
@@ -66,18 +66,34 @@ func findSegmentContains(segments []*segment, offset int64) (*segment, bool) {
 // base timestamp is greater than the given timestamp. Returns the index where
 // the segment would be if there is no segment whose base timestamp is greater,
 // i.e. the length of the slice.
-func findSegmentIndexByTimestamp(segments []*segment, timestamp int64) (int, error) {
-	var (
-		n   = len(segments)
-		err error
-	)
+//
+// It asks the SEGMENT for its base timestamp rather than reading the first
+// entry out of its index. The segment already holds that fact — firstWriteTime,
+// set beside firstOffset the moment the first batch lands and recovered
+// alongside it on open — so the read was re-deriving state that was already
+// there, once per search step.
+//
+// It was also a nil dereference. An option-2 offloaded segment keeps its index
+// in the store and its Index field is nil; every other index consumer goes
+// through segment.withIndex, and this one reached past it. So a timestamp lookup
+// on any log opened with a RemoteIndexCache PANICKED — not an error, a crash, on
+// a supported configuration. Asking the segment fixes that by not needing an
+// index at all, which is also why it does no I/O for a tiered segment where
+// withIndex would have fetched the whole index object per step.
+// It cannot fail, and so does not say it can: reading the index could, and the
+// error return outlived the read. A caller's error branch that nothing can enter
+// is a branch nothing tests.
+func findSegmentIndexByTimestamp(segments []*segment, timestamp int64) int {
+	n := len(segments)
 	idx := sort.Search(n, func(i int) bool {
-		// Read the first entry in the segment to determine the base timestamp.
-		var entry entry
-		switch e := segments[i].Index.ReadEntryAtLogOffset(&entry, 0); {
-		case e == nil:
-			return entry.Timestamp > timestamp
-		case errors.Is(e, io.EOF):
+		s := segments[i]
+		s.RLock()
+		first, base := s.firstOffset, s.firstWriteTime
+		s.RUnlock()
+		switch {
+		case first >= 0:
+			return base > timestamp
+		default:
 			// The segment is EMPTY — it has no first entry, not a broken one.
 			// That is the normal state of the active segment in the window just
 			// after a roll, so it must not be reported as a failure.
@@ -93,12 +109,9 @@ func findSegmentIndexByTimestamp(segments []*segment, timestamp int64) (int, err
 			// touch a just-rolled segment. Timing-dependent, which is why
 			// concurrent readers made it show up.
 			return true
-		default:
-			err = e
-			return true
 		}
 	})
-	return idx, err
+	return idx
 }
 
 // findSegmentByBaseOffset returns the first segment whose base offset is
