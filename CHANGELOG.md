@@ -7,6 +7,28 @@ library from that fork onward.
 
 ## Unreleased
 
+- **Breaking**: the tier manifest is the only record that a segment is
+  offloaded. The per-segment local `.offloaded` marker is no longer written or
+  read, and publishing the manifest is the commit point for an offload.
+
+  An offloaded segment was described twice — a marker beside the log and an
+  entry in the manifest — and adoption projected one into the other, writing
+  markers back out for every entry it imported. Two records of one fact, kept in
+  step by hand, when only one of them is reachable by a process that has the
+  store and not the directory.
+
+  The commit point moves with it, which is the part that had to be decided
+  rather than derived. An offload now uploads, publishes a manifest naming the
+  new objects, and only then drops the local bytes — per segment, not per pass,
+  because a batch would leave every segment in the pass able to lose its local
+  copy against an entry that is not yet published. Rewriting an already-offloaded
+  segment follows the same three steps, which is why `ReplaceOffloaded` is now
+  two calls with the publish between them: `tierState` reads every segment under
+  its read lock, so committing with the segment's write lock held would deadlock.
+
+  `open()` reads the manifest before the directory now, because the manifest is
+  what tells an offloaded segment's local index apart from an orphaned one.
+
 - **Breaking**: a `SegmentStore` must report an absent key as `ErrObjectNotFound`
   from `Size`, `ReadAt` and `Stream`. Absence is no longer inferred from a read
   failing.

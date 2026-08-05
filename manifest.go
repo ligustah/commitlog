@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
-	"os"
 	"sort"
 
 	"github.com/pkg/errors"
@@ -55,12 +54,48 @@ type tierManifest struct {
 //
 // Caller must not hold l.mu.
 func (l *commitLog) writeTierManifest() error {
+	return l.writeTierManifestWith()
+}
+
+// writeTierManifestWith publishes the current set, with pending entries taking
+// precedence over the log's own view of the same base offset.
+//
+// A pending entry is an object that is uploaded and complete but that its
+// segment has not switched to yet, and it exists because the publish is the
+// COMMIT: it has to name the new object before anything acts on the commit
+// having happened. A first offload cannot drop its local bytes until then, and a
+// rewrite cannot stop serving the object it supersedes. So at the moment of the
+// commit the log's own view and the tier's necessarily disagree, and the pending
+// entry is the difference — which is why it overrides rather than adds.
+//
+// Caller must not hold l.mu, and must not hold the segment lock of any segment a
+// pending entry describes: tierState reads every segment under its read lock.
+func (l *commitLog) writeTierManifestWith(pending ...TierObject) error {
 	if l.SegmentStore == nil || !l.tierWritable() {
 		return nil
 	}
 	objs, err := l.tierState()
 	if err != nil {
 		return err
+	}
+	if len(pending) > 0 {
+		override := make(map[int64]TierObject, len(pending))
+		for _, p := range pending {
+			override[p.BaseOffset] = p
+		}
+		for i, o := range objs {
+			if p, ok := override[o.BaseOffset]; ok {
+				objs[i] = p
+				delete(override, o.BaseOffset)
+			}
+		}
+		for _, p := range pending {
+			if _, ok := override[p.BaseOffset]; ok {
+				objs = append(objs, p)
+				delete(override, p.BaseOffset)
+			}
+		}
+		sort.Slice(objs, func(i, j int) bool { return objs[i].BaseOffset < objs[j].BaseOffset })
 	}
 	body, err := json.Marshal(tierManifest{Version: manifestVersion, Segments: objs})
 	if err != nil {
@@ -149,7 +184,7 @@ func (l *commitLog) TierManifest() ([]TierObject, error) {
 }
 
 // adoptTierManifest materialises segments this log does not have but the store's
-// manifest describes, by writing their offload markers and opening them.
+// manifest describes, by opening them over their store objects.
 //
 // This is what makes a tier self-contained in practice: a process that has the
 // store and an empty (or partial) log directory can open the log and reach the
@@ -180,10 +215,6 @@ func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (int, error) {
 					"RemoteIndexCache is configured", o.BaseOffset)
 		}
 		meta := o.meta()
-		body, err := json.Marshal(meta)
-		if err != nil {
-			return adopted, errors.Wrap(err, "encode offload marker")
-		}
 		seg, err := openOffloadedSegment(l.Path, o.BaseOffset, l.MaxSegmentBytes,
 			l.Compression, l.SegmentStore, meta, l.RemoteIndexCache)
 		if err != nil {
@@ -214,14 +245,6 @@ func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (int, error) {
 				return adopted, errors.Wrapf(err,
 					"rebuild index for manifest segment %d", o.BaseOffset)
 			}
-		}
-		// Written only once the segment opens and its index is usable, so a
-		// store object that cannot actually be read does not leave a marker
-		// behind claiming it can.
-		markerPath := seg.offloadMarkerPath()
-		if err := os.WriteFile(markerPath, body, 0o644); err != nil {
-			seg.Close()
-			return adopted, errors.Wrap(err, "write offload marker")
 		}
 		l.segments = append(l.segments, seg)
 		adopted++

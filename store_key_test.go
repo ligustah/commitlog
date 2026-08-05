@@ -72,8 +72,7 @@ func TestRewriteDoesNotReuseTheKeyBeingRead(t *testing.T) {
 	seg.RUnlock()
 
 	fresh := freshLocalSegment(t, l, seg)
-	superseded, err := seg.ReplaceOffloaded(fresh, nil)
-	require.NoError(t, err)
+	superseded := replaceOffloaded(t, seg, fresh)
 
 	seg.RLock()
 	after := seg.storeKey

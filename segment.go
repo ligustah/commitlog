@@ -293,51 +293,56 @@ func validMarkerKeys(m offloadMeta) error {
 // already offloaded. When cache is non-nil (tiered storage, option 2) it also
 // uploads the index object and drops the local index, so no per-segment index
 // file remains on local disk; reads then fetch the index into the shared cache
-// on demand. Otherwise the index stays local (option 1). The .offloaded marker
-// records the segment's boundaries and log size so a restart places it without
-// reading the remote index. The marker is the commit point: it is written after
-// both objects are uploaded and before the local files are removed, so a crash
-// mid-offload leaves a recoverable state (objects present + marker => open
-// through the store).
+// on demand. Otherwise the index stays local (option 1).
+//
+// It only UPLOADS. Nothing local is dropped and no backing is swapped, because
+// until the tier manifest names these objects the offload is not committed, and
+// an uncommitted offload must leave the local bytes exactly where they are —
+// they are still the only copy anyone can find. The caller publishes the
+// manifest and then calls attachOffloaded.
+//
+// A segment already offloaded returns an empty meta and no error, which the
+// caller reads as "nothing to commit".
+//
 // key and idxKey are the object keys the caller allocated for this upload (see
 // newStoreKeys). They are passed rather than derived here because they cannot be
 // derived: every upload gets its own, so only the caller that allocated them
 // knows which objects are being written.
-func (s *segment) offloadTo(store SegmentStore, key, idxKey string, cache *RemoteIndexCache) error {
+func (s *segment) uploadTo(store SegmentStore, key, idxKey string, cache *RemoteIndexCache) (offloadMeta, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
-		return ErrSegmentClosed
+		return offloadMeta{}, ErrSegmentClosed
 	}
 	if s.store != nil {
-		return nil // already offloaded
+		return offloadMeta{}, nil // already offloaded
 	}
 	if !s.sealed {
-		return errors.New("commitlog: cannot offload an unsealed segment")
+		return offloadMeta{}, errors.New("commitlog: cannot offload an unsealed segment")
 	}
 	size, err := s.backing.Size()
 	if err != nil {
-		return err
+		return offloadMeta{}, err
 	}
 	if err := store.Put(key, io.NewSectionReader(s.backing, 0, size), size); err != nil {
-		return errors.Wrap(err, "offload put")
+		return offloadMeta{}, errors.Wrap(err, "offload put")
 	}
 
-	// Option 2: upload the index object too (before the marker), so the marker's
-	// presence implies both objects exist.
+	// Option 2: upload the index object too, before the manifest, so a manifest
+	// entry implies both objects exist.
 	var indexKey string
 	if cache != nil {
 		indexKey = idxKey
 		r, isize, err := s.Index.offloadReader()
 		if err != nil {
-			return errors.Wrap(err, "read index for offload")
+			return offloadMeta{}, errors.Wrap(err, "read index for offload")
 		}
 		if err := store.Put(indexKey, r, isize); err != nil {
-			return errors.Wrap(err, "offload index put")
+			return offloadMeta{}, errors.Wrap(err, "offload index put")
 		}
 	}
 
-	meta := offloadMeta{
+	return offloadMeta{
 		LogKey:         key,
 		IndexKey:       indexKey,
 		FirstOffset:    s.firstOffset,
@@ -347,13 +352,31 @@ func (s *segment) offloadTo(store SegmentStore, key, idxKey string, cache *Remot
 		Position:       s.position,
 		PhysPosition:   size,
 		BlockMode:      s.blockMode,
+	}, nil
+}
+
+// attachOffloaded is the second half of an offload: the objects are uploaded
+// AND the manifest that names them is published, so the local bytes are now
+// redundant and can go.
+func (s *segment) attachOffloaded(store SegmentStore, meta offloadMeta, cache *RemoteIndexCache) error {
+	s.Lock()
+	defer s.Unlock()
+	if s.closed {
+		return ErrSegmentClosed
+	}
+	if s.store != nil {
+		return nil
 	}
 	return s.attachOffloadedLocked(store, meta, cache)
 }
 
 // attachOffloadedLocked turns a LOCAL segment into an offloaded one pointing at
-// objects that already exist in the store: it writes the marker (the commit
-// point), drops the local files, and swaps in a backing over the object.
+// objects that already exist in the store: it drops the local files and swaps in
+// a backing over the object.
+//
+// It commits nothing. The manifest naming these objects is the commit, and the
+// caller has already published it — which is why this may delete local bytes at
+// all.
 //
 // It is shared by the two ways a segment can come to be offloaded — uploading
 // its own bytes, and adopting objects another process uploaded — so the two
@@ -380,14 +403,9 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 		}
 	}
 
-	markerBytes, err := json.Marshal(meta)
-	if err != nil {
-		return errors.Wrap(err, "encode offload marker")
-	}
-	// Marker (commit point), then drop the local files.
-	if err := os.WriteFile(s.offloadMarkerPath(), markerBytes, 0o644); err != nil {
-		return errors.Wrap(err, "write offload marker")
-	}
+	// The commit already happened, in the store: the caller published a manifest
+	// naming these objects before calling this. What is left is to drop the local
+	// copies, which is why nothing here is a commit point.
 	if err := os.Remove(localLog); err != nil && !os.IsNotExist(err) {
 		return errors.Wrap(err, "remove local log")
 	}
@@ -1735,22 +1753,31 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 // This is what lets a tiered segment be compacted at all. A local rewrite gets
 // its atomicity from Replace's rename over the same path; a store has no
 // equivalent, because Put overwrites unconditionally and cannot be made
-// conditional. A fresh key is the substitute: the new bytes go to a key
-// nothing is reading, and the MARKER is the commit point that decides which
-// object the segment reads, exactly as it does for a first offload.
+// conditional. A fresh key is the substitute: the new bytes go to a key nothing
+// is reading, and the MANIFEST is the commit point that decides which object the
+// segment reads, exactly as it does for a first offload.
 //
 // Ordering, and what a crash at each step leaves:
 //
 //  1. upload the new log object, and the index object for an offloaded index.
 //     A crash here leaves objects nothing points at — orphans, reclaimable by
-//     comparing the store's keys against the markers.
-//  2. rewrite the marker. THIS IS THE COMMIT POINT. Before it the segment is
-//     the old object; after it, the new one.
+//     comparing the store's keys against the manifest.
+//  2. publish a manifest naming the new objects. THIS IS THE COMMIT POINT, and
+//     it happens between the two halves below, in the caller: the segment goes
+//     on serving the OLD object across it, which is why the two halves cannot be
+//     one call — tierState reads every segment under its read lock, so a commit
+//     with this segment's write lock held would deadlock.
 //  3. invalidate the caches that would otherwise keep serving the old bytes:
 //     the backing's read-ahead window and, for an offloaded index, its cache
 //     entry. Skipping this is how a rewrite would appear to succeed and still
 //     serve pre-rewrite reads.
 //  4. swap in a backing over the new key.
+//
+// A crash between 2 and 4 leaves the manifest naming the new object and the
+// segment still reading the old one. Reopening takes the manifest, so it reads
+// the new object — which is complete, since 1 finished — and the old object is
+// unreferenced and collectable. There is no state in that window where a reader
+// can see records that neither object holds.
 //
 // The superseded objects are QUEUED rather than deleted here. A reader that
 // opened this segment before the swap holds a backing over the old key and is
@@ -1760,11 +1787,11 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 // That is also why deletion must be explicit rather than implied by the
 // overwrite it replaces: a rewrite that empties a segment leaves the old
 // objects behind with nothing to overwrite them.
-func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]pendingReclaim, error) {
+func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingReclaim, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.store == nil {
-		return nil, errors.New("commitlog: segment is not offloaded")
+		return offloadMeta{}, nil, errors.New("commitlog: segment is not offloaded")
 	}
 
 	// The backing this segment is serving reads from right now. It becomes the
@@ -1780,19 +1807,19 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]p
 
 	size, err := fresh.backing.Size()
 	if err != nil {
-		return nil, err
+		return offloadMeta{}, nil, err
 	}
 	if err := s.store.Put(newKey, io.NewSectionReader(fresh.backing, 0, size), size); err != nil {
-		return nil, errors.Wrap(err, "put rewritten segment")
+		return offloadMeta{}, nil, errors.Wrap(err, "put rewritten segment")
 	}
 	if s.indexKey != "" {
 		newIndexKey = freshIndexKey
 		r, isize, err := fresh.Index.offloadReader()
 		if err != nil {
-			return nil, errors.Wrap(err, "read rewritten index")
+			return offloadMeta{}, nil, errors.Wrap(err, "read rewritten index")
 		}
 		if err := s.store.Put(newIndexKey, r, isize); err != nil {
-			return nil, errors.Wrap(err, "put rewritten index")
+			return offloadMeta{}, nil, errors.Wrap(err, "put rewritten index")
 		}
 		// No pin: an index object has no long-lived holder to count. It is
 		// fetched whole into indexCache, which is invalidated below, so a reader
@@ -1814,13 +1841,24 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]p
 		PhysPosition:   size,
 		BlockMode:      fresh.blockMode,
 	}
-	markerBytes, err := json.Marshal(meta)
-	if err != nil {
-		return nil, errors.Wrap(err, "encode offload marker")
+	return meta, superseded, nil
+}
+
+// swapReplacement is the second half of ReplaceOffloaded: the caller has
+// published a manifest naming meta's objects, so the segment stops serving the
+// object it superseded and starts serving the new one.
+//
+// Everything here is post-commit. Nothing it does can be undone by failing, and
+// nothing before it has changed what a reader sees.
+func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
+	s.Lock()
+	defer s.Unlock()
+	if s.store == nil {
+		return errors.New("commitlog: segment is not offloaded")
 	}
-	if err := os.WriteFile(s.offloadMarkerPath(), markerBytes, 0o644); err != nil {
-		return nil, errors.Wrap(err, "write offload marker")
-	}
+	newKey := meta.LogKey
+	newIndexKey := meta.IndexKey
+	size := meta.PhysPosition
 
 	// Committed. From here the segment IS the new object, so anything still
 	// able to serve the old one has to be cleared before the swap.
@@ -1844,7 +1882,7 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]p
 
 	sb, err := newStoreBackingSize(s.store, newKey, size)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	s.backing = sb
 	s.storeKey = newKey
@@ -1863,19 +1901,19 @@ func (s *segment) ReplaceOffloaded(fresh *segment, cache *RemoteIndexCache) ([]p
 	// the way the rewrite wrote it.
 	if localIndex {
 		if err := s.Index.Close(); err != nil {
-			return nil, errors.Wrap(err, "close stale local index")
+			return errors.Wrap(err, "close stale local index")
 		}
 		if err := fresh.Index.Close(); err != nil {
-			return nil, errors.Wrap(err, "close rewritten index")
+			return errors.Wrap(err, "close rewritten index")
 		}
 		if err := os.Rename(fresh.indexPath(), s.indexPath()); err != nil {
-			return nil, errors.Wrap(err, "install rewritten index")
+			return errors.Wrap(err, "install rewritten index")
 		}
 		if err := s.setupIndex(); err != nil {
-			return nil, errors.Wrap(err, "reopen rewritten index")
+			return errors.Wrap(err, "reopen rewritten index")
 		}
 	}
-	return superseded, nil
+	return nil
 }
 
 // Cleaned creates a cleaned segment for this segment.

@@ -51,6 +51,25 @@ type TierObject struct {
 	BlockMode bool
 }
 
+// tierObject is meta's inverse: the same nine fields, plus the base offset that
+// identifies which segment they describe. offloadMeta is what a segment knows
+// about its own objects and TierObject is what the manifest says about them, so
+// the two carry the same facts and only the direction differs.
+func (m offloadMeta) tierObject(baseOffset int64) TierObject {
+	return TierObject{
+		BaseOffset:     baseOffset,
+		LogKey:         m.LogKey,
+		IndexKey:       m.IndexKey,
+		FirstOffset:    m.FirstOffset,
+		LastOffset:     m.LastOffset,
+		FirstWriteTime: m.FirstWriteTime,
+		LastWriteTime:  m.LastWriteTime,
+		Position:       m.Position,
+		PhysPosition:   m.PhysPosition,
+		BlockMode:      m.BlockMode,
+	}
+}
+
 func (o TierObject) meta() offloadMeta {
 	return offloadMeta{
 		LogKey:         o.LogKey,

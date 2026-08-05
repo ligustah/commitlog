@@ -408,6 +408,11 @@ func New(opts Options) (CommitLog, error) {
 		syncDurable:  -1,
 		tierReadOnly: opts.TierReadOnly,
 	}
+	// Set here rather than passed to newCompactCleaner because it closes over the
+	// log the cleaner belongs to, which does not exist until this line.
+	compactCleaner.commitTier = func(baseOffset int64, meta offloadMeta) error {
+		return l.writeTierManifestWith(meta.tierObject(baseOffset))
+	}
 
 	if err := l.init(); err != nil {
 		return nil, err
@@ -495,46 +500,42 @@ func (l *commitLog) openOrRelease() (err error) {
 }
 
 func (l *commitLog) open() error {
+	// The tier is read BEFORE the directory, because it is what makes sense of
+	// the directory. An offloaded segment leaves no local .log — and, under
+	// option 1, still has a local .index — so an index with no log beside it is
+	// either an offloaded segment's index or a genuine orphan, and only the
+	// manifest can tell those apart.
+	var tier []TierObject
+	if l.SegmentStore != nil {
+		var err error
+		tier, err = readTierManifest(l.SegmentStore)
+		if err != nil {
+			return err
+		}
+	}
+	offloaded := make(map[int64]bool, len(tier))
+	for _, o := range tier {
+		offloaded[o.BaseOffset] = true
+	}
+
 	files, err := os.ReadDir(l.Path)
 	if err != nil {
 		return errors.Wrap(err, "read dir failed")
 	}
 	for _, file := range files {
 		// If this file is an index file, make sure it has a corresponding .log
-		// file OR an .offloaded marker (an offloaded segment keeps its index
-		// local but has no local .log). Only a truly orphaned index is removed.
+		// file OR a manifest entry. Only a truly orphaned index is removed.
 		if strings.HasSuffix(file.Name(), indexFileSuffix) {
 			stem := strings.TrimSuffix(file.Name(), indexFileSuffix)
 			_, logErr := os.Stat(filepath.Join(l.Path, stem+logFileSuffix))
-			_, offErr := os.Stat(filepath.Join(l.Path, stem+offloadedSuffix))
-			if os.IsNotExist(logErr) && os.IsNotExist(offErr) {
+			base, convErr := strconv.Atoi(stem)
+			if os.IsNotExist(logErr) && (convErr != nil || !offloaded[int64(base)]) {
 				if err := os.Remove(filepath.Join(l.Path, file.Name())); err != nil {
 					return err
 				}
 			} else if logErr != nil && !os.IsNotExist(logErr) {
 				return errors.Wrap(logErr, "stat file failed")
 			}
-		} else if strings.HasSuffix(file.Name(), offloadedSuffix) {
-			offsetStr := strings.TrimSuffix(file.Name(), offloadedSuffix)
-			baseOffset, err := strconv.Atoi(offsetStr)
-			if err != nil {
-				return err
-			}
-			if l.SegmentStore == nil {
-				return errors.Errorf("commitlog: segment %d is offloaded but no SegmentStore is configured", baseOffset)
-			}
-			meta, err := readOffloadMarker(filepath.Join(l.Path, file.Name()))
-			if err != nil {
-				return errors.Wrap(err, "read offload marker failed")
-			}
-			if meta.IndexKey != "" && l.RemoteIndexCache == nil {
-				return errors.Errorf("commitlog: segment %d has an offloaded index but no RemoteIndexCache is configured", baseOffset)
-			}
-			segment, err := openOffloadedSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, l.Compression, l.SegmentStore, meta, l.RemoteIndexCache)
-			if err != nil {
-				return err
-			}
-			l.segments = append(l.segments, segment)
 		} else if strings.HasSuffix(file.Name(), logFileSuffix) {
 			offsetStr := strings.TrimSuffix(file.Name(), logFileSuffix)
 			baseOffset, err := strconv.Atoi(offsetStr)
@@ -561,22 +562,18 @@ func (l *commitLog) open() error {
 			l.hw = hw
 		}
 	}
-	// Take whatever the STORE says its tier holds and this log does not. Local
-	// markers have already been read above and win where both describe a
-	// segment; this only fills gaps.
+	// Every offloaded segment comes from here — the manifest read at the top is
+	// the only record that a segment lives in the store. Local .log files were
+	// read above and win where both describe one base offset, which is the state
+	// a crash between the commit and the local delete leaves: the bytes are the
+	// same either way, and the store object is collected on the next publish.
 	//
 	// It is what makes the tier self-describing rather than an appendage of
 	// this directory: a process holding the store and an empty or partial log
 	// directory opens the log and reaches the offloaded records, without being
 	// handed bookkeeping by anyone.
-	if l.SegmentStore != nil {
-		objs, err := readTierManifest(l.SegmentStore)
-		if err != nil {
-			return err
-		}
-		if _, err := l.adoptTierManifestLocked(objs); err != nil {
-			return err
-		}
+	if _, err := l.adoptTierManifestLocked(tier); err != nil {
+		return err
 	}
 	// After every source of segments has been read, and before anything reads
 	// the list: two of them can describe the same records.
@@ -1553,19 +1550,28 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 			continue
 		}
 		logKey, idxKey := newStoreKeys(s.BaseOffset)
-		if err := s.offloadTo(l.SegmentStore, logKey, idxKey,
-			l.RemoteIndexCache); err != nil {
+		meta, err := s.uploadTo(l.SegmentStore, logKey, idxKey, l.RemoteIndexCache)
+		if err != nil {
+			return n, err
+		}
+		if meta.LogKey == "" {
+			continue // already offloaded; nothing to commit
+		}
+		// The commit, one segment at a time. After the objects and BEFORE the
+		// local bytes are dropped, which is the only ordering that is safe in
+		// both directions: an object no manifest names was never committed and
+		// is a recognisable orphan, and a local file is never removed against an
+		// entry that is not yet published.
+		//
+		// Per segment rather than once per pass, because a batch would put every
+		// segment in the pass on the wrong side of that second rule.
+		if err := l.writeTierManifestWith(meta.tierObject(s.BaseOffset)); err != nil {
+			return n, err
+		}
+		if err := s.attachOffloaded(l.SegmentStore, meta, l.RemoteIndexCache); err != nil {
 			return n, err
 		}
 		n++
-	}
-	if n > 0 {
-		// After the objects, never before: the manifest is the tier's commit
-		// point, so an object it does not name was never committed and is a
-		// recognisable orphan rather than an ambiguity.
-		if err := l.writeTierManifest(); err != nil {
-			return n, err
-		}
 	}
 	return n, nil
 }

@@ -36,6 +36,12 @@ type compactCleaner struct {
 	// cache is needed to invalidate an offloaded segment's index entry when a
 	// rewrite supersedes the object it describes.
 	cache *RemoteIndexCache
+	// commitTier publishes a manifest naming one segment's freshly uploaded
+	// objects. It is the commit point for a rewrite of an offloaded segment, and
+	// it belongs to the log rather than to the cleaner: only the log can build a
+	// manifest, because a manifest describes every segment and the cleaner sees
+	// one at a time.
+	commitTier func(baseOffset int64, meta offloadMeta) error
 	// superseded collects the store objects this pass replaced. They are NOT
 	// deleted here: a reader that opened a segment before its rewrite holds a
 	// backing over the old key and is entitled to finish. Each entry carries
@@ -856,8 +862,17 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	// and the segment object itself carries on — so the caller keeps the SAME
 	// segment rather than the working copy, which is only the vehicle.
 	if seg.isOffloaded() {
-		reclaim, err := seg.ReplaceOffloaded(cleaned, c.cache)
+		meta, reclaim, err := seg.uploadReplacement(cleaned)
 		if err != nil {
+			return nil, removed, err
+		}
+		// The commit, between the upload and the swap. Until the manifest names
+		// the new objects the segment goes on serving the one it supersedes, so
+		// a failure here leaves a rewrite that simply did not happen.
+		if err := c.commitTier(seg.BaseOffset, meta); err != nil {
+			return nil, removed, err
+		}
+		if err := seg.swapReplacement(cleaned, meta); err != nil {
 			return nil, removed, err
 		}
 		c.superseded = append(c.superseded, reclaim...)

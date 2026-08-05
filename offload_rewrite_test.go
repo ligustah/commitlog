@@ -64,8 +64,7 @@ func TestReplaceOffloadedWritesNewGenerationAndKeepsTheOld(t *testing.T) {
 	oldBacking := seg.backing
 
 	fresh := freshLocalSegment(t, l, seg)
-	superseded, err := seg.ReplaceOffloaded(fresh, nil)
-	require.NoError(t, err)
+	superseded := replaceOffloaded(t, seg, fresh)
 
 	seg.RLock()
 	newKey := seg.storeKey
@@ -89,23 +88,39 @@ func TestReplaceOffloadedWritesNewGenerationAndKeepsTheOld(t *testing.T) {
 	require.NoError(t, err, "a reader holding the old generation must not be broken")
 }
 
-// The marker is the commit point: after a rewrite it names the new generation,
-// so a reopen resolves the rewritten object rather than the superseded one.
-func TestReplaceOffloadedMarkerNamesTheNewGeneration(t *testing.T) {
-	l, _, seg := offloadedFixture(t, nil)
+// The manifest is the commit point: after a rewrite it names the new
+// generation, so a reopen resolves the rewritten object and not the superseded
+// one. The publish happens BETWEEN the two halves, which is what the test walks
+// through by hand.
+func TestReplaceOffloadedManifestNamesTheNewGeneration(t *testing.T) {
+	l, store, seg := offloadedFixture(t, nil)
 
 	fresh := freshLocalSegment(t, l, seg)
-	_, err := seg.ReplaceOffloaded(fresh, nil)
-	require.NoError(t, err)
-
-	meta, err := readOffloadMarker(seg.offloadMarkerPath())
+	meta, _, err := seg.uploadReplacement(fresh)
 	require.NoError(t, err)
 
 	seg.RLock()
+	stillOld := seg.storeKey
+	seg.RUnlock()
+	require.NotEqual(t, meta.LogKey, stillOld,
+		"the segment must go on serving the old object until the commit")
+
+	require.NoError(t, l.writeTierManifestWith(meta.tierObject(seg.BaseOffset)))
+	require.NoError(t, seg.swapReplacement(fresh, meta))
+
+	objs, err := readTierManifest(store)
+	require.NoError(t, err)
+	var named string
+	for _, o := range objs {
+		if o.BaseOffset == seg.BaseOffset {
+			named = o.LogKey
+		}
+	}
+	seg.RLock()
 	live := seg.storeKey
 	seg.RUnlock()
-	require.Equal(t, live, meta.LogKey,
-		"the marker must resolve to the rewritten object")
+	require.Equal(t, live, named,
+		"the manifest must resolve to the rewritten object")
 }
 
 // The read-ahead window must not survive the swap. Without the invalidation the
@@ -126,8 +141,7 @@ func TestReplaceOffloadedClearsTheReadAheadWindow(t *testing.T) {
 	require.True(t, warmed, "the window should be populated at this point")
 
 	fresh := freshLocalSegment(t, l, seg)
-	_, err = seg.ReplaceOffloaded(fresh, nil)
-	require.NoError(t, err)
+	replaceOffloaded(t, seg, fresh)
 
 	// The segment now reads through a different backing entirely, over the new
 	// key, and the old one was cleared before being dropped.
@@ -143,9 +157,20 @@ func TestReplaceOffloadedClearsTheReadAheadWindow(t *testing.T) {
 func TestReplaceOffloadedRefusesALocalSegment(t *testing.T) {
 	dir := tempDir(t)
 	seg := createSegment(t, dir, 0, 1024)
-	_, err := seg.ReplaceOffloaded(seg, nil)
+	_, _, err := seg.uploadReplacement(seg)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not offloaded")
+}
+
+// replaceOffloaded runs both halves of a rewrite back to back, for the tests
+// that are about what the SEGMENT does across the swap rather than about the
+// manifest publish that separates them in the log.
+func replaceOffloaded(t *testing.T, seg, fresh *segment) []pendingReclaim {
+	t.Helper()
+	meta, superseded, err := seg.uploadReplacement(fresh)
+	require.NoError(t, err)
+	require.NoError(t, seg.swapReplacement(fresh, meta))
+	return superseded
 }
 
 // freshLocalSegment builds a local segment holding the same records as src, as
