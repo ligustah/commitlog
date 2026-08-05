@@ -240,8 +240,12 @@ type CommitLog interface {
 	// manifest — so it is a recognisable orphan rather than something a reader
 	// has to guess about.
 	//
+	// The manifest is one of two objects that describe the tier rather than
+	// hold it; the other is the log's descriptor, which says what the log IS.
+	// Neither is named by the manifest, and neither is ever garbage.
+	//
 	// Returns nil for a log with no store, and for a store with nothing
-	// offloaded or one written before manifests existed.
+	// offloaded.
 	TierManifest() ([]TierObject, error)
 
 	// NewestOffset returns the offset of the last message in the log or -1 if

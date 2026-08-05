@@ -129,6 +129,15 @@ var ErrRestoreRequired = errors.New("commitlog: segment offloaded to a restore-r
 type SegmentStore interface {
 	// Put stores size bytes read from r under key, overwriting any existing
 	// object (idempotent re-offload).
+	//
+	// It must be atomic per object: a reader sees the whole new object or the
+	// whole old one, never a mixture, and a crash mid-Put leaves one of the two
+	// rather than a truncated file. FileSegmentStore writes a temp file and
+	// renames; an object store's PUT already works this way.
+	//
+	// This is not a nicety. The manifest and the descriptor are both published
+	// with Put and both are read at open, so a half-written one is not a bad
+	// segment — it is a log that will not open at all.
 	Put(key string, r io.Reader, size int64) error
 	// ReadAt reads len(p) bytes at off from the object under key, with
 	// io.ReaderAt semantics (a short read returns io.EOF). A restore-required

@@ -113,10 +113,11 @@ func descriptorPath(path string) string {
 	return filepath.Join(path, descriptorFileName)
 }
 
-// readDescriptor loads the log's descriptor. A missing file returns
-// os.ErrNotExist so the caller can tell "this log predates descriptors" from "a
-// descriptor exists and is unreadable" — the first is a migration, the second
-// is corruption and must not be papered over.
+// readDescriptor loads the descriptor a log with no store keeps in its
+// directory. A missing file returns os.ErrNotExist so the caller can tell "this
+// log has no descriptor" from "a descriptor exists and is unreadable" — the
+// first is answerable with AdoptOptions, the second is corruption and must not
+// be papered over.
 func readDescriptor(path string) (descriptor, error) {
 	f, err := os.Open(descriptorPath(path))
 	if err != nil {
@@ -236,11 +237,11 @@ func writeDescriptor(path string, d descriptor) error {
 // writeStoreDescriptor publishes d into the store, where a process that has the
 // store and not the directory can read it.
 //
-// Put overwrites, and there is no atomic rename to lean on here — but a torn
-// descriptor object is not the exposure the file's atomic write guards against.
-// The file is rewritten on every open that changes a non-gating field, and a
-// crash mid-write there would leave a log that refuses itself. This is written
-// once at creation and on a deliberate retune.
+// No atomic_file wrapper here, because the store already promises what that
+// wrapper buys: Put is required to leave the object fully present or absent and
+// never half-written — FileSegmentStore writes a temp file and renames, and an
+// object store's PUT is atomic per object. That promise is load-bearing for
+// segment objects already, and it is the same promise this needs.
 func writeStoreDescriptor(store SegmentStore, d descriptor) error {
 	body := []byte(renderDescriptor(d))
 	if err := store.Put(descriptorKey, bytes.NewReader(body), int64(len(body))); err != nil {
