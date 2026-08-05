@@ -252,10 +252,15 @@ func (l *commitLog) UnreferencedObjects() ([]string, error) {
 	// "unreferenced by me" and "unreferenced", and getting it wrong deletes
 	// data a live peer is serving.
 	//
-	// The manifest itself is never garbage: it is what makes the tier
-	// readable, and nothing references it.
+	// The manifest and the descriptor are never garbage. Nothing references
+	// either — they are what the store says ABOUT itself rather than what it
+	// holds — so a rule built only from references collects both. The manifest
+	// is what makes the tier readable; the descriptor is what makes it
+	// identifiable, and collecting it leaves a log that refuses its own next
+	// open, since a log that exists with no descriptor is a refusal.
 	referenced := make(map[string]bool, len(keys))
 	referenced[manifestKey] = true
+	referenced[descriptorKey] = true
 	if manifest, err := readTierManifest(l.SegmentStore); err == nil {
 		for _, o := range manifest {
 			if o.LogKey != "" {

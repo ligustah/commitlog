@@ -74,9 +74,9 @@ func fzStoreBaseOffsets(t *testing.T, store *fzFaultStore, cl *commitLog) map[in
 
 	out := map[int64]bool{}
 	for _, k := range keys {
-		// The store holds the tier manifest alongside the segment objects; it
-		// describes them rather than being one.
-		if k == manifestKey || queued[k] {
+		// The store holds objects that describe the log alongside the ones that
+		// hold it; `ParseInt` on a descriptive key is a spurious failure.
+		if isStoreMetaKey(k) || queued[k] {
 			continue
 		}
 		stem := k

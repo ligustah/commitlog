@@ -427,6 +427,20 @@ run_guard "manifest refuses a foreign key" manifest.go   '		if err := validStore
 # that makes the consequence concrete rather than the policy.
 run_guard "store key stays inside the store" segment_store.go   '	if strings.ContainsAny(key, `/\`) {'   '	if false {'   '^TestAFileSegmentStoreKeyCannotReachOutsideItsDirectory$'
 
+# Nothing REFERENCES the descriptor -- it is what the store says about itself,
+# not part of what it holds -- so the reference-based garbage rule collects it
+# unless told otherwise, and the log then refuses its own next open.
+run_guard "the descriptor is never garbage" tier_state.go   '	referenced[descriptorKey] = true'   '	_ = descriptorKey'   '^TestTheDescriptorIsNeverGarbage$'
+
+# A store-backed log's existence is a question for the store, not for whatever
+# directory this process happens to be using. Neutralizing this falls back to the
+# directory scan -- which is what shipped, and which calls a node adopting a tier
+# a NEW log, so the one moment a process picks up someone else's log is the one
+# moment its retention settings are never compared.
+run_guard "newness comes from the store" descriptor.go   '	if opts.SegmentStore != nil {
+		_, err := readStoreDescriptor(opts.SegmentStore)'   '	if false {
+		_, err := readStoreDescriptor(opts.SegmentStore)'   '^TestAdoptingATierIsCheckedAgainstTheLogsOwnSettings$'
+
 # The version field is the manifest's whole integrity check, and `>` let version
 # 0 -- what an absent field decodes to -- through. Restoring `>` is restoring
 # "any JSON object is a manifest".

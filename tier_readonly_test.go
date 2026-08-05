@@ -131,14 +131,10 @@ func TestReadOnlyTierStillReadsThroughTheStore(t *testing.T) {
 
 	keys, err := store.List()
 	require.NoError(t, err)
-	// Counting only segment objects; the manifest is the tier describing
-	// itself, not something the follower added.
-	objects := 0
-	for _, k := range keys {
-		if k != manifestKey {
-			objects++
-		}
-	}
+	// Counting only segment objects. The manifest and the descriptor are the
+	// tier describing itself — what it holds and what it is — and the owner
+	// wrote both; neither is something the follower added.
+	objects := segmentObjectCount(keys)
 	require.Equal(t, len(state), objects, "and wrote nothing doing so")
 }
 

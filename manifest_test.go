@@ -23,9 +23,10 @@ func TestTierManifestDescribesTheStore(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, state, manifest)
 
-	// Every object it names exists, and every non-manifest object is the
-	// manifest itself. Nothing in the store is unaccounted for.
-	named := map[string]bool{manifestKey: true}
+	// Every object it names exists, and the only objects it does NOT name are
+	// the two that describe the log rather than hold it: the manifest, and the
+	// descriptor that says what this log is. Nothing else is unaccounted for.
+	named := map[string]bool{manifestKey: true, descriptorKey: true}
 	for _, o := range manifest {
 		require.Positive(t, o.PhysPosition)
 		require.LessOrEqual(t, o.FirstOffset, o.LastOffset)

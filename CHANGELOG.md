@@ -7,6 +7,56 @@ library from that fork onward.
 
 ## Unreleased
 
+- **Breaking**: a log with a `SegmentStore` keeps its descriptor IN the store,
+  beside the tier manifest, not in its local directory. An existing local
+  `log-descriptor` beside a store-backed log is ignored; there is no migration.
+
+  A store-backed log's data outlives any particular directory — that is what a
+  tier is for — so a process that has the store and not the directory has the
+  log, and must be able to ask what the log IS from the same place it asks what
+  the log HOLDS. A log with no store is unchanged: there is no catalog to be
+  authoritative, so the directory is the catalog.
+
+  This fixes a hole in the descriptor check. Whether a log was new was decided by
+  reading the local directory for `.log`/`.offloaded` files. A node adopting a
+  tier has a store full of segments and an *empty* directory, so it called itself
+  new — and a new log skips the descriptor check entirely and records whatever it
+  was passed. The one moment a process picks up a log it did not create was the
+  one moment its retention settings were never compared. `Compact` and
+  `CompactTombstoneRetention` decide what gets deleted, and their zero values
+  mean no protection rather than "disabled", so adopting a compacted tier with an
+  empty config began applying a retention policy the log was never created with,
+  to data this process did not write.
+
+  Reported by durable_streams, who also named the fix: the check belongs against
+  the catalog, always.
+
+- **Breaking**: an unknown key in a descriptor is an error.
+
+  It used to be ignored so a newer writer stayed readable by an older reader.
+  Pre-v1 there is no older reader, and the tolerance covered more than it was
+  aimed at — a typo, a renamed key and a line mangled by a partial write all look
+  like a field from the future, and all left a descriptor that read as valid
+  while describing a log nobody configured. The version line is what makes a real
+  format change detectable, and it stays.
+
+- **Changed**: `UnreferencedObjects` never reports the descriptor.
+
+  It judges by what references an object, and nothing references the descriptor —
+  it is what the store says *about* itself rather than what it holds. So the rule
+  as written collected it, and the collect-then-`DeleteStoreObjects` cycle the API
+  documents would have left a log that refuses its own next open, since a log that
+  exists with no descriptor is a refusal by design. The manifest was already
+  exempt for the same reason; the descriptor is the first object of that kind
+  added since the rule was written, and now there is a guard on it.
+
+- **Changed**: `ErrDescriptorMismatch` no longer describes a missing descriptor
+  as a log that "predates the descriptor". `AdoptOptions` still resolves it, and
+  now means one thing rather than two: *I know what this log is, record it.* Its
+  message names the tier rather than the local directory for a store-backed log,
+  since that directory is often a scratch path this process picked and the
+  disagreement is with the tier everyone shares.
+
 The first round of a standing sweep for complexity with no beneficiary
 (`.failover/maintenance/needless-complexity.md`). Pre-v1, nothing is deployed,
 so a compatibility path is not a cost we are carrying for someone — it is a code

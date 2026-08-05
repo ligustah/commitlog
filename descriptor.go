@@ -2,7 +2,9 @@ package commitlog
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,32 +17,47 @@ import (
 )
 
 const (
+	// descriptorFileName is where a log's identity lives when it has no
+	// SegmentStore: beside its segments, in its own directory.
 	descriptorFileName = "log-descriptor"
-	descriptorFileV0   = 0
+	// descriptorKey is where it lives when the log HAS a store — an object in
+	// the store, beside the tier manifest.
+	//
+	// These are two locations for one fact, but never at the same time: a log
+	// consults exactly one of them, chosen by whether it has a store. The
+	// choice follows from what each place can answer. A store-backed log's data
+	// outlives any particular directory — that is what a tier is for — so a
+	// process that has the store and not the directory has the log, and it must
+	// be able to ask what the log IS from the same place it asks what the log
+	// HOLDS. The directory can only answer for logs that live entirely in it.
+	descriptorKey    = "log-descriptor"
+	descriptorFileV0 = 0
 )
 
-// ErrDescriptorMismatch is returned by New when the log on disk was created
-// with compaction settings that disagree with the ones passed, or when it
-// predates the descriptor and so has none. Both mean the same thing: the caller
-// and the log disagree about what the log IS, and continuing would silently
-// apply a retention policy the log was not created with.
+// ErrDescriptorMismatch is returned by New when the log was created with
+// compaction settings that disagree with the ones passed, or when it exists and
+// has no descriptor at all. Both mean the same thing: the caller and the log
+// disagree about what the log IS, and continuing would silently apply a
+// retention policy the log was not created with.
 //
 // Resolve it deliberately with AdoptOptions, which rewrites the descriptor to
-// match — that is both the retune path and the one-time migration path for a
-// log created before descriptors existed.
+// match. That is a retune — "I know what this log is, record it" — and it is
+// the answer to both shapes, since neither can be settled from what is on disk.
 var ErrDescriptorMismatch = errors.New("commitlog: options disagree with the log's descriptor")
 
-// descriptor is the on-disk record of what a log IS, written into the log
-// directory beside the segments. It exists because compaction behaviour
-// otherwise lives only in the Options a caller happens to pass at open time, so
-// reopening a directory with different — or absent — options silently changes
-// what gets deleted. The zero values of the compaction settings mean NO
-// protection rather than "disabled", which makes an accidentally empty config
-// maximally destructive: that is the failure this turns into an error.
+// descriptor is the record of what a log IS, kept beside the thing that owns
+// its data — the segments for a plain log, the tier manifest for a store-backed
+// one. It exists because compaction behaviour otherwise lives only in the
+// Options a caller happens to pass at open time, so reopening a log with
+// different — or absent — options silently changes what gets deleted. The zero
+// values of the compaction settings mean NO protection rather than "disabled",
+// which makes an accidentally empty config maximally destructive: that is the
+// failure this turns into an error.
 //
 // It is a human-readable sidecar in the style of the existing
-// leader-epoch-checkpoint and replication-offset-checkpoint files, so a
-// directory can be identified without the code that created it.
+// leader-epoch-checkpoint and replication-offset-checkpoint files, so a log can
+// be identified without the code that created it — which is worth as much in a
+// store as it is in a directory.
 type descriptor struct {
 	Compact                   bool
 	CompactMinAge             time.Duration
@@ -101,14 +118,36 @@ func descriptorPath(path string) string {
 // descriptor exists and is unreadable" — the first is a migration, the second
 // is corruption and must not be papered over.
 func readDescriptor(path string) (descriptor, error) {
-	var d descriptor
 	f, err := os.Open(descriptorPath(path))
 	if err != nil {
-		return d, err
+		return descriptor{}, err
 	}
 	defer f.Close() // nolint: errcheck
+	return parseDescriptor(f)
+}
 
-	scanner := bufio.NewScanner(f)
+// readStoreDescriptor loads the descriptor a store-backed log published into its
+// store. A store with no descriptor object returns os.ErrNotExist, so the caller
+// tells "this store has never held a log" from "the descriptor is unreadable"
+// exactly as it does for the file.
+//
+// Absence is inferred from Size failing, which is the same signal readTierManifest
+// uses for a missing manifest: the SegmentStore interface has no exists().
+func readStoreDescriptor(store SegmentStore) (descriptor, error) {
+	size, err := store.Size(descriptorKey)
+	if err != nil || size <= 0 {
+		return descriptor{}, os.ErrNotExist
+	}
+	body := make([]byte, size)
+	if _, err := store.ReadAt(descriptorKey, body, 0); err != nil {
+		return descriptor{}, errors.Wrap(err, "read log descriptor from store")
+	}
+	return parseDescriptor(bytes.NewReader(body))
+}
+
+func parseDescriptor(r io.Reader) (descriptor, error) {
+	var d descriptor
+	scanner := bufio.NewScanner(r)
 	if !scanner.Scan() {
 		return d, errors.New("descriptor is empty")
 	}
@@ -138,10 +177,17 @@ func readDescriptor(path string) (descriptor, error) {
 	return d, nil
 }
 
-// set applies one key/value pair. An UNKNOWN key is ignored rather than
-// rejected, so a descriptor written by a newer version stays readable by an
-// older one; a known key with an unparseable value is still an error, since
-// that is corruption rather than a version skew.
+// set applies one key/value pair. An unknown key is an error, and a known key
+// with an unparseable value is too — both mean this file is not a descriptor
+// this build wrote.
+//
+// Unknown keys used to be IGNORED, so a descriptor written by a newer version
+// stayed readable by an older one. Pre-v1 there is no older reader to keep
+// working, and the tolerance was not free: it is the same rule that silently
+// swallows a typo, a half-written line, and a key whose name changed — the
+// three cases where being told is the whole value of reading the file. The
+// version line on the first line is what makes a real format change detectable,
+// and it stays.
 func (d *descriptor) set(key, value string) error {
 	var err error
 	switch key {
@@ -156,7 +202,7 @@ func (d *descriptor) set(key, value string) error {
 	case "max_segment_bytes":
 		d.MaxSegmentBytes, err = strconv.ParseInt(value, 10, 64)
 	default:
-		return nil
+		return errors.Errorf("unknown descriptor field %q", key)
 	}
 	if err != nil {
 		return errors.Wrapf(err, "parse descriptor field %q", key)
@@ -164,9 +210,9 @@ func (d *descriptor) set(key, value string) error {
 	return nil
 }
 
-// writeDescriptor persists d atomically, so a crash mid-write never leaves a
-// log with a torn descriptor it would then refuse to open.
-func writeDescriptor(path string, d descriptor) error {
+// renderDescriptor is the on-the-wire form, shared by both places it can be
+// stored so the two cannot drift into writing different files.
+func renderDescriptor(d descriptor) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d\n", descriptorFileV0)
 	fmt.Fprintf(&b, "compact=%t\n", d.Compact)
@@ -174,18 +220,64 @@ func writeDescriptor(path string, d descriptor) error {
 	fmt.Fprintf(&b, "compact_tombstone_retention=%s\n", d.CompactTombstoneRetention)
 	fmt.Fprintf(&b, "compression=%s\n", d.Compression)
 	fmt.Fprintf(&b, "max_segment_bytes=%d\n", d.MaxSegmentBytes)
-	if err := atomic_file.WriteFile(descriptorPath(path), strings.NewReader(b.String())); err != nil {
+	return b.String()
+}
+
+// writeDescriptor persists d atomically, so a crash mid-write never leaves a
+// log with a torn descriptor it would then refuse to open.
+func writeDescriptor(path string, d descriptor) error {
+	body := renderDescriptor(d)
+	if err := atomic_file.WriteFile(descriptorPath(path), strings.NewReader(body)); err != nil {
 		return errors.Wrap(err, "write log descriptor")
 	}
 	return nil
 }
 
-// logIsNew reports whether the directory holds no log yet, which is what
-// distinguishes "create" from "open" — New has a single entry point for both.
-// A log exists as soon as it has a segment, local or offloaded; the leftovers a
-// directory may also contain (checkpoints, working copies) do not make one.
-func logIsNew(path string) (bool, error) {
-	entries, err := os.ReadDir(path)
+// writeStoreDescriptor publishes d into the store, where a process that has the
+// store and not the directory can read it.
+//
+// Put overwrites, and there is no atomic rename to lean on here — but a torn
+// descriptor object is not the exposure the file's atomic write guards against.
+// The file is rewritten on every open that changes a non-gating field, and a
+// crash mid-write there would leave a log that refuses itself. This is written
+// once at creation and on a deliberate retune.
+func writeStoreDescriptor(store SegmentStore, d descriptor) error {
+	body := []byte(renderDescriptor(d))
+	if err := store.Put(descriptorKey, bytes.NewReader(body), int64(len(body))); err != nil {
+		return errors.Wrap(err, "put log descriptor")
+	}
+	return nil
+}
+
+// logIsNew reports whether this log exists yet, which is what distinguishes
+// "create" from "open" — New has a single entry point for both, and a new log
+// simply records what it was created with instead of being checked against
+// something that isn't there.
+//
+// It asks whatever owns the log's data. For a store-backed log that is the
+// store: a published descriptor means the log exists, whatever this particular
+// directory happens to contain. For a log with no store it is the directory,
+// and a log exists there as soon as it has a segment — the other leftovers a
+// directory may hold (checkpoints, working copies) do not make one.
+//
+// The distinction matters because the two answers disagree in exactly the case
+// that matters. A node ADOPTING a tier has a store full of segments and an
+// empty directory. Asked of the directory, it is a new log, and a new log skips
+// the check entirely — so the one moment a process is picking up someone else's
+// log is the one moment its retention settings were never compared. Asked of
+// the store, it is an existing log, and it gets checked.
+func logIsNew(opts Options) (bool, error) {
+	if opts.SegmentStore != nil {
+		_, err := readStoreDescriptor(opts.SegmentStore)
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		// An unreadable descriptor is not an absent one. Reporting "new" here
+		// would overwrite it with the caller's options, which is the silent
+		// adoption this whole mechanism exists to prevent.
+		return false, nil
+	}
+	entries, err := os.ReadDir(opts.Path)
 	if err != nil {
 		return false, errors.Wrap(err, "read log directory")
 	}
@@ -203,33 +295,73 @@ func logIsNew(path string) (bool, error) {
 // "the caller and the log disagree about what this log is" becomes an error
 // instead of silent data loss.
 //
-// isNew reports whether the directory held no log yet — a genuinely new log
-// simply records what it was created with.
+// isNew reports whether the log existed — a genuinely new one simply records
+// what it was created with.
 func reconcileDescriptor(opts Options, isNew bool) error {
 	want := descriptorFromOptions(opts)
 	if isNew || opts.AdoptOptions {
-		return writeDescriptor(opts.Path, want)
+		return publishDescriptor(opts, want)
 	}
-	got, err := readDescriptor(opts.Path)
+	got, err := loadDescriptor(opts)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// A log from before descriptors existed. Adopting whatever the caller
-			// happens to pass is exactly the behaviour being removed, so this is
-			// the same refusal as a mismatch — resolved with the same opt-in.
+			// The log exists and its identity does not. Nothing here can
+			// reconstruct it, and adopting whatever the caller happens to pass
+			// is exactly the behaviour this prevents, so it is the same refusal
+			// as a mismatch and takes the same deliberate opt-in.
 			return errors.Wrapf(ErrDescriptorMismatch,
-				"log at %s predates the descriptor; set AdoptOptions to record the "+
-					"settings it should have been created with", opts.Path)
+				"%s has no descriptor; set AdoptOptions to record the "+
+					"settings it should have been created with", descriptorHome(opts))
 		}
 		return err
 	}
 	if !got.enforced(want) {
-		return errors.Wrapf(ErrDescriptorMismatch, "log at %s: %s",
-			opts.Path, got.describeDifference(want))
+		return errors.Wrapf(ErrDescriptorMismatch, "%s: %s",
+			descriptorHome(opts), got.describeDifference(want))
 	}
-	// Agreed on what gates. Keep the non-gating fields current so the file still
-	// describes the log after a legitimate compression or segment-size change.
+	// Agreed on what gates. Keep the non-gating fields current so the descriptor
+	// still describes the log after a legitimate compression or segment-size
+	// change.
 	if got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes {
-		return writeDescriptor(opts.Path, want)
+		return publishDescriptor(opts, want)
 	}
 	return nil
+}
+
+// descriptorHome names the place the descriptor was read from, for an error
+// message. A store-backed log's local directory is often a scratch path this
+// process picked — "log at C:\tmp\x9f31" reads as a fault in a directory nobody
+// cares about, when the disagreement is with the tier the whole cluster shares.
+func descriptorHome(opts Options) string {
+	if opts.SegmentStore != nil {
+		return fmt.Sprintf("the tier behind the log at %s", opts.Path)
+	}
+	return fmt.Sprintf("log at %s", opts.Path)
+}
+
+// loadDescriptor reads the log's identity from wherever this log keeps it.
+func loadDescriptor(opts Options) (descriptor, error) {
+	if opts.SegmentStore != nil {
+		return readStoreDescriptor(opts.SegmentStore)
+	}
+	return readDescriptor(opts.Path)
+}
+
+// publishDescriptor writes it back to the same place.
+//
+// A log that does not own its tier does not write to it — that is what
+// TierReadOnly means, and a descriptor is not an exception to it. Such a process
+// is a follower: it has already been checked against whatever the owner
+// published, and if the owner published nothing there is nothing for it to
+// disagree with. Silently declining to write is right here in a way it would not
+// be for segment data, because the descriptor is a claim about the log rather
+// than part of it.
+func publishDescriptor(opts Options, d descriptor) error {
+	if opts.SegmentStore == nil {
+		return writeDescriptor(opts.Path, d)
+	}
+	if opts.TierReadOnly {
+		return nil
+	}
+	return writeStoreDescriptor(opts.SegmentStore, d)
 }

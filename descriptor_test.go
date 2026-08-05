@@ -113,9 +113,10 @@ func TestDescriptorAllowsCompressionAndSegmentSizeChange(t *testing.T) {
 	require.EqualValues(t, 4096, d.MaxSegmentBytes)
 }
 
-// A log created before descriptors existed has none. Silently adopting whatever
-// the caller passes is precisely the behaviour being removed, so it is the same
-// refusal as a mismatch — and the same opt-in resolves it.
+// A log that exists and has no descriptor cannot say what it is, and nothing on
+// disk can reconstruct it. Silently adopting whatever the caller passes is
+// precisely the behaviour being removed, so it is the same refusal as a
+// mismatch — and the same opt-in resolves it.
 func TestDescriptorRefusesLogWithoutOne(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(compactedOpts(dir))
@@ -123,7 +124,7 @@ func TestDescriptorRefusesLogWithoutOne(t *testing.T) {
 	appendOne(t, l)
 	require.NoError(t, l.Close())
 
-	// Reduce it to a pre-descriptor log.
+	// Take its identity away and leave its data.
 	require.NoError(t, os.Remove(filepath.Join(dir, descriptorFileName)))
 
 	_, err = New(compactedOpts(dir))
@@ -131,10 +132,12 @@ func TestDescriptorRefusesLogWithoutOne(t *testing.T) {
 	require.Contains(t, err.Error(), "AdoptOptions", "the error must say how to resolve it")
 }
 
-// AdoptOptions is the deliberate resolution for both refusals: the migration of
-// a log that has no descriptor, and a genuine retune of one that does.
+// AdoptOptions is the deliberate resolution for both refusals: a log that has
+// no descriptor, and a genuine retune of one that does. It says the same thing
+// in both — "I know what this log is, record it" — which is why one switch
+// answers both.
 func TestAdoptOptionsResolvesBothRefusals(t *testing.T) {
-	t.Run("migration", func(t *testing.T) {
+	t.Run("no descriptor", func(t *testing.T) {
 		dir := tempDir(t)
 		l, err := New(compactedOpts(dir))
 		require.NoError(t, err)
@@ -157,7 +160,7 @@ func TestAdoptOptionsResolvesBothRefusals(t *testing.T) {
 
 		// And the log is now normally openable without the opt-in.
 		l3, err := New(compactedOpts(dir))
-		require.NoError(t, err, "the migration must leave a log that opens plainly")
+		require.NoError(t, err, "adopting must leave a log that opens plainly")
 		require.NoError(t, l3.Close())
 	})
 
@@ -185,8 +188,8 @@ func TestAdoptOptionsResolvesBothRefusals(t *testing.T) {
 	})
 }
 
-// A descriptor that exists but is unreadable is corruption, not a migration,
-// and must not be silently overwritten by the caller's options.
+// A descriptor that exists but is unreadable is corruption, not an absence, and
+// must not be silently overwritten by the caller's options.
 func TestDescriptorCorruptionIsNotTreatedAsMissing(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(compactedOpts(dir))
@@ -203,19 +206,38 @@ func TestDescriptorCorruptionIsNotTreatedAsMissing(t *testing.T) {
 		"corruption is a different failure from a disagreement")
 }
 
-// An unknown key from a newer writer is ignored rather than rejected, so a
-// descriptor stays readable across versions; a known key with a bad value is
-// still corruption.
-func TestDescriptorToleratesUnknownKeysButNotBadValues(t *testing.T) {
+// A key this build does not know is an error, the same as a value it cannot
+// parse. Both mean the file is not a descriptor this build wrote.
+//
+// Unknown keys used to be ignored, so a newer writer stayed readable by an older
+// reader. Pre-v1 there is no older reader to keep working, and the tolerance
+// covered more than it was aimed at: a typo, a renamed key, and a line mangled
+// by a partial write all look like "a field from the future" and were all
+// accepted, leaving a descriptor that reads as valid while describing a log
+// nobody configured. The version line is what makes a real format change
+// detectable, and it stays.
+func TestDescriptorRefusesUnknownKeysAndBadValues(t *testing.T) {
 	dir := tempDir(t)
-	require.NoError(t, os.WriteFile(filepath.Join(dir, descriptorFileName),
-		[]byte("0\ncompact=true\nsomething_new=42\n"), 0666))
-	d, err := readDescriptor(dir)
-	require.NoError(t, err, "an unknown key must not break an older reader")
-	require.True(t, d.Compact)
 
+	for name, body := range map[string]string{
+		"an unknown key":       "0\ncompact=true\nsomething_new=42\n",
+		"a typo'd key":         "0\ncompact_min_ag=1h\n",
+		"an unparseable value": "0\ncompact_min_age=not-a-duration\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(filepath.Join(dir, descriptorFileName),
+				[]byte(body), 0666))
+			_, err := readDescriptor(dir)
+			require.Error(t, err)
+		})
+	}
+
+	// What this build writes still round-trips, which is the thing the rule
+	// above must not break.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, descriptorFileName),
-		[]byte("0\ncompact_min_age=not-a-duration\n"), 0666))
-	_, err = readDescriptor(dir)
-	require.Error(t, err)
+		[]byte(renderDescriptor(descriptor{Compact: true, CompactMinAge: time.Hour})), 0666))
+	d, err := readDescriptor(dir)
+	require.NoError(t, err)
+	require.True(t, d.Compact)
+	require.Equal(t, time.Hour, d.CompactMinAge)
 }

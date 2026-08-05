@@ -9,6 +9,30 @@ import (
 
 // tieredLog builds a log with some sealed segments offloaded, and returns it
 // with its store.
+// isStoreMetaKey reports whether a store object DESCRIBES the log rather than
+// holding it: the manifest says what the tier holds, the descriptor says what
+// the log is. Neither is a segment, and every "objects in the store" count in
+// these tests means segments.
+//
+// It lives here rather than being spelled out at each site because the set
+// grows. Every place that had written `k != manifestKey` became quietly wrong
+// the moment the descriptor was added, and each one failed separately with a
+// number that looked like a real regression.
+func isStoreMetaKey(k string) bool {
+	return k == manifestKey || k == descriptorKey
+}
+
+// segmentObjectCount is that filter applied to a listing.
+func segmentObjectCount(keys []string) int {
+	n := 0
+	for _, k := range keys {
+		if !isStoreMetaKey(k) {
+			n++
+		}
+	}
+	return n
+}
+
 func tieredLog(t *testing.T) (*commitLog, *FileSegmentStore, int64) {
 	t.Helper()
 	dir := tempDir(t)

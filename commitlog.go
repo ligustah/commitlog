@@ -309,12 +309,19 @@ type Options struct {
 	// SetTierReadOnly when ownership moves.
 	TierReadOnly bool
 	// AdoptOptions records THESE options as the log's descriptor instead of
-	// checking against the one already on disk. It is the deliberate answer to
-	// the two cases New otherwise refuses: retuning an existing log's compaction
-	// settings, and opening a log created before descriptors existed (which has
-	// none). Requiring an explicit opt-in is the point — an accidentally empty
-	// config must not be able to redefine what a log keeps. Ignored for a log
-	// being created, which simply records what it was created with.
+	// checking against the one the log already has. It means one thing — "I know
+	// what this log is, record it" — and that one thing answers both cases New
+	// otherwise refuses: retuning an existing log's compaction settings, and
+	// opening a log that exists with no descriptor. Neither can be settled from
+	// what is stored, which is why both need a human to say so.
+	//
+	// Requiring an explicit opt-in is the point: an accidentally empty config
+	// must not be able to redefine what a log keeps. Ignored for a log being
+	// created, which simply records what it was created with.
+	//
+	// It is NOT how a second process picks up a log someone else created. That
+	// process passes the settings it believes the log has and is checked against
+	// what the log says; AdoptOptions would skip exactly that check.
 	AdoptOptions bool
 	// DisableAutoClean stops the internal cleaner loop from running Clean.
 	// Segment splitting (MaxSegmentAge rolls) keeps running. For logs whose
@@ -412,7 +419,7 @@ func New(opts Options) (CommitLog, error) {
 	// gets applied at all.
 	descOpts := opts
 	descOpts.Path = path
-	isNew, err := logIsNew(path)
+	isNew, err := logIsNew(descOpts)
 	if err != nil {
 		return nil, err
 	}
