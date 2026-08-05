@@ -464,6 +464,26 @@ run_guard "tier absence must be asserted" manifest.go   '	if errors.Is(err, ErrO
 # "any JSON object is a manifest".
 run_guard "a manifest must be this version" manifest.go   '	if m.Version != manifestVersion {'   '	if m.Version > manifestVersion {'   '^TestAManifestThatIsNotThisVersionIsRefused$'
 
+# The manifest is the commit point, so a COPY of a tier has to write it last for
+# the same reason an offload does: until it lands, nothing in the destination is
+# claimed by anything, and a copy that dies partway leaves collectable orphans
+# rather than a tier claiming records whose bytes are not there. Reordering the
+# three steps is exactly the hand-rolled copy that only worked because one store's
+# List() happened to sort "manifest" after the segment keys.
+run_guard "a copied manifest is published last" copy_tier.go   '	if err := copyTierObjects(src, dst, objs); err != nil {
+		return err
+	}
+	if err := writeStoreDescriptor(dst, desc); err != nil {
+		return err
+	}
+	return publishCopiedManifest(dst, objs)'   '	if err := publishCopiedManifest(dst, objs); err != nil {
+		return err
+	}
+	if err := writeStoreDescriptor(dst, desc); err != nil {
+		return err
+	}
+	return copyTierObjects(src, dst, objs)'   '^TestACopiedManifestIsWrittenLast$'
+
 # A missing file must come back immediately, not be waited out. Neutralizing the
 # fast path makes every legitimate absence -- a log with no checkpoint, an
 # unwritten sidecar, a first open -- pay the full retry bound before reporting

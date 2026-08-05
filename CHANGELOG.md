@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Added**: `CopyTier(src, dst SegmentStore)` copies a log's whole tier between
+  stores — every object the manifest names, then the descriptor, then the
+  manifest.
+
+  Moving a tier between stores is a real operation (durable_streams does it when
+  a stream is promoted), and doing it by hand means knowing that the manifest is
+  the commit point and must be written last. The keys are not exported, so the
+  only way to get that ordering by hand was to rely on `List()` returning
+  `"manifest"` after the digit-prefixed segment keys — true of
+  `FileSegmentStore`'s lexicographic listing, not true of a store that lists by
+  insertion or upload time. The ordering rule belongs in this package, so the
+  operation does too; a guard holds it in place.
+
+  It refuses three things rather than papering over them: a destination that
+  already holds a manifest or a descriptor (copying one tier over another
+  strands every object already there), a source with no descriptor (a store that
+  never belonged to a log), and a manifest entry whose object the source does not
+  hold. An interrupted copy needs no cleanup — the destination has no manifest,
+  so it reads as an empty tier and everything in it is collectable.
+
+- **Internal**: `writeTierManifest` and `writeTierManifestWith` were two names
+  for one function, separated only by passing no arguments to a variadic.
+
 ## v0.53.0 — 2026-08-05
 
 - **Breaking**: the tier manifest is the only record that a segment is
