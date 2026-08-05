@@ -277,8 +277,7 @@ func readOffloadMarker(path string) (offloadMeta, error) {
 //
 // Refusing here fails open(), which is the right answer for a key naming a path
 // outside the store: a log that will not open is recoverable, and a delete that
-// has already happened is not. Legacy markers — the whole file as the key — are
-// unaffected, since a key this package minted has no separator in it.
+// has already happened is not.
 func validMarkerKeys(m offloadMeta) error {
 	if err := validStoreKey(m.LogKey); err != nil {
 		return err
@@ -509,10 +508,10 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 // initPositions inspects the (already-open) log file, detects whether it uses
 // block compression, and initializes position/physPosition/blocks. A fresh
 // (empty) segment uses the block format only when a codec is configured, so a
-// None codec is byte-for-byte compatible with pre-compression logs. An existing
+// None codec writes raw message-set frames with no wrapper at all. An existing
 // segment is classified by its first byte: blockMagic means a compressed
-// segment (scan its block headers), anything else is a legacy raw segment, which
-// stays raw even if a codec is now configured so formats never mix in one file.
+// segment (scan its block headers), anything else is a raw one, which stays raw
+// even if a codec is now configured so the two formats never mix in one file.
 func (s *segment) initPositions() error {
 	size, err := s.backing.Size()
 	if err != nil {
@@ -1152,7 +1151,7 @@ func (s *segment) WriteMessageSet(ms []byte, entries []*entry) error {
 	// anchored at the block's first message (its base offset, logical start
 	// position, and first timestamp). Seeks binary-search these anchors and
 	// then scan forward within the block to the exact target offset. Raw
-	// (legacy) segments keep the dense one-entry-per-message index.
+	// segments keep the dense one-entry-per-message index.
 	if s.blockMode {
 		return s.Index.writeEntries(entries[:1])
 	}

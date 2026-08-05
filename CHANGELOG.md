@@ -5,6 +5,21 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+- **Internal**: documentation only. Round 2 of the complexity sweep found the
+  same thing round 1 did, in prose rather than in code: comments that describe a
+  format, an API or a tolerance this package no longer has.
+
+  `NewReader` carried a migration table from two functions that no longer exist.
+  Three comments called a raw segment "legacy" — raw is what a `None` codec
+  writes today, so the word named the wrong thing. Two more explained, at
+  length, what the code used to do before the previous release changed it; that
+  belongs here, not beside the code. `TestCommitLogCompressionBackwardCompat` is
+  renamed `TestTurningCompressionOnLeavesExistingSegmentsRaw`, because turning
+  compression on for an existing log is a retune someone will actually do, not
+  compatibility with a past nobody has.
+
 ## v0.52.0 — 2026-08-05
 
 - **Breaking**: a log with a `SegmentStore` keeps its descriptor IN the store,

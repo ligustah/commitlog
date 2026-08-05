@@ -107,13 +107,10 @@ func (s *SegmentFile) Size() int64 { return int64(len(s.raw)) }
 // Blocks walks the block headers.
 //
 // A header this build does not understand comes back as ErrBlockFormat naming
-// both versions — the one in the file and the one this build writes. That used
-// to be wrapped, at position 0, with a sentence saying the file predated
-// v0.15.0 (the layout with no version byte, whose codec byte reads as a
-// version). The sentence was inferred from the symptom rather than from the
-// file: a segment written by a NEWER build produces the same symptom and was
-// told the same wrong story. Pre-v0.15.0 segments no longer exist; the honest
-// error is the two version numbers.
+// both versions — the one in the file and the one this build writes. It does
+// not guess which build wrote the file: an unreadable version byte looks the
+// same whether the writer was older or newer, so the two numbers are the whole
+// of what is actually known.
 func (s *SegmentFile) Blocks() ([]BlockInfo, error) {
 	if !s.blocked {
 		return nil, nil

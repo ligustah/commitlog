@@ -13,8 +13,9 @@ import (
 // the codec and the uncompressed/compressed lengths so the logical positions can
 // be mapped to physical file positions on read and rebuilt on open.
 //
-// The header's magic byte disambiguates a compressed segment from a legacy raw
-// one: a raw segment begins with a message-set whose first byte is the high byte
+// The header's magic byte disambiguates a compressed segment from a raw one
+// (what a None codec writes): a raw segment begins with a message-set whose
+// first byte is the high byte
 // of a big-endian offset (0x00 for any realistic offset), which can never be the
 // magic.
 const (

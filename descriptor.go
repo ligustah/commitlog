@@ -182,13 +182,11 @@ func parseDescriptor(r io.Reader) (descriptor, error) {
 // with an unparseable value is too — both mean this file is not a descriptor
 // this build wrote.
 //
-// Unknown keys used to be IGNORED, so a descriptor written by a newer version
-// stayed readable by an older one. Pre-v1 there is no older reader to keep
-// working, and the tolerance was not free: it is the same rule that silently
-// swallows a typo, a half-written line, and a key whose name changed — the
-// three cases where being told is the whole value of reading the file. The
-// version line on the first line is what makes a real format change detectable,
-// and it stays.
+// Tolerating an unknown key would buy forward-readability and cost the three
+// cases where being told is the whole value of reading the file: a typo, a
+// half-written line, and a key whose name changed all look exactly like a field
+// from the future. The version line on the first line is what makes a real
+// format change detectable, and that is the right place for it.
 func (d *descriptor) set(key, value string) error {
 	var err error
 	switch key {

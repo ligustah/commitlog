@@ -79,9 +79,9 @@ type deleteCleanerOptions struct {
 		// store — it has simply left the tier the budget governs — and the
 		// record is gone only when the last tier's limit is reached.
 		//
-		// Zero means a tier keeps everything, which is what makes this
-		// backwards-compatible: a log with no store has no offloaded segments,
-		// so these never apply and the limits above behave exactly as before.
+		// Zero means a tier keeps everything. A log with no store has no
+		// offloaded segments, so these never apply to it at all and only the
+		// limits above govern.
 		TierBytes    int64
 		TierMessages int64
 		TierAge      time.Duration

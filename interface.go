@@ -65,8 +65,7 @@ type CommitLog interface {
 	// end of the data. Configure it with From, Until, Follow, Uncommitted,
 	// KeyPrefix, SkipSuperseded and IncludeControl.
 	//
-	// It replaces the previous NewReader(offset, uncommitted) and NewScanReader,
-	// and INVERTS two of their defaults:
+	// Two of its defaults are the safe direction rather than the convenient one:
 	//
 	//   - it TERMINATES rather than follows. Reaching the end of the data is an
 	//     end condition unless Follow() says otherwise. The failure modes are
@@ -74,14 +73,8 @@ type CommitLog interface {
 	//     caller notices, while one that unexpectedly follows blocks forever.
 	//     That is not hypothetical — it is how RecoverTail could hang before
 	//     v0.18.0, and a consumer hit the same shape in its own abort scan.
-	//   - it reads COMMITTED data only. This was an unlabelled bool at the call
-	//     site, where NewReader(off, false) told a reader nothing.
-	//
-	// Migration is mechanical:
-	//
-	//	NewReader(off, false)  ->  NewReader(From(off), Follow())
-	//	NewReader(off, true)   ->  NewReader(From(off), Uncommitted(), Follow())
-	//	NewScanReader(off)     ->  NewReader(From(off), Uncommitted())
+	//   - it reads COMMITTED data only. Uncommitted() is a named option because
+	//     an unlabelled bool at the call site told a reader nothing.
 	//
 	// The read is not a snapshot: the range is whatever is readable when each
 	// read happens. Uncommitted() makes records above the high watermark

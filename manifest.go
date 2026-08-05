@@ -73,12 +73,12 @@ func (l *commitLog) writeTierManifest() error {
 }
 
 // readTierManifest returns what the store says it holds, or nil when the store
-// has no manifest — an empty tier, or one written before manifests existed.
+// has no manifest, which means an empty tier.
 func readTierManifest(store SegmentStore) ([]TierObject, error) {
 	size, err := store.Size(manifestKey)
 	if err != nil {
 		// Absent is not an error: a store with nothing offloaded has no
-		// manifest, and neither does one an older version wrote.
+		// manifest.
 		return nil, nil
 	}
 	if size <= 0 {

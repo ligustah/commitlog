@@ -262,11 +262,11 @@ func TestCommitLogCompressionRecover(t *testing.T) {
 	}
 }
 
-// TestCommitLogCompressionBackwardCompat verifies that a log written without
-// compression stays readable after reopening with a codec configured (legacy
-// raw segments are detected and kept raw; new segments compress), and that all
-// messages — old and new — read back correctly.
-func TestCommitLogCompressionBackwardCompat(t *testing.T) {
+// Turning compression ON for a log that already has raw segments is a retune,
+// not a migration: the existing segments are detected as raw and stay raw,
+// only new ones compress, and every message — written under either setting —
+// reads back correctly.
+func TestTurningCompressionOnLeavesExistingSegmentsRaw(t *testing.T) {
 	dir := tempDir(t)
 
 	// Phase 1: write raw (no compression), small segments so several roll.
