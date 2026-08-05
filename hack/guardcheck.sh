@@ -600,6 +600,17 @@ run_guard "a damaged block table is refused" block_table.go   '	if got, exp := c
 # table is a segment nothing can read without rebuilding its table.
 run_guard "a block entry names its block table" manifest.go   '		if o.BlockMode != (o.BlocksKey != "") {' '		if false {'   '^TestAManifestEntryPairsBlockModeWithABlockTable$'
 
+# A cleaner tick cleans whether or not it rolled a segment. It used to return
+# early on a roll, on the premise that the cleaner "already ran" -- it does not,
+# and Clean has exactly one caller. The neutralization is that premise put back:
+# a log with MaxSegmentAge at or below CleanerInterval then has a roll pending at
+# every tick and never compacts at all, which is a 4.5GB log and 66 empty ticks.
+run_guard "a rolling tick still cleans" clean.go   '	if _, err := l.checkAndPerformSplitLocked(); err != nil {' '	split, err := l.checkAndPerformSplitLocked()
+	if split {
+		return
+	}
+	if err != nil {'   '^TestATickThatRollsASegmentStillCleans$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

@@ -23,34 +23,55 @@ func (l *commitLog) cleanerLoop() {
 		case <-l.closed:
 			return
 		}
+		l.cleanerTick()
+	}
+}
 
-		// Check to see if the active segment should be split.
-		split, err := l.checkAndPerformSplitLocked()
-		if err != nil {
-			slog.Error(
-				"Failed to split log",
-				slog.String("path", l.Path),
-				slog.String("error", err.Error()),
-			)
-			continue
-		}
+// cleanerTick is one pass of the cleaner loop: roll the active segment if it is
+// due, then clean.
+//
+// Split out from the loop so it can be called ONCE, by a test, and observed.
+// What broke here was not the pass but the loop that runs it, and every
+// compaction test in this package called Clean() directly — the one path
+// production never takes. A tick you can invoke is the difference between
+// testing the cleaner and testing the cleaning.
+func (l *commitLog) cleanerTick() {
+	// Check to see if the active segment should be split. Whether one HAPPENED
+	// is deliberately not consulted below — see there.
+	if _, err := l.checkAndPerformSplitLocked(); err != nil {
+		slog.Error(
+			"Failed to split log",
+			slog.String("path", l.Path),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
 
-		// If we rolled a new segment, we don't need to run the cleaner since
-		// it already ran.
-		if split {
-			continue
-		}
-		if l.DisableAutoClean {
-			continue
-		}
+	// A roll does NOT stand in for a clean, and the tick cleans whether or not
+	// one happened. This used to return here on split, on the stated premise
+	// that the cleaner "already ran" — it does not and never did:
+	// checkAndPerformSplit rolls and seals, and Clean has exactly one caller,
+	// which is the line below.
+	//
+	// So a rolling tick was a SKIPPED pass, not a redundant one, and which logs
+	// that hurt depended entirely on load. A quiet log rarely has a segment
+	// ready to roll and cleaned every tick; a log under continuous write always
+	// does. Worse, the usual pairing makes it certain rather than likely:
+	// CheckSplit is true once the active segment reaches MaxSegmentAge, so a log
+	// with MaxSegmentAge at or below CleanerInterval has a roll pending at EVERY
+	// tick and never cleaned at all. Reported by durable_streams from a 5.5h
+	// soak — a 4.5GB compacted log, 336 segments, 239 live keys, zero rewrites,
+	// ~66 consecutive ticks that each rolled and went home.
+	if l.DisableAutoClean {
+		return
+	}
 
-		if err := l.Clean(); err != nil {
-			slog.Error(
-				"Failed to clean log",
-				slog.String("path", l.Path),
-				slog.String("error", err.Error()),
-			)
-		}
+	if err := l.Clean(); err != nil {
+		slog.Error(
+			"Failed to clean log",
+			slog.String("path", l.Path),
+			slog.String("error", err.Error()),
+		)
 	}
 }
 
@@ -209,7 +230,15 @@ type CleanSpec struct {
 
 // Clean applies retention and compaction rules against the log, if applicable.
 func (l *commitLog) Clean() error {
+	// The automatic pass is BOUNDED, and this is the only place that can bound
+	// it: a caller driving CleanWithSpec sets its own budget, and the spec-less
+	// path had no way to reach the field at all. See Options.CleanRewriteBudget
+	// for why the default is CleanerInterval and why stopping early loses
+	// nothing.
 	spec := CleanSpec{}
+	if l.Options.CleanRewriteBudget > 0 {
+		spec.RewriteBudget = l.Options.CleanRewriteBudget
+	}
 	if l.Options.CompactTombstoneRetention > 0 {
 		// Spec-less tombstone GC for non-transactional compacted logs,
 		// bounded like the rest of the spec-less compaction.

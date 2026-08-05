@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A cleaner tick that rolled a segment skipped its clean**, so a compacted log
+  under continuous write never compacted. The loop returned early on a roll, on
+  the stated premise that the cleaner "already ran" — `checkAndPerformSplit`
+  rolls and seals, and `Clean` has exactly one caller. Load-dependent in the
+  worst way: a quiet log rarely has a segment ready to roll and cleaned every
+  tick, and a log with `MaxSegmentAge` at or below `CleanerInterval` has one
+  pending at *every* tick and never cleaned at all. Reported by durable_streams
+  from a 5.5h soak — 4.5GB, 336 segments, 239 live keys, ~66 ticks, zero
+  rewrites, every key digest stamped in the final minute.
+
+### Added
+
+- **`Options.CleanRewriteBudget`** bounds how long one automatic pass may spend
+  rewriting. `CleanSpec.RewriteBudget` already existed, but the spec-less
+  `Clean()` the cleaner goroutine uses built an empty spec, so the one pass
+  nobody drives by hand was the one pass that could run unbounded — 6m42s
+  against a 5m interval on the log above. Defaults to `CleanerInterval`;
+  negative means no budget. Segments a pass does not reach are carried through
+  untouched and what it did do is installed, so a log too large to compact in
+  one pass converges over several.
+
 ## v0.56.0 — 2026-08-05
 
 ### Changed

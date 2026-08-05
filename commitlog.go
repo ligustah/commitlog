@@ -327,7 +327,27 @@ type Options struct {
 	// Segment splitting (MaxSegmentAge rolls) keeps running. For logs whose
 	// owner drives cleaning explicitly (CleanWithSpec) — an automatic clean
 	// has no transaction awareness and must not race the owner's policy.
-	DisableAutoClean     bool
+	DisableAutoClean bool
+	// CleanRewriteBudget bounds how long ONE automatic pass may spend rewriting
+	// segments. It is what the cleaner loop puts into CleanSpec.RewriteBudget,
+	// which callers driving CleanWithSpec themselves have always been able to
+	// set and the spec-less path could not reach at all.
+	//
+	// Defaults to CleanerInterval, which is the number that makes the loop
+	// self-pacing rather than a guess: a pass that would spend longer than the
+	// gap between ticks rewriting is a pass whose every tick arrives into the
+	// one before it. durable_streams measured 6m42s per pass against a 5m
+	// interval on a 4.5GB log.
+	//
+	// Stopping early is not lost work. Segments the budget did not reach are
+	// carried through untouched and the pass installs what it did do, so the
+	// log converges over several ticks instead of holding cleanMu for as long
+	// as one pass happens to take. At least one rewrite always proceeds, so
+	// even a pathologically small budget drains debt.
+	//
+	// Set it negative to mean "no budget", which is the behaviour every
+	// spec-less pass had before this existed.
+	CleanRewriteBudget   time.Duration
 	CleanerInterval      time.Duration // Frequency to enforce retention policy
 	HWCheckpointInterval time.Duration // Frequency to checkpoint HW to disk
 	ConcurrencyControl   bool          // Optimistic Concurrency Control
@@ -380,6 +400,9 @@ func New(opts Options) (CommitLog, error) {
 	}
 	if opts.CleanerInterval == 0 {
 		opts.CleanerInterval = defaultCleanerInterval
+	}
+	if opts.CleanRewriteBudget == 0 {
+		opts.CleanRewriteBudget = opts.CleanerInterval
 	}
 
 	cleanerOpts := deleteCleanerOptions{
