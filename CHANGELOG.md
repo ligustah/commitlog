@@ -5,6 +5,29 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A timestamp lookup panicked on a tiered log.** `EarliestOffsetAfterTimestamp`
+  and `LatestOffsetBeforeTimestamp` read each segment's base timestamp out of its
+  index. An offloaded segment whose index lives in the store has a nil `Index` —
+  every other consumer goes through `withIndex`, this one reached past it — so
+  either call nil-dereferenced on any log opened with a `RemoteIndexCache`. The
+  segment already holds that timestamp (`firstWriteTime`), so the lookup now asks
+  it: no index, no I/O, and nothing left that can fail.
+
+### Changed
+
+- **Opening an offloaded tier no longer downloads every segment it names.** Each
+  entry re-derived `blockMode`, `position` and `physPosition` from its object —
+  a stat, a 1MiB prefetch to read one magic byte, and for a block-compressed
+  segment a walk of the entire header chain — all of it already recorded in the
+  manifest. Measured on the boot path before serving a single read: 22,136,648
+  bytes for a 22-segment snappy tier, 5,242,880 for a 5-segment raw one. Now
+  zero, on both the reopen and adopt paths. The block table, the one thing the
+  manifest does not carry, is built on the first read that needs it.
+
 ## v0.55.0 — 2026-08-05
 
 - **Fixed**: the Windows sharing-violation retries are bounded by time, not by

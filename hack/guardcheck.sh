@@ -559,6 +559,31 @@ run_guard "a ceiling of zero is not unset" clean.go   '		spec.ceiling = l.HighWa
 # named, that lost 2 of 86 daemon restarts on a loaded box.
 run_guard "the read retry spends its whole budget" util.go   '	deadline := time.Now().Add(readRetryBudget)'   '	deadline := time.Now().Add(readRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
 
+# Opening an offloaded tier reads none of the objects the manifest names. The
+# manifest carries blockMode, position and physPosition; the block table is the
+# one thing it does not carry, so it is owed rather than built. The
+# neutralization pays the debt on open instead, which is exactly what
+# initPositions used to do -- 22MB downloaded for a 22-segment tier before
+# serving one read.
+run_guard "opening an offloaded segment builds no block table" segment.go   '	s.blocksPending = meta.BlockMode
+' '	s.blocksPending = meta.BlockMode
+	if err := s.ensureBlocksLoaded(); err != nil {
+		return nil, errors.Wrap(err, "eager block table")
+	}
+'   '^TestOpeningAnOffloadedTierReadsNoLogObjects$'
+
+# ensureBlocksLoaded runs BEFORE the read lock, at every entry that maps a logical
+# offset onto the file -- and findEntry is one of them, because it reaches
+# readAtLocked through scanForward under a lock it already holds and so never
+# passes ReadAt. Missing this call was a real bug while the lazy table was
+# written, and it surfaced as "entry not found", saying nothing about blocks.
+run_guard "findEntry builds the block table it is about to scan" segment.go   '	// Before the read lock: a block-mode search runs scanForward, which reads
+	// through readAtLocked and so cannot build the table itself.
+	if err := s.ensureBlocksLoaded(); err != nil {
+		return nil, err
+	}
+	s.RLock()'   '	s.RLock()'   '^TestOpeningAnOffloadedTierReadsNoLogObjects$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
