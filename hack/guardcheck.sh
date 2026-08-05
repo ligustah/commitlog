@@ -472,6 +472,13 @@ run_guard "a manifest must be this version" manifest.go   '	if m.Version != mani
 # again.
 run_guard "an unknown codec is refused where it arrives" commitlog.go   '	if !opts.Compression.Valid() {'   '	if false {'   '^TestAnUnknownCompressionCodecIsRefusedAtOpen$'
 
+# The None codec used to return src itself, so the "decompressed" bytes were the
+# caller's compressed-payload buffer -- which in the block path is a recycled read
+# buffer that the next block refills. decodeBlock carried a pointer-identity check
+# against exactly that. Neutralizing the copy restores the alias, and with it a
+# result that is correct when returned and wrong a block later.
+run_guard "decompressing into dst does not alias src" compress/codec.go   '		return append(dst[:0], src...), nil'   '		return src, nil'   '^TestDecompressIntoNeverAliasesItsInput$'
+
 # The manifest is the commit point, so a COPY of a tier has to write it last for
 # the same reason an offload does: until it lands, nothing in the destination is
 # claimed by anything, and a copy that dies partway leaves collectable orphans

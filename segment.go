@@ -1456,14 +1456,6 @@ func (s *segment) decodeBlock(st *scanStream, b blockRef, rawBuf, dataBuf []byte
 	if int64(len(data)) != b.logicalLen {
 		return raw, nil, fmt.Errorf("commitlog: block decompressed to %d bytes, want %d", len(data), b.logicalLen)
 	}
-	if len(data) > 0 && &data[0] == &raw[0] {
-		if cap(dataBuf) < len(data) {
-			dataBuf = make([]byte, len(data))
-		}
-		dataBuf = dataBuf[:len(data)]
-		copy(dataBuf, data)
-		data = dataBuf
-	}
 	return raw, data, nil
 }
 

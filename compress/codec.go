@@ -90,7 +90,12 @@ func (c Codec) DecompressInto(dst, src []byte) ([]byte, error) {
 	case Zstd:
 		return zstdDec.DecodeAll(src, dst[:0])
 	case None:
-		return src, nil
+		// Copied into dst like every other codec, rather than returned as a
+		// slice of src. "The result is in dst" is then true unconditionally,
+		// which is the only version of that sentence a caller can act on: one
+		// codec aliasing its input made every caller responsible for noticing,
+		// and the copy is one the caller had to make anyway the moment it did.
+		return append(dst[:0], src...), nil
 	default:
 		return nil, fmt.Errorf("compress: unknown codec %d", c)
 	}
