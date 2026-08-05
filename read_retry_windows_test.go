@@ -49,8 +49,11 @@ func TestRecoveryReadsRetryThroughTransientHandle(t *testing.T) {
 	h := openDenyAll(t, hwPath)
 	released := make(chan struct{})
 	go func() {
-		time.Sleep(120 * time.Millisecond) // well inside the retry bound
-		syscall.CloseHandle(h)             // nolint: errcheck
+		// Deliberately longer than the 500ms the bound used to be, so this test
+		// exercises the budget it now has rather than the one it happened to
+		// fit inside. sqlcdc's soak lost restarts in exactly this gap.
+		time.Sleep(1200 * time.Millisecond)
+		syscall.CloseHandle(h) // nolint: errcheck
 		close(released)
 	}()
 
@@ -79,5 +82,6 @@ func TestARecoveryReadOfAPermanentlyHeldFileStillFails(t *testing.T) {
 	require.NoError(t, syscall.CloseHandle(h))
 
 	require.Error(t, err, "a permanently held file must fail, not be hidden")
-	require.Less(t, elapsed, 10*time.Second, "retry bound must terminate promptly")
+	require.Less(t, elapsed, 2*readRetryBudget,
+		"the retry must terminate on its budget (%s), took %s", readRetryBudget, elapsed)
 }

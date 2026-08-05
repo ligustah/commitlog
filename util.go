@@ -168,12 +168,38 @@ func removeAllWithRetry(path string) error {
 	return err
 }
 
-// Bound for AtomicWriteFileWithRetry. Long enough to cover a handle that is on
-// its way out (those clear in milliseconds), short enough that a genuinely
-// conflicted write still fails promptly rather than stalling a checkpoint tick.
-const (
-	atomicWriteRetries    = 25
+// Bounds for the Windows sharing-violation retries below.
+//
+// They are DURATIONS, not attempt counts. A count is a bound on how many times
+// you ask, and what these wait for — the OS reclaiming a dead process's handles
+// — takes an amount of TIME that depends on what the machine is doing. So the
+// count silently changed meaning with the delay and with the load, and the
+// number that mattered was never written down anywhere: `25 * 20ms` was a 500ms
+// ceiling that nothing named as one. sqlcdc measured it killing 2 of 86 daemon
+// restarts in a 3h50m kill -9 soak on a loaded box, after the retry had already
+// cut the same failure down from 1 in 30.
+//
+// The two budgets differ because the two failures cost different things, and
+// this is the same split as RewriteBudget/TierRewriteBudget: one number for two
+// operations means the cheaper one sets the price for both.
+//
+// Vars rather than consts so a test can shrink them; nothing mutates them at
+// runtime.
+var (
 	atomicWriteRetryDelay = 20 * time.Millisecond
+	// readRetryBudget bounds ReadFileWithRetry. Generous: this read happens
+	// once, on the boot path, and the file it reads is the log's own metadata.
+	// Waiting costs milliseconds on a path that runs at startup; giving up costs
+	// a node that does not come back from a crash until something restarts the
+	// process for it. There is no tick to stall.
+	readRetryBudget = 5 * time.Second
+	// atomicWriteRetryBudget bounds AtomicWriteFileWithRetry, and stays short
+	// for the reason it always was: a checkpoint write runs on a tick, a
+	// genuinely conflicted one (a second live writer, a read-only file) never
+	// clears, and stalling every tick for seconds to discover that is worse than
+	// failing and letting the next tick try. A lost checkpoint write is retried
+	// by definition; a lost boot read is not.
+	atomicWriteRetryBudget = 500 * time.Millisecond
 )
 
 // AtomicWriteFileWithRetry writes a file atomically, retrying briefly. The retry
@@ -185,10 +211,9 @@ const (
 // been reaped.
 //
 // The condition clears in milliseconds, while a real conflict (a second live
-// writer, a read-only file) never does, so the bound — 25 attempts, 20ms apart,
-// so ~500ms worst case — keeps that case failing instead of hiding it behind a
-// stall. On Unix rename is atomic and the first attempt always succeeds, so
-// nothing is added there.
+// writer, a read-only file) never does, so the bound — atomicWriteRetryBudget —
+// keeps that case failing instead of hiding it behind a stall. On Unix rename is
+// atomic and the first attempt always succeeds, so nothing is added there.
 //
 // The payload is buffered up front, and that part is load-bearing rather than
 // incidental: a retry has to write the SAME bytes again, and the underlying
@@ -196,8 +221,10 @@ const (
 // the file with nothing. Any reimplementation that streams instead of buffering
 // is silently wrong on exactly the path this exists for.
 //
-// ReadFileWithRetry reads a file, retrying briefly, and is the read-side twin of
-// AtomicWriteFileWithRetry — same platform reason, same bound.
+// ReadFileWithRetry reads a file, retrying, and is the read-side twin of
+// AtomicWriteFileWithRetry — same platform reason, a longer bound. It waits
+// readRetryBudget rather than atomicWriteRetryBudget because the two sides fail
+// differently: see those two.
 //
 // On Windows a handle held by a process that has just been killed is not closed
 // when TerminateProcess returns; the OS reclaims it asynchronously. An open in
@@ -218,9 +245,10 @@ const (
 // Exported alongside AtomicWriteFileWithRetry for callers that read the same
 // kinds of small files next to a log.
 func ReadFileWithRetry(path string) ([]byte, error) {
-	for i := 0; ; i++ {
+	deadline := time.Now().Add(readRetryBudget)
+	for {
 		b, err := os.ReadFile(path)
-		if err == nil || os.IsNotExist(err) || i >= atomicWriteRetries {
+		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
 			return b, err
 		}
 		time.Sleep(atomicWriteRetryDelay)
@@ -234,9 +262,10 @@ func AtomicWriteFileWithRetry(path string, r io.Reader) error {
 	if err != nil {
 		return pkgErrors.Wrap(err, "failed to buffer atomic write payload")
 	}
-	for i := 0; ; i++ {
+	deadline := time.Now().Add(atomicWriteRetryBudget)
+	for {
 		err = atomic_file.WriteFile(path, bytes.NewReader(data))
-		if err == nil || i >= atomicWriteRetries {
+		if err == nil || time.Now().After(deadline) {
 			return err
 		}
 		time.Sleep(atomicWriteRetryDelay)

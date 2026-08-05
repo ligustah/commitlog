@@ -556,6 +556,13 @@ run_guard "a ceiling of zero is not unset" clean.go   '		spec.ceiling = l.HighWa
 # caller's narrowest bound into the high watermark.
 run_guard "a negative ceiling is refused" clean.go   '	if spec.Ceiling != nil && *spec.Ceiling < 0 {'   '	if false {'   '^TestANegativeCeilingIsRefused$'
 
+# The read retry waits out an amount of TIME, because what it waits for -- Windows
+# reclaiming a dead process's handles -- takes time that depends on the machine,
+# not on how many times it is asked. The neutralization shortens the budget
+# without changing its shape, which is the bug it had: a 500ms ceiling nothing
+# named, that lost 2 of 86 daemon restarts on a loaded box.
+run_guard "the read retry spends its whole budget" util.go   '	deadline := time.Now().Add(readRetryBudget)'   '	deadline := time.Now().Add(readRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

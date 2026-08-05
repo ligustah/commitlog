@@ -29,11 +29,10 @@ func TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound(t *testing.T) {
 	require.True(t, os.IsNotExist(err),
 		"a missing file must still report as missing, got %v", err)
 
-	// The full bound is atomicWriteRetries * atomicWriteRetryDelay. Anything near
-	// it means the absence was retried rather than returned.
-	bound := time.Duration(atomicWriteRetries) * atomicWriteRetryDelay
-	require.Less(t, elapsed, bound/2,
-		"a missing file was retried for %s; the retry bound is %s", elapsed, bound)
+	// Anything near the full bound means the absence was retried rather than
+	// returned.
+	require.Less(t, elapsed, readRetryBudget/10,
+		"a missing file was retried for %s; the retry bound is %s", elapsed, readRetryBudget)
 }
 
 // The ordinary path still works: a readable file comes back on the first try,

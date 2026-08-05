@@ -7,6 +7,32 @@ library from that fork onward.
 
 ## Unreleased
 
+- **Fixed**: the Windows sharing-violation retries are bounded by time, not by
+  attempt count. `ReadFileWithRetry` now waits up to 5s; `AtomicWriteFileWithRetry`
+  keeps its ~500ms.
+
+  The bound was `i >= atomicWriteRetries` — 25 attempts, 20ms apart. That bounds
+  how many times you ask, and what the retry waits for is the OS reclaiming a
+  killed process's handles, which takes an amount of TIME that depends on what
+  the machine is doing. So the real bound was 500ms: a number that appeared
+  nowhere, and that changed meaning silently whenever the delay constant did.
+
+  sqlcdc measured it. On a 3h50m kill -9 soak against a 36 GB data dir with 30
+  live views, it still killed 2 of 86 daemon restarts outright — a node that does
+  not come back from a crash — after the retry had already cut the same failure
+  from 1 in 30. Both deaths were `open()`'s own high-watermark read.
+
+  The two budgets differ deliberately, the same split as
+  `RewriteBudget`/`TierRewriteBudget`. The read happens once, on the boot path,
+  with no tick to stall, and giving up too early costs a node; the write runs on
+  a checkpoint tick, a genuinely conflicted one never clears, and stalling every
+  tick for seconds to discover that is worse than letting the next tick try. One
+  number for both operations meant the cheaper one set the price.
+
+  `TestRecoveryReadsRetryThroughTransientHandle` now holds its handle for 1.2s —
+  past the old ceiling — so it exercises the budget rather than fitting inside
+  it, and a guard pins the bound as a duration.
+
 - **Breaking**: `CleanSpec.Ceiling` is a `*int64`. Nil means no bound was
   supplied and the pass uses the high watermark, as before; every other value is
   taken literally.
