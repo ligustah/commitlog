@@ -504,10 +504,11 @@ run_guard "a copied manifest is published last" copy_tier.go   '	if err := copyT
 # unwritten sidecar, a first open -- pay the full retry bound before reporting
 # what it could have reported at once.
 #
-# This guards the ABSENT half only. The retry half is provable solely on Windows
-# (TestRecoveryReadsRetryThroughTransientHandle takes a deny-all handle), and
-# this check runs on Linux, so there is nothing here that could go red for it.
-run_guard "a missing file is not retried" util.go   '		if err == nil || os.IsNotExist(err) || i >= atomicWriteRetries {'   '		if err == nil || i >= atomicWriteRetries {'   '^TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound$'
+# This guards the ABSENT half. The half that waits is guarded separately, by
+# "the read retry spends its whole budget" below -- a deny-all handle is Windows
+# only and this check runs on Linux, so that guard uses a directory instead,
+# which is unreadable everywhere.
+run_guard "a missing file is not retried" util.go   '		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {'   '		if err == nil || time.Now().After(deadline) {'   '^TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound$'
 
 # The three timestamp-lookup guards below all need a clock COARSER than the
 # append rate, so that a run of records shares one instant. Every test that
