@@ -32,6 +32,10 @@ type TierObject struct {
 	// IndexKey is the store object holding its index, empty when the index is
 	// kept on local disk.
 	IndexKey string
+	// BlocksKey is the store object holding its block table, empty exactly when
+	// BlockMode is false. Written at offload so that neither opening the tier
+	// nor reading from it has to rebuild the table by walking the object.
+	BlocksKey string
 	// FirstOffset and LastOffset bound the records in the object, for offset
 	// routing without reading it.
 	FirstOffset int64
@@ -49,7 +53,7 @@ type TierObject struct {
 	BlockMode bool
 }
 
-// tierObject is meta's inverse: the same nine fields, plus the base offset that
+// tierObject is meta's inverse: the same ten fields, plus the base offset that
 // identifies which segment they describe. offloadMeta is what a segment knows
 // about its own objects and TierObject is what the manifest says about them, so
 // the two carry the same facts and only the direction differs.
@@ -58,6 +62,7 @@ func (m offloadMeta) tierObject(baseOffset int64) TierObject {
 		BaseOffset:     baseOffset,
 		LogKey:         m.LogKey,
 		IndexKey:       m.IndexKey,
+		BlocksKey:      m.BlocksKey,
 		FirstOffset:    m.FirstOffset,
 		LastOffset:     m.LastOffset,
 		FirstWriteTime: m.FirstWriteTime,
@@ -72,6 +77,7 @@ func (o TierObject) meta() offloadMeta {
 	return offloadMeta{
 		LogKey:         o.LogKey,
 		IndexKey:       o.IndexKey,
+		BlocksKey:      o.BlocksKey,
 		FirstOffset:    o.FirstOffset,
 		LastOffset:     o.LastOffset,
 		FirstWriteTime: o.FirstWriteTime,
@@ -100,6 +106,7 @@ func (l *commitLog) tierState() ([]TierObject, error) {
 				BaseOffset:     s.BaseOffset,
 				LogKey:         s.storeKey,
 				IndexKey:       s.indexKey,
+				BlocksKey:      s.blocksKey,
 				FirstOffset:    s.firstOffset,
 				LastOffset:     s.lastOffset,
 				FirstWriteTime: s.firstWriteTime,

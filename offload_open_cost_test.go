@@ -15,19 +15,33 @@ import (
 )
 
 // countingLogStore counts reads of LOG objects — the segment bytes themselves,
-// which is what opening a log must not touch.
+// which is what opening a log must not touch — and separately of BLOCK TABLE
+// objects, which is what a cold read fetches instead of the log.
 type countingLogStore struct {
 	*FileSegmentStore
-	logReads atomic.Int64
-	logBytes atomic.Int64
+	logReads    atomic.Int64
+	logBytes    atomic.Int64
+	blocksReads atomic.Int64
+	blocksBytes atomic.Int64
 }
 
 func (s *countingLogStore) ReadAt(key string, p []byte, off int64) (int, error) {
-	if strings.HasSuffix(key, logSuffix) {
+	switch {
+	case strings.HasSuffix(key, logSuffix):
 		s.logReads.Add(1)
 		s.logBytes.Add(int64(len(p)))
+	case strings.HasSuffix(key, blocksSuffix):
+		s.blocksReads.Add(1)
+		s.blocksBytes.Add(int64(len(p)))
 	}
 	return s.FileSegmentStore.ReadAt(key, p, off)
+}
+
+func (s *countingLogStore) reset() {
+	s.logReads.Store(0)
+	s.logBytes.Store(0)
+	s.blocksReads.Store(0)
+	s.blocksBytes.Store(0)
 }
 
 // Opening a log reads none of its offloaded segments' bytes.
@@ -46,10 +60,12 @@ func (s *countingLogStore) ReadAt(key string, p []byte, off int64) (int, error) 
 // table it already had. Only the segment that came back from a manifest went and
 // re-derived what the manifest had just told it.
 //
-// The block table is the one thing the manifest does not carry, so it is built
-// on the first read that needs it instead of on open. Both boot paths are
-// covered here: reopening the directory the log offloaded from, and adopting the
-// tier into a fresh directory.
+// The block table is the one thing a manifest ENTRY does not carry, so it is
+// written to the store as its own object at offload and fetched — a few KB —
+// when a segment is first read. Not rebuilt: deferring the walk to the first
+// read would only have moved the same download behind the first record anyone
+// asked for. Both boot paths are covered here: reopening the directory the log
+// offloaded from, and adopting the tier into a fresh directory.
 func TestOpeningAnOffloadedTierReadsNoLogObjects(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -98,26 +114,30 @@ func TestOpeningAnOffloadedTierReadsNoLogObjects(t *testing.T) {
 			require.NoError(t, l.Close())
 
 			// The ordinary case: reopen the directory the log offloaded from.
-			store.logReads.Store(0)
-			store.logBytes.Store(0)
+			store.reset()
 			same, err := New(opts(dir, false))
 			require.NoError(t, err)
 			require.Zerof(t, store.logBytes.Load(),
 				"reopening read %d bytes of segment objects across %d reads, before "+
 					"serving anything", store.logBytes.Load(), store.logReads.Load())
+			require.Zerof(t, store.blocksBytes.Load(),
+				"reopening fetched %d bytes of block tables; they belong to the "+
+					"segments that get read, not to the open", store.blocksBytes.Load())
 			require.NoError(t, same.Close())
 
 			// The adoption case: a fresh directory, the tier taken from the store.
 			fresh := filepath.Join(root, "adopt")
 			require.NoError(t, os.MkdirAll(fresh, 0o755))
-			store.logReads.Store(0)
-			store.logBytes.Store(0)
+			store.reset()
 			adopted, err := New(opts(fresh, true))
 			require.NoError(t, err)
 			defer adopted.Close()
 			require.Zerof(t, store.logBytes.Load(),
 				"adopting read %d bytes of segment objects across %d reads, before "+
 					"serving anything", store.logBytes.Load(), store.logReads.Load())
+			require.Zerof(t, store.blocksBytes.Load(),
+				"adopting fetched %d bytes of block tables before serving anything",
+				store.blocksBytes.Load())
 
 			// The work moved, it did not vanish — and the segment still reads.
 			// Without this the zero above would be satisfied just as well by a
@@ -135,6 +155,22 @@ func TestOpeningAnOffloadedTierReadsNoLogObjects(t *testing.T) {
 			require.Greaterf(t, store.logBytes.Load(), int64(0),
 				"the first read fetched nothing, so the open must have fetched "+
 					"it after all")
+
+			// And the table came from its own object rather than from a walk of
+			// the log's header chain. Small is the whole point: a walk reads
+			// every header in the object, which for a 1MiB segment is the
+			// object.
+			if tc.codec != compress.None {
+				require.Greaterf(t, store.blocksReads.Load(), int64(0),
+					"a block segment served a read without fetching its block table, "+
+						"so it must have rebuilt one")
+				require.Lessf(t, store.blocksBytes.Load(), int64(64<<10),
+					"the block table fetch was %d bytes, which is not a block table",
+					store.blocksBytes.Load())
+			} else {
+				require.Zerof(t, store.blocksReads.Load(),
+					"a raw segment has no block table and must not look for one")
+			}
 
 			// The TIMESTAMP lookup reaches the block table by its own route —
 			// findEntryByTimestamp, not findEntry — and both take the segment

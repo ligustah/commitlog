@@ -163,7 +163,7 @@ func TestObjectsOutsideTheManifestAreGarbage(t *testing.T) {
 	l, store, _ := tieredLog(t)
 
 	// An upload that never made it into a manifest.
-	orphan, _ := newStoreKeys(999)
+	orphan, _, _ := newStoreKeys(999)
 	require.NoError(t, store.Put(orphan, strings.NewReader("x"), 1))
 
 	manifest, err := l.TierManifest()

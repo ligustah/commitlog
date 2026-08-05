@@ -89,6 +89,14 @@ func copyTierObjects(src, dst SegmentStore, objs []TierObject) error {
 		if err := copyObject(src, dst, o.LogKey); err != nil {
 			return errors.Wrapf(err, "copy segment %d log object", o.BaseOffset)
 		}
+		// The block table is as load-bearing as the log bytes: readTierManifest
+		// refuses a block-compressed entry naming no table, so a copy that left
+		// it behind would produce a tier its new owner cannot open at all.
+		if o.BlocksKey != "" {
+			if err := copyObject(src, dst, o.BlocksKey); err != nil {
+				return errors.Wrapf(err, "copy segment %d block table", o.BaseOffset)
+			}
+		}
 		if o.IndexKey == "" {
 			continue
 		}

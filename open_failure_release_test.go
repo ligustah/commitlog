@@ -52,7 +52,7 @@ func TestALogThatFailsToOpenHoldsNothingAfterwards(t *testing.T) {
 	require.Positive(t, base, "the damage must sit above at least one whole segment")
 	store, err := NewFileSegmentStore(filepath.Join(tempDir(t), "store"))
 	require.NoError(t, err)
-	logKey, indexKey := newStoreKeys(base + 1_000_000)
+	logKey, indexKey, _ := newStoreKeys(base + 1_000_000)
 	body, err := json.Marshal(tierManifest{Version: manifestVersion, Segments: []TierObject{{
 		BaseOffset: base + 1_000_000, LogKey: logKey, IndexKey: indexKey,
 	}}})

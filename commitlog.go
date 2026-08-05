@@ -1558,8 +1558,8 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 		if s.needsBlockConsolidation() {
 			continue
 		}
-		logKey, idxKey := newStoreKeys(s.BaseOffset)
-		meta, err := s.uploadTo(l.SegmentStore, logKey, idxKey, l.RemoteIndexCache)
+		logKey, idxKey, blkKey := newStoreKeys(s.BaseOffset)
+		meta, err := s.uploadTo(l.SegmentStore, logKey, idxKey, blkKey, l.RemoteIndexCache)
 		if err != nil {
 			return n, err
 		}

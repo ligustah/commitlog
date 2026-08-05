@@ -562,12 +562,12 @@ run_guard "a ceiling of zero is not unset" clean.go   '	if !b.set {
 # named, that lost 2 of 86 daemon restarts on a loaded box.
 run_guard "the read retry spends its whole budget" util.go   '	deadline := time.Now().Add(readRetryBudget)'   '	deadline := time.Now().Add(readRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
 
-# Opening an offloaded tier reads none of the objects the manifest names. The
-# manifest carries blockMode, position and physPosition; the block table is the
-# one thing it does not carry, so it is owed rather than built. The
-# neutralization pays the debt on open instead, which is exactly what
-# initPositions used to do -- 22MB downloaded for a 22-segment tier before
-# serving one read.
+# Opening an offloaded tier reads NOTHING the manifest names -- not the log
+# objects, not the block tables. The manifest entry carries blockMode, position
+# and physPosition; the block table is its own object, fetched by the segments
+# somebody actually reads. The neutralization fetches every one of them on open,
+# which is the shape initPositions had -- 22MB downloaded for a 22-segment tier
+# before serving a single read.
 run_guard "opening an offloaded segment builds no block table" segment.go   '	s.blocksPending = meta.BlockMode
 ' '	s.blocksPending = meta.BlockMode
 	if err := s.ensureBlocksLoaded(); err != nil {
@@ -586,6 +586,19 @@ run_guard "findEntry builds the block table it is about to scan" segment.go   '	
 		return nil, err
 	}
 	s.RLock()'   '	s.RLock()'   '^TestOpeningAnOffloadedTierReadsNoLogObjects$'
+
+# A block table is refused when damaged, never approximated and never rebuilt by
+# walking the object -- that walk is the cost the table exists to remove, so a
+# fallback would turn damage into a slow success. The neutralization drops the
+# checksum, which is the check that catches a flipped byte the length fields
+# still agree with.
+run_guard "a damaged block table is refused" block_table.go   '	if got, exp := crc32.ChecksumIEEE(body), encoding.Uint32(buf[want-4:]); got != exp {' '	if got, exp := crc32.ChecksumIEEE(body), crc32.ChecksumIEEE(body); got != exp {'   '^TestADamagedBlockTableIsRefused$'
+
+# BlockMode and BlocksKey are one fact stored twice, and past readTierManifest
+# they are read by different code at different times -- so the pair is checked
+# where it ARRIVES, like the unknown codec. A block-compressed entry naming no
+# table is a segment nothing can read without rebuilding its table.
+run_guard "a block entry names its block table" manifest.go   '		if o.BlockMode != (o.BlocksKey != "") {' '		if false {'   '^TestAManifestEntryPairsBlockModeWithABlockTable$'
 
 echo
 if [ "$failures" -ne 0 ]; then

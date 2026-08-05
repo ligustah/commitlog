@@ -46,7 +46,7 @@ func TestATierManifestNamingAKeyOutsideTheStoreIsRefused(t *testing.T) {
 	}
 
 	// A manifest this package could have written round-trips.
-	logKey, indexKey := newStoreKeys(0)
+	logKey, indexKey, _ := newStoreKeys(0)
 	put(tierManifest{Version: manifestVersion, Segments: []TierObject{{
 		BaseOffset: 0, LogKey: logKey, IndexKey: indexKey,
 	}}})
@@ -106,7 +106,7 @@ func TestAManifestThatIsNotThisVersionIsRefused(t *testing.T) {
 		require.NoError(t, store.Put(manifestKey, bytes.NewReader(body), int64(len(body))))
 	}
 
-	logKey, _ := newStoreKeys(0)
+	logKey, _, _ := newStoreKeys(0)
 	segs := []TierObject{{BaseOffset: 0, LogKey: logKey}}
 
 	// The version this build writes is the one it reads.

@@ -70,7 +70,7 @@ func TestReadOnlyTierRefusesDeletes(t *testing.T) {
 	l, store, _ := readOnlyFixture(t, true)
 
 	// Something a previous owner left behind.
-	key, _ := newStoreKeys(1)
+	key, _, _ := newStoreKeys(1)
 	require.NoError(t, store.Put(key, strings.NewReader("x"), 1))
 
 	_, err := l.DeleteStoreObjects([]string{key})

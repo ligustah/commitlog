@@ -1,6 +1,7 @@
 package commitlog
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -105,11 +106,11 @@ type segment struct {
 	blocks       []blockRef
 	physPosition int64
 	cache        *blockCache
-	// blocksPending means blocks has not been built yet and must be before any
-	// read maps a logical offset onto the file. Only an OFFLOADED segment sets
-	// it: building the table walks every block header in the object, which for a
-	// segment in a store is the whole object over the network, and opening a log
-	// is not a reason to download its cold tier. See ensureBlocksLoaded.
+	// blocksPending means blocks has not been FETCHED yet and must be before any
+	// read maps a logical offset onto the file. Only an offloaded block segment
+	// sets it, and only until its first read: the table is a few KB in the store
+	// under blocksKey, and opening a log is not a reason to fetch the tables of
+	// segments nobody reads. See ensureBlocksLoaded.
 	blocksPending bool
 	// Set when opening this segment dropped an unresolvable tail from the log
 	// (a crash mid-append). The index still anchors into the bytes that went,
@@ -129,6 +130,11 @@ type segment struct {
 	// and Index is the resident local index.
 	indexKey   string
 	indexCache *RemoteIndexCache
+
+	// blocksKey is the object holding this segment's block table, set exactly
+	// when an offloaded segment is block-compressed. A raw segment has no table
+	// and a local one builds its own on open, cheaply, off local disk.
+	blocksKey string
 
 	sync.RWMutex
 }
@@ -186,10 +192,11 @@ func (s *segment) withIndex(fn func(idx *index) error) error {
 // The cost is that a key cannot be recomputed, only remembered. That is already
 // true: the tier manifest records keys VERBATIM and is the only thing that
 // resolves them, so nothing anywhere derives a key for an existing object.
-func newStoreKeys(baseOffset int64) (logKey, indexKey string) {
+func newStoreKeys(baseOffset int64) (logKey, indexKey, blocksKey string) {
 	u := newUploadID()
 	return fmt.Sprintf("%020d.%s%s", baseOffset, u, logSuffix),
-		fmt.Sprintf("%020d.%s%s", baseOffset, u, indexSuffix)
+		fmt.Sprintf("%020d.%s%s", baseOffset, u, indexSuffix),
+		fmt.Sprintf("%020d.%s%s", baseOffset, u, blocksSuffix)
 }
 
 // newUploadID returns a value no other upload will use. It is random rather
@@ -224,8 +231,13 @@ func newUploadID() string {
 //
 // An empty IndexKey means "index kept local" (option 1).
 type offloadMeta struct {
-	LogKey         string
-	IndexKey       string // empty => index kept local (option 1)
+	LogKey   string
+	IndexKey string // empty => index kept local (option 1)
+	// BlocksKey holds the segment's block table, and is empty exactly when the
+	// segment is not block-compressed — a raw segment has no table. Written at
+	// offload so neither opening the tier nor reading from it has to rebuild the
+	// table by walking the object. See block_table.go.
+	BlocksKey      string
 	FirstOffset    int64
 	LastOffset     int64
 	FirstWriteTime int64
@@ -255,7 +267,7 @@ type offloadMeta struct {
 // newStoreKeys). They are passed rather than derived here because they cannot be
 // derived: every upload gets its own, so only the caller that allocated them
 // knows which objects are being written.
-func (s *segment) uploadTo(store SegmentStore, key, idxKey string, cache *RemoteIndexCache) (offloadMeta, error) {
+func (s *segment) uploadTo(store SegmentStore, key, idxKey, blkKey string, cache *RemoteIndexCache) (offloadMeta, error) {
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
@@ -275,6 +287,18 @@ func (s *segment) uploadTo(store SegmentStore, key, idxKey string, cache *Remote
 		return offloadMeta{}, errors.Wrap(err, "offload put")
 	}
 
+	// The block table, before the manifest for the same reason as the index: a
+	// published entry has to imply that every object it names exists. Only a
+	// block-compressed segment has one.
+	var blocksKey string
+	if s.blockMode {
+		blocksKey = blkKey
+		body := encodeBlockTable(s.blocks)
+		if err := store.Put(blocksKey, bytes.NewReader(body), int64(len(body))); err != nil {
+			return offloadMeta{}, errors.Wrap(err, "offload block table put")
+		}
+	}
+
 	// Option 2: upload the index object too, before the manifest, so a manifest
 	// entry implies both objects exist.
 	var indexKey string
@@ -292,6 +316,7 @@ func (s *segment) uploadTo(store SegmentStore, key, idxKey string, cache *Remote
 	return offloadMeta{
 		LogKey:         key,
 		IndexKey:       indexKey,
+		BlocksKey:      blocksKey,
 		FirstOffset:    s.firstOffset,
 		LastOffset:     s.lastOffset,
 		FirstWriteTime: s.firstWriteTime,
@@ -338,6 +363,10 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 	if err != nil {
 		return err
 	}
+	// The table this segment already has stays; only the key it would be
+	// re-fetched from is new. A rewrite (swapReplacement) or a reopen is what
+	// reads the object.
+	s.blocksKey = meta.BlocksKey
 	localLog := s.backing.Name()
 	if err := s.backing.Close(); err != nil {
 		return errors.Wrap(err, "close local backing")
@@ -456,8 +485,9 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 	s.blockMode = meta.BlockMode
 	s.position = meta.Position
 	s.physPosition = meta.PhysPosition
-	// A raw segment has no block table at all, so there is nothing to defer and
-	// nothing to build: reads go straight at the backing.
+	// A raw segment has no block table at all, so there is nothing to fetch:
+	// reads go straight at the backing.
+	s.blocksKey = meta.BlocksKey
 	s.blocksPending = meta.BlockMode
 
 	if meta.IndexKey == "" {
@@ -507,11 +537,50 @@ func (s *segment) ensureBlocksLoaded() error {
 	if !s.blocksPending {
 		return nil
 	}
-	if err := s.scanBlocks(s.physPosition); err != nil {
-		return errors.Wrap(err, "build block table")
+	blocks, err := s.fetchBlockTable()
+	if err != nil {
+		return err
 	}
+	s.blocks = blocks
 	s.blocksPending = false
 	return nil
+}
+
+// fetchBlockTable reads the segment's block table object and checks it describes
+// the same extent the manifest entry did.
+//
+// The cross-check is the reason the two sizes are worth comparing at all: they
+// come from different objects written by the same offload, so a table that
+// disagrees with them is either a torn write or the wrong key, and both mean
+// every read through this segment lands on the wrong bytes. Refusing is the only
+// safe answer — a block table cannot be partially believed.
+//
+// Caller holds the segment write lock.
+func (s *segment) fetchBlockTable() ([]blockRef, error) {
+	if s.blocksKey == "" {
+		return nil, errors.Errorf(
+			"commitlog: offloaded block segment at %d has no block table object",
+			s.BaseOffset)
+	}
+	size, err := s.store.Size(s.blocksKey)
+	if err != nil {
+		return nil, errors.Wrapf(err, "size block table %q", s.blocksKey)
+	}
+	buf := make([]byte, size)
+	if _, err := s.store.ReadAt(s.blocksKey, buf, 0); err != nil {
+		return nil, errors.Wrapf(err, "read block table %q", s.blocksKey)
+	}
+	blocks, err := decodeBlockTable(buf)
+	if err != nil {
+		return nil, errors.Wrapf(err, "decode block table %q", s.blocksKey)
+	}
+	if logical, phys := blockTableExtent(blocks); logical != s.position || phys != s.physPosition {
+		return nil, errors.Errorf(
+			"commitlog: block table %q covers %d logical/%d physical bytes, "+
+				"the manifest says %d/%d", s.blocksKey, logical, phys,
+			s.position, s.physPosition)
+	}
+	return blocks, nil
 }
 
 // initPositions inspects the (already-open) log file, detects whether it uses
@@ -641,8 +710,8 @@ func (s *segment) discardTornTail(keep, size int64) error {
 // - Initialize firstWriteTime/lastWriteTime
 func (s *segment) setupIndex() (err error) {
 	// Everything below maps a logical position onto the file — lastFrameInBlock
-	// and indexDescribesLog both do — so a deferred block table has to be built
-	// first.
+	// and indexDescribesLog both do — so a deferred block table has to be
+	// fetched first.
 	//
 	// Built HERE, and without ensureBlocksLoaded, because setupIndex runs on both
 	// sides of the segment lock: openOffloadedSegment calls it on a segment
@@ -655,9 +724,11 @@ func (s *segment) setupIndex() (err error) {
 	// assigns s.Index, s.firstOffset and s.lastOffset unsynchronized, so every
 	// caller must already have the segment to itself.
 	if s.blocksPending {
-		if err := s.scanBlocks(s.physPosition); err != nil {
-			return errors.Wrap(err, "build block table")
+		blocks, err := s.fetchBlockTable()
+		if err != nil {
+			return err
 		}
+		s.blocks = blocks
 		s.blocksPending = false
 	}
 	s.Index, err = newIndex(options{
@@ -1821,9 +1892,9 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 	oldBacking, _ := s.backing.(*storeBacking)
 
 	var (
-		newKey, freshIndexKey = newStoreKeys(s.BaseOffset)
-		newIndexKey           string
-		superseded            = []pendingReclaim{{key: s.storeKey, pin: oldBacking}}
+		newKey, freshIndexKey, freshBlocksKey = newStoreKeys(s.BaseOffset)
+		newIndexKey, newBlocksKey             string
+		superseded                            = []pendingReclaim{{key: s.storeKey, pin: oldBacking}}
 	)
 
 	size, err := fresh.backing.Size()
@@ -1851,9 +1922,23 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 		superseded = append(superseded, pendingReclaim{key: s.indexKey})
 	}
 
+	if fresh.blockMode {
+		newBlocksKey = freshBlocksKey
+		body := encodeBlockTable(fresh.blocks)
+		if err := s.store.Put(newBlocksKey, bytes.NewReader(body), int64(len(body))); err != nil {
+			return offloadMeta{}, nil, errors.Wrap(err, "put rewritten block table")
+		}
+	}
+	if s.blocksKey != "" {
+		// No pin, for the index object's reason: the table is fetched whole and
+		// held by the segment, not streamed from, so nothing is mid-read of it.
+		superseded = append(superseded, pendingReclaim{key: s.blocksKey})
+	}
+
 	meta := offloadMeta{
 		LogKey:         newKey,
 		IndexKey:       newIndexKey,
+		BlocksKey:      newBlocksKey,
 		FirstOffset:    fresh.firstOffset,
 		LastOffset:     fresh.lastOffset,
 		FirstWriteTime: fresh.firstWriteTime,
@@ -1908,6 +1993,7 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 	s.backing = sb
 	s.storeKey = newKey
 	s.indexKey = newIndexKey
+	s.blocksKey = meta.BlocksKey
 	s.firstOffset = fresh.firstOffset
 	s.lastOffset = fresh.lastOffset
 	s.firstWriteTime = fresh.firstWriteTime

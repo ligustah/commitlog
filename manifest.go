@@ -18,12 +18,16 @@ const manifestKey = "manifest"
 // accepts. Refusing an unknown version rather than guessing at its layout is
 // the point of carrying the field.
 //
-// Only ONE version has ever existed, so "not this one" and "newer than this
-// one" describe the same set of files today — but they do not describe the same
-// set of BUGS. A `>` comparison also accepts version 0, which is what an absent
-// field decodes to, so any JSON object that happened to parse was read as a
-// manifest. That is the whole integrity check on this file.
-const manifestVersion = 1
+// A `>` comparison would also accept version 0, which is what an absent field
+// decodes to, so any JSON object that happened to parse would be read as a
+// manifest. Equality is the whole integrity check on this file.
+//
+// Version 2 adds BlocksKey. A version 1 manifest is refused rather than adapted:
+// its block-compressed entries name no block table, and the only way to serve
+// them would be to rebuild each table by walking its object — the cost the key
+// exists to remove. Nothing is deployed against version 1, so there is nothing
+// to migrate; a store written by an older build is re-offloaded, not converted.
+const manifestVersion = 2
 
 // tierManifest is the store's own description of itself: which object holds
 // which segment, and the offset and time ranges each covers.
@@ -152,6 +156,24 @@ func readTierManifest(store SegmentStore) ([]TierObject, error) {
 			return nil, errors.Wrapf(err,
 				"commitlog: tier manifest segment %d names an invalid log object",
 				o.BaseOffset)
+		}
+		// A block-compressed object without a block table is unreadable, and
+		// there is deliberately no falling back to rebuilding one by walking the
+		// object: that walk is the whole cost the table exists to remove, and a
+		// silent fallback would turn its absence into a slow success nobody
+		// notices. Refused where it arrives, like an unknown codec.
+		if o.BlockMode != (o.BlocksKey != "") {
+			return nil, errors.Errorf(
+				"commitlog: tier manifest segment %d has BlockMode=%v and "+
+					"BlocksKey=%q; a block-compressed object has a block table "+
+					"and a raw one has none", o.BaseOffset, o.BlockMode, o.BlocksKey)
+		}
+		if o.BlocksKey != "" {
+			if err := validStoreKey(o.BlocksKey); err != nil {
+				return nil, errors.Wrapf(err,
+					"commitlog: tier manifest segment %d names an invalid block table",
+					o.BaseOffset)
+			}
 		}
 		// An empty IndexKey is meaningful — it says the index stayed on local
 		// disk — so it is the one value exempt from the check.

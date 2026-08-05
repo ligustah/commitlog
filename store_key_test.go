@@ -16,7 +16,7 @@ func TestStoreKeysAreUniquePerUpload(t *testing.T) {
 	const n = 500
 	seen := make(map[string]bool, 2*n)
 	for i := 0; i < n; i++ {
-		logKey, idxKey := newStoreKeys(42)
+		logKey, idxKey, _ := newStoreKeys(42)
 
 		require.False(t, seen[logKey], "log key reused: %s", logKey)
 		require.False(t, seen[idxKey], "index key reused: %s", idxKey)
@@ -37,7 +37,7 @@ func TestStoreKeysAreUniquePerUpload(t *testing.T) {
 // listing be read by a human and lets objects for one segment be found
 // together.
 func TestStoreKeysLeadWithTheBaseOffset(t *testing.T) {
-	logKey, idxKey := newStoreKeys(42)
+	logKey, idxKey, _ := newStoreKeys(42)
 	require.True(t, strings.HasPrefix(logKey, "00000000000000000042."), logKey)
 	require.True(t, strings.HasPrefix(idxKey, "00000000000000000042."), idxKey)
 	require.True(t, strings.HasSuffix(logKey, logSuffix))
@@ -45,8 +45,8 @@ func TestStoreKeysLeadWithTheBaseOffset(t *testing.T) {
 
 	// Zero-padded, so lexical order is offset order — a listing of a large log
 	// is otherwise interleaved nonsense.
-	low, _ := newStoreKeys(9)
-	high, _ := newStoreKeys(10)
+	low, _, _ := newStoreKeys(9)
+	high, _, _ := newStoreKeys(10)
 	require.Less(t, low, high)
 }
 
@@ -54,8 +54,8 @@ func TestStoreKeysLeadWithTheBaseOffset(t *testing.T) {
 // attempt may still be writing. This is the case a deterministic key cannot
 // handle: the original request may be in flight, and nothing can tell.
 func TestRetryingAnUploadUsesADifferentKey(t *testing.T) {
-	first, firstIdx := newStoreKeys(7)
-	retry, retryIdx := newStoreKeys(7)
+	first, firstIdx, _ := newStoreKeys(7)
+	retry, retryIdx, _ := newStoreKeys(7)
 
 	require.NotEqual(t, first, retry,
 		"a retry must not race the attempt it is retrying")

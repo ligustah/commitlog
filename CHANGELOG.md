@@ -35,8 +35,22 @@ library from that fork onward.
   segment a walk of the entire header chain — all of it already recorded in the
   manifest. Measured on the boot path before serving a single read: 22,136,648
   bytes for a 22-segment snappy tier, 5,242,880 for a 5-segment raw one. Now
-  zero, on both the reopen and adopt paths. The block table, the one thing the
-  manifest does not carry, is built on the first read that needs it.
+  zero, on both the reopen and adopt paths.
+- **A segment's block table is written to the store at offload**, as its own
+  object beside the log and index, and named by `TierObject.BlocksKey`. It is
+  the one thing a manifest entry did not carry, and the alternative to storing
+  it was rebuilding it by walking the object's header chain — a read of the whole
+  object. Deferring that walk to the first read would only have moved the same
+  download behind the first record anyone asked for; persisting removes it. A
+  cold segment now fetches a few KB. It is not inlined in the manifest because
+  the manifest is read whole on every open, and block tables are bounded by the
+  tier's total block count rather than its segment count.
+- **Breaking**: the tier manifest is version 2, and version 1 is refused rather
+  than adapted. A version 1 entry names no block table, so its block-compressed
+  segments could only be served by the walk this replaces. Nothing is deployed
+  against version 1; a store written by an older build is re-offloaded, not
+  converted. `CopyTier` copies block tables, and a manifest entry whose
+  `BlockMode` and `BlocksKey` disagree is refused where it arrives.
 
 ## v0.55.0 — 2026-08-05
 
