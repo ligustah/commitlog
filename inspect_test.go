@@ -125,22 +125,23 @@ func TestInspectSegmentWalksBlocks(t *testing.T) {
 	require.Equal(t, want, got, "records read through blocks disagreed with what was written")
 }
 
-// The error a pre-v0.15.0 segment produces must SAY that, because the bare one
-// did not and a consumer spent hours concluding some unknown writer had made
-// the file.
+// A header this build cannot read must say which version it found and which it
+// writes, and must say the SAME thing whichever direction the mismatch runs.
 //
-// Those segments have a 10-byte header — magic, codec, lengths, no version — so
-// this build reads the codec byte as a version. A zstd block starts `C1 03 ...`
-// and gets reported as "block format version 3", which is a version that has
-// never existed.
-func TestInspectSegmentExplainsAPreVersionHeader(t *testing.T) {
+// It did not used to. At position 0 the error was wrapped with a sentence
+// asserting the file predated v0.15.0 — inferred from the symptom, since that
+// layout's codec byte lands where the version byte now is. A segment from a
+// newer build produces the identical symptom, and got told the identical wrong
+// story: the shape of error that sends someone looking for a writer that does
+// not exist, which is what the sentence was added to prevent.
+func TestInspectSegmentNamesBothBlockFormatVersions(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "00000000000000000000.log")
 
-	// A pre-v0.15.0 block header, hand-built: magic, codec(Zstd=3), then the
-	// two lengths. Ten bytes, no version field.
-	old := []byte{blockMagic, byte(compress.Zstd), 0, 0, 0x04, 0x00, 0, 0, 0x72, 0x23}
-	require.NoError(t, os.WriteFile(path, append(old, make([]byte, 64)...), 0666))
+	// Version 9 — no build has ever written it, and it stands in for either
+	// direction, since the parse compares rather than orders.
+	hdr := []byte{blockMagic, 9, byte(compress.Zstd), 0, 0, 0x04, 0x00, 0, 0, 0x72, 0x23}
+	require.NoError(t, os.WriteFile(path, append(hdr, make([]byte, 64)...), 0666))
 
 	f, err := InspectSegment(path)
 	require.NoError(t, err)
@@ -149,8 +150,11 @@ func TestInspectSegmentExplainsAPreVersionHeader(t *testing.T) {
 	_, err = f.Blocks()
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrBlockFormat)
-	require.Contains(t, err.Error(), "predates v0.15.0",
-		"the error must name the pre-version layout, not just the version number")
+	require.Contains(t, err.Error(), "block format version 9", "the error must name what it found")
+	require.Contains(t, err.Error(), fmt.Sprintf("this build writes %d", BlockFormatVersion),
+		"the error must name what this build writes")
+	require.NotContains(t, err.Error(), "predates",
+		"the error must not guess at which older layout produced the mismatch")
 }
 
 func bytesIndex(hay, needle []byte) int {

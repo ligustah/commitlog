@@ -106,12 +106,14 @@ func (s *SegmentFile) Size() int64 { return int64(len(s.raw)) }
 
 // Blocks walks the block headers.
 //
-// The error is the interesting part of this call. A segment written before
-// v0.15.0 has a 10-byte header with NO version byte — magic, codec, then the
-// lengths — so this build reads its codec byte as a version and refuses it with
-// ErrBlockFormat. That is correct (the layouts really are incompatible) but the
-// message alone sent one consumer looking for a writer that never existed, so
-// the case is named explicitly here.
+// A header this build does not understand comes back as ErrBlockFormat naming
+// both versions — the one in the file and the one this build writes. That used
+// to be wrapped, at position 0, with a sentence saying the file predated
+// v0.15.0 (the layout with no version byte, whose codec byte reads as a
+// version). The sentence was inferred from the symptom rather than from the
+// file: a segment written by a NEWER build produces the same symptom and was
+// told the same wrong story. Pre-v0.15.0 segments no longer exist; the honest
+// error is the two version numbers.
 func (s *SegmentFile) Blocks() ([]BlockInfo, error) {
 	if !s.blocked {
 		return nil, nil
@@ -128,14 +130,7 @@ func (s *SegmentFile) Blocks() ([]BlockInfo, error) {
 		}
 		codec, uLen, cLen, err := parseBlockHeader(s.raw[pos : pos+blockHeaderLen])
 		if err != nil {
-			if errors.Is(err, ErrBlockFormat) && pos == 0 {
-				return out, errors.Wrapf(err,
-					"%s: if this file predates v0.15.0 its header is 10 bytes with no "+
-						"version field (magic, codec, lengths) and the byte read as a "+
-						"version is the CODEC; such segments are not readable by this build",
-					s.path)
-			}
-			return out, errors.Wrapf(err, "block at %d", pos)
+			return out, errors.Wrapf(err, "%s: block at %d", s.path, pos)
 		}
 		out = append(out, BlockInfo{
 			FileOffset: pos, Codec: codec, UncompressedLen: uLen, CompressedLen: cLen,

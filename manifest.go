@@ -15,9 +15,15 @@ import (
 // no qualifier and stays predictable enough to fetch without a listing.
 const manifestKey = "manifest"
 
-// manifestVersion is the format the writer emits. A reader accepts anything it
-// understands and refuses what it does not, rather than guessing at a layout
-// written by something newer.
+// manifestVersion is the format the writer emits, and the only one a reader
+// accepts. Refusing an unknown version rather than guessing at its layout is
+// the point of carrying the field.
+//
+// Only ONE version has ever existed, so "not this one" and "newer than this
+// one" describe the same set of files today — but they do not describe the same
+// set of BUGS. A `>` comparison also accepts version 0, which is what an absent
+// field decodes to, so any JSON object that happened to parse was read as a
+// manifest. That is the whole integrity check on this file.
 const manifestVersion = 1
 
 // tierManifest is the store's own description of itself: which object holds
@@ -86,7 +92,7 @@ func readTierManifest(store SegmentStore) ([]TierObject, error) {
 	if err := json.Unmarshal(body, &m); err != nil {
 		return nil, errors.Wrap(err, "decode tier manifest")
 	}
-	if m.Version > manifestVersion {
+	if m.Version != manifestVersion {
 		return nil, errors.Errorf(
 			"commitlog: tier manifest is version %d, this build understands %d",
 			m.Version, manifestVersion)

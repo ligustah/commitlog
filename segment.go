@@ -218,11 +218,14 @@ func newUploadID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// offloadMeta is the JSON content of a v2 .offloaded marker. It carries enough to
+// offloadMeta is the JSON content of an .offloaded marker. It carries enough to
 // place the segment at boot without reading its (now remote) index: boundaries
 // for offset/time routing, and the log object size so the store backing opens
-// without a size round-trip. A v1 marker (option 1, index kept local) is instead
-// the raw log key bytes; readOffloadMarker tells them apart by the leading '{'.
+// without a size round-trip.
+//
+// An empty IndexKey still means "index kept local" (option 1) — that is a live
+// configuration, not an old format. What is gone is the marker layout that was
+// the raw log key with no JSON around it.
 type offloadMeta struct {
 	LogKey         string `json:"log_key"`
 	IndexKey       string `json:"index_key,omitempty"` // empty => index kept local (option 1)
@@ -235,9 +238,15 @@ type offloadMeta struct {
 	BlockMode      bool   `json:"block_mode"`
 }
 
-// readOffloadMarker reads a .offloaded marker. A v2 marker is JSON; a v1 marker
-// (option 1) is the raw log key, returned as offloadMeta{LogKey} with IndexKey
-// empty so the caller keeps using the local index.
+// readOffloadMarker reads a .offloaded marker, which is JSON.
+//
+// It used to accept a second layout — the bare log key with no JSON around it —
+// distinguished by whether the first byte was '{'. Nothing has written that
+// since the marker started carrying the segment's boundaries, and keeping the
+// fallback cost more than the format it read: ANY file that failed to start
+// with '{' was accepted as a log key, so a truncated or garbage marker became a
+// segment pointing at an object named after the garbage, rather than an error.
+// Requiring JSON is both the simpler rule and the one that refuses corruption.
 func readOffloadMarker(path string) (offloadMeta, error) {
 	// Recovery-time read of the log's own metadata, so it carries the same
 	// just-killed-process exposure as the high watermark; see ReadFileWithRetry.
@@ -245,17 +254,10 @@ func readOffloadMarker(path string) (offloadMeta, error) {
 	if err != nil {
 		return offloadMeta{}, err
 	}
-	if len(b) > 0 && b[0] == '{' {
-		var m offloadMeta
-		if err := json.Unmarshal(b, &m); err != nil {
-			return offloadMeta{}, errors.Wrap(err, "parse offload marker")
-		}
-		if err := validMarkerKeys(m); err != nil {
-			return offloadMeta{}, errors.Wrapf(err, "offload marker %s", path)
-		}
-		return m, nil
+	var m offloadMeta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return offloadMeta{}, errors.Wrapf(err, "parse offload marker %s", path)
 	}
-	m := offloadMeta{LogKey: string(b)}
 	if err := validMarkerKeys(m); err != nil {
 		return offloadMeta{}, errors.Wrapf(err, "offload marker %s", path)
 	}
@@ -287,22 +289,17 @@ func validMarkerKeys(m offloadMeta) error {
 	return validStoreKey(m.IndexKey)
 }
 
-// offloadTo uploads the segment's local log bytes to store under key, swaps the
-// backing to a read-only storeBacking, writes the .offloaded marker, and
-// deletes the local .log file. The index stays local. The segment must be
-// sealed and not already offloaded; the marker is written before the local log
-// is removed so a crash mid-offload leaves a recoverable state (marker present
-// + object uploaded, local log may or may not be gone — open() prefers the
-// store when the marker exists).
 // offloadTo uploads the segment's log bytes to store under key and swaps the
-// backing to a read-only storeBacking. When cache is non-nil (tiered storage,
-// option 2) it also uploads the index object and drops the local index, so no
-// per-segment index file remains on local disk; reads then fetch the index into
-// the shared cache on demand. A v2 .offloaded marker records the segment's
-// boundaries and log size so a restart places it without reading the remote
-// index. The marker is the commit point: it is written after both objects are
-// uploaded and before the local files are removed, so a crash mid-offload leaves
-// a recoverable state (objects present + marker => open through the store).
+// backing to a read-only storeBacking. The segment must be sealed and not
+// already offloaded. When cache is non-nil (tiered storage, option 2) it also
+// uploads the index object and drops the local index, so no per-segment index
+// file remains on local disk; reads then fetch the index into the shared cache
+// on demand. Otherwise the index stays local (option 1). The .offloaded marker
+// records the segment's boundaries and log size so a restart places it without
+// reading the remote index. The marker is the commit point: it is written after
+// both objects are uploaded and before the local files are removed, so a crash
+// mid-offload leaves a recoverable state (objects present + marker => open
+// through the store).
 // key and idxKey are the object keys the caller allocated for this upload (see
 // newStoreKeys). They are passed rather than derived here because they cannot be
 // derived: every upload gets its own, so only the caller that allocated them
@@ -449,15 +446,13 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 	return s, err
 }
 
-// openOffloadedSegment opens a sealed segment whose log bytes live in store
-// under key (the local .log is gone; the index is still local). It reads block
-// metadata and positions through the store backing and loads the local index,
-// so it behaves like any other sealed segment for reads.
-// openOffloadedSegment opens a sealed segment whose log bytes live in store. meta
-// comes from the .offloaded marker. For a v1 marker (option 1, meta.IndexKey
-// empty) the local index is still present and is loaded normally. For a v2 marker
-// (option 2) the index has been offloaded too: boundaries come from the marker,
-// the index stays remote (fetched into cache on first seek), and Index is nil.
+// openOffloadedSegment opens a sealed segment whose log bytes live in store (the
+// local .log is gone). meta comes from the .offloaded marker, and its IndexKey
+// says where the index is. Empty (option 1) means the local index is still
+// present and is loaded normally, so the segment behaves like any other sealed
+// one for reads. Set (option 2) means the index was offloaded too: boundaries
+// come from the marker, the index stays remote (fetched into cache on first
+// seek), and Index is nil.
 func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compress.Codec, store SegmentStore, meta offloadMeta, cache *RemoteIndexCache) (*segment, error) {
 	s := &segment{
 		maxBytes:    maxBytes,

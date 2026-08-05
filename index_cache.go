@@ -197,11 +197,12 @@ func (c *RemoteIndexCache) fetch(store SegmentStore, objectKey string, baseOffse
 	return &cachedIndex{objectKey: objectKey, idx: idx, path: path, bytes: size}, nil
 }
 
-// release drops one pin on a cached entry. The entry stays cached (evictable
-// once unpinned) until LRU eviction reclaims it.
-// release drops one pin. It takes the entry rather than its key because an
-// invalidated entry is no longer in the map, and the pin still has to be
-// dropped — and the last one is what closes it.
+// release drops one pin on a cached entry, which stays cached (evictable once
+// unpinned) until LRU eviction reclaims it.
+//
+// It takes the entry rather than its key because an invalidated entry is no
+// longer in the map, and the pin still has to be dropped — and the last one is
+// what closes it.
 func (c *RemoteIndexCache) release(ci *cachedIndex) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

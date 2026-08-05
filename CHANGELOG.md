@@ -5,6 +5,48 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+The first round of a standing sweep for complexity with no beneficiary
+(`.failover/maintenance/needless-complexity.md`). Pre-v1, nothing is deployed,
+so a compatibility path is not a cost we are carrying for someone — it is a code
+path nobody executes. Each one removed here turned out to be doing something
+worse than nothing: it was the branch that accepted corrupt input.
+
+- **Breaking**: an `.offloaded` marker must be JSON. The older layout — the bare
+  store key, no JSON around it — is gone.
+
+  The two were told apart by whether the first byte was `{`. Every file that is
+  not JSON satisfies that, so the fallback was reached by truncated markers,
+  half-flushed markers, markers full of NULs, and files that were not markers at
+  all. Each became a segment whose store key was the garbage, and a store key is
+  an *action*: it reaches `store.Delete`. One layout, and a marker that is not
+  it is now an error.
+
+- **Breaking**: a tier manifest must carry `version` equal to the version this
+  build writes.
+
+  The check was `>` — refuse anything newer. Only one version has ever existed,
+  so that reads as complete, but an absent `version` field decodes to `0`, and
+  `0` is not newer than `1`. Any JSON object that parsed was accepted as a
+  manifest, `{}` included — and `{}` is a manifest with no segments, which is
+  indistinguishable from an empty tier and would unpublish every offloaded
+  segment the store holds.
+
+- **Changed**: `InspectSegment(...).Blocks()` no longer claims a block header it
+  cannot read came from a pre-v0.15.0 segment.
+
+  The claim was inferred from the symptom rather than from the file: that layout
+  has no version byte, so its codec byte reads as a version — but so does a
+  segment written by a *newer* build, which was told the same wrong story. That
+  is the shape of error the sentence was added to prevent. It now names both
+  versions, the one found and the one this build writes, which is true either
+  way.
+
+- **Internal**: two guards added (`a marker must be JSON`, `a manifest must be
+  this version`), and a duplicated doc comment removed from three functions that
+  had two stacked descriptions each contradicting the other in part.
+
 ## v0.51.1 — 2026-08-04
 
 - **Fixed**: four ways `EarliestOffsetAfterTimestamp` and
