@@ -77,10 +77,10 @@ func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec)
 	defer cleanup()
 
 	const (
-		hotKeys  = 12   // rewritten constantly, so compaction has work
-		enough   = 3000 // records the writer must land before the run retires
-		maxSteps = 64   // messages per reader lifetime before it is rebuilt
-		minReads = 500  // records the follower must get through, or it caught nothing
+		hotKeys  = 12  // rewritten constantly, so compaction has work
+		enough   = 500 // records the writer must land, which minReads already implies
+		maxSteps = 64  // messages per reader lifetime before it is rebuilt
+		minReads = 500 // records the follower must get through, or it caught nothing
 	)
 
 	var (
@@ -261,6 +261,19 @@ func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec)
 	// Waiting for the conditions the assertions below need makes the run
 	// self-pacing on any machine at any speed, and turns the deadline into the
 	// only thing that can be wrong — with a message naming what never happened.
+	//
+	// Which is why the write count below must NOT be one of those conditions. It
+	// was 3000 and it was the last one met on every run, so it — not danger —
+	// was what retired the run, and the rewrite above had changed nothing but
+	// the error message. Dropping it to a count minReads already implies takes
+	// the run from 16-20s to under 5s here, because everything the assertions
+	// need is in place by roughly 700 writes: the follower is past its floor,
+	// retention has collected, it has crossed boundaries mid-scan and been
+	// overtaken at least once. The remaining 2300 records bought nothing but
+	// wall clock, and on the Windows runner — some 7x slower than this machine —
+	// they bought a red suite at 2611 of 3000 with every real condition already
+	// met. It stays in `unmet` for its message alone: a writer that dies gets
+	// named as the writer instead of surfacing as a follower that read nothing.
 	unmet := func() string {
 		switch {
 		case writes.Load() < enough:
