@@ -9,6 +9,20 @@ library from that fork onward.
 
 ### Changed
 
+- **Opening a log no longer stat-s the disk once per index file.** The sweep that
+  removes orphaned indexes asked `os.Stat` whether each `.index` had a `.log`
+  beside it, having read the whole directory two lines earlier. It now looks the
+  stem up in a set built from that listing — 336 syscalls saved on the
+  336-segment logs durable_streams reports, and one consistent view of the
+  directory rather than a listing plus a later stat that can disagree with it.
+
+  Two tests, because this path had none. The one that matters is the offloaded
+  case: an index with no log beside it is the *normal* resting state of a tiered
+  segment, and the only thing standing between it and deletion on every boot is
+  the manifest lookup. Deleted, adoption rebuilds each index by streaming its
+  segment back from the store — measured at 31059 bytes against 2184 on the same
+  fixture. Registered as guard 54.
+
 - **CI runs staticcheck.** `go vet` is deliberately narrow, and nothing else
   looked at the code, so a first run turned up four findings that had
   accumulated unnoticed — one of them worth having: `blockHeaderLen` sat in a
