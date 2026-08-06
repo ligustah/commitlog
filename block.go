@@ -32,8 +32,17 @@ const (
 	// backup and it claims one version while the segments hold another.
 	// Bytes cannot lie that way.
 	BlockFormatVersion byte = 1
-	blockHeaderLen          = 11 // magic(1) + version(1) + codec(1) + uncompressedLen(4) + compressedLen(4)
 )
+
+// blockHeaderLen is magic(1) + version(1) + codec(1) + uncompressedLen(4) +
+// compressedLen(4).
+//
+// Deliberately untyped and deliberately not in the group above: it is a LENGTH,
+// not a header field, and it is added to int64 file offsets throughout. Sitting
+// under `blockMagic byte` it read as though it inherited `byte` — it does not,
+// because it has its own value — and a reader who believed that would conclude
+// the arithmetic in payloadStart could not compile.
+const blockHeaderLen = 11
 
 // blockRef indexes one on-disk block: its position in the logical (uncompressed)
 // byte space and in the physical (on-disk) file.

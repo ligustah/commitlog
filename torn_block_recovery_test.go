@@ -3,7 +3,6 @@ package commitlog
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -127,7 +126,7 @@ func tornTailNeverCostsTheSealedSegments(t *testing.T, codec compress.Codec) {
 			// exactly that, reporting the frame that will not resolve. What is
 			// NOT lawful is serving something out of those bytes.
 			tail := int64(0)
-			endedWith := error(io.EOF)
+			var endedWith error
 			prev := activeBase - 1
 			for {
 				msg, offset, _, _, err := rd.ReadMessage(ctx, headers)

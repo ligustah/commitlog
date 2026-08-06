@@ -570,7 +570,7 @@ func compareMessages(t *testing.T, exp *Message, act SerializedMessage) {
 	require.Equal(t, exp.Attributes, act.Attributes())
 	require.Equal(t, exp.Key, act.Key())
 	require.Equal(t, exp.Value, act.Value())
-	if exp.Headers == nil || len(exp.Headers) == 0 {
+	if len(exp.Headers) == 0 {
 		require.Equal(t, map[string][]byte{}, act.Headers())
 	} else {
 		require.Equal(t, exp.Headers, act.Headers())

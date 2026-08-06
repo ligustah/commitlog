@@ -3,7 +3,6 @@ package commitlog
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1006,7 +1005,7 @@ func setupWithOptions(t testing.TB, opts Options) (*commitLog, func()) {
 // Close calls registered by createSegment) have run, preventing
 // "file in use" errors on Windows when the mmap is still active.
 func tempDir(t testing.TB) string {
-	p, err := ioutil.TempDir("", "lift_")
+	p, err := os.MkdirTemp("", "lift_")
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(p) })
 	return p
