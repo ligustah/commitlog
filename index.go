@@ -22,7 +22,13 @@ var errIndexCorrupt = errors.New("corrupt index file")
 // expand, close), so one mutex costs nothing.
 var gommapMu sync.Mutex
 
-func mmapFile(f *os.File) (gommap.MMap, error) {
+// mmapFile is a var so a test can make the mapping FAIL. What it guards
+// against — an index left claiming more than its mapping covers — is reachable
+// only when the OS refuses to map, and unlike the Windows truncate refusal
+// there is no way to provoke that for real without a mapping large enough to
+// be a hazard of its own. A test that cannot reach the failure path is a test
+// that proves the recovery works by never running it.
+var mmapFile = func(f *os.File) (gommap.MMap, error) {
 	gommapMu.Lock()
 	defer gommapMu.Unlock()
 	return gommap.Map(f.Fd(), gommap.PROT_READ|gommap.PROT_WRITE, gommap.MAP_SHARED)
@@ -225,8 +231,26 @@ func (idx *index) ReadAt(p []byte, offset int64) (n int, err error) {
 }
 
 func (idx *index) writeAt(p []byte, offset int64) error {
-	// Check if we need to expand the index file.
-	if pSize := int64(len(p)); offset+pSize >= idx.size {
+	// Expand when the MAPPING is too small, not when the recorded size is.
+	//
+	// This used to ask `offset+pSize >= idx.size`, with size standing in for how
+	// much room the write has. The two agree only while every expansion
+	// completes: the file grows, then the old mapping is torn down and a new one
+	// built, and BOTH of those steps can fail. size was recorded at the truncate,
+	// so a failure after it left size describing a file while the write copies
+	// into a mapping — a shorter one if the unmap failed, none at all if the
+	// remap did. The next write then read size, concluded the room was already
+	// there, skipped the expansion, and sliced past the end of the mapping. A
+	// panic inside a library takes the caller's process down with it. (Slicing a
+	// nil mapping at [0:] is legal instead, so an index shrunk while empty went
+	// the other way and silently wrote nothing; see Shrink.)
+	//
+	// Asking the mapping removes the disagreement rather than repairing it: the
+	// thing consulted is now the thing written into, so a failed expansion just
+	// leaves the next write expanding again — the file is already big enough, so
+	// its truncate is a no-op and only the mapping gets rebuilt. It also matches
+	// what the read path already does one function up.
+	if pSize := int64(len(p)); offset+pSize > int64(len(idx.mmap)) {
 		// Expand the index file.
 		newSize := roundDown(idx.size+idx.bytes, entryWidth)
 		if newSize < offset+pSize {
@@ -236,7 +260,6 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 		if err != nil {
 			return errors.Wrap(err, "failed to expand index file")
 		}
-		idx.size = newSize
 
 		// Unmap the old index BEFORE creating the new mapping. On Windows,
 		// gommap stores mmap handles keyed by virtual address in a package-level
@@ -256,12 +279,18 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 				idx.mapMu.Unlock()
 				return errors.Wrap(err, "failed to unmap memory mapped index file")
 			}
+			idx.mmap = nil
 		}
 		idx.mmap, err = mmapFile(idx.file)
 		idx.mapMu.Unlock()
 		if err != nil {
 			return errors.Wrap(err, "failed to mmap expanded index file")
 		}
+		// Recorded only once the mapping it describes exists. size no longer
+		// decides whether there is room — the mapping does — but it still sizes
+		// the NEXT expansion and reports the entry count, and a value carried
+		// over from an expansion that never finished would misstate both.
+		idx.size = newSize
 	}
 
 	copy(idx.mmap[offset:], p)

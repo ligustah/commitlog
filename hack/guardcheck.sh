@@ -674,6 +674,14 @@ run_guard "a rolling tick still cleans" clean.go   '	if _, err := l.checkAndPerf
 run_guard_windows "a failed shrink leaves the index readable" index_mmap_windows.go   '		return errors.Wrap(stderrors.Join(err, idx.restoreMapping(remap)),
 			"truncate failed during shrink")' '		return errors.Wrap(err, "truncate failed during shrink")'   '^TestAFailedShrinkLeavesTheIndexReadable$'
 
+# An expansion asks the MAPPING whether there is room, not the recorded size.
+# The two agree only while every expansion completes -- the file grows, then the
+# mapping is torn down and rebuilt, and both of those can fail. The
+# neutralization is the old test put back: after a refused remap, size still
+# claims the room, the next write skips the expansion it needs, and slicing the
+# mapping panics inside a library, in the caller's goroutine.
+run_guard "index expansion asks the mapping" index.go   '	if pSize := int64(len(p)); offset+pSize > int64(len(idx.mmap)) {' '	if pSize := int64(len(p)); offset+pSize >= idx.size {'   '^TestAFailedRemapLeavesTheIndexCoherent$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

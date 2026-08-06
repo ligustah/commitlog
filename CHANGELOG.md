@@ -5,6 +5,23 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A refused mmap during index expansion panicked the next append** — all
+  platforms, not just Windows. `writeAt` grows the file, unmaps, and maps again,
+  recording the new size at the truncate; both the unmap and the map can fail
+  after it. `size` then described a file while the write copies into a mapping —
+  a shorter one if the unmap failed, none at all if the map did — and since the
+  only test for expansion was `offset+pSize >= idx.size`, the next write
+  concluded the room was already there, skipped the expansion, and sliced past
+  the end of the mapping. A panic raised inside a library takes the caller's
+  process down with it. Expansion now asks the mapping how much room there is,
+  which is the thing being written into, so a failed expansion simply leaves the
+  next write expanding again. Found while auditing for the same shape as the
+  v0.57.1 shrink wedge; not reported in the wild.
+
 ## v0.57.1 — 2026-08-06
 
 ### Fixed
