@@ -732,6 +732,20 @@ run_guard "a block table must fit its file" block_table_local.go   '	logical, ph
 	return blocks, logical, true' '	logical, _ = blockTableExtent(blocks)
 	return blocks, logical, true'   '^TestABlockTableForDifferentBytesIsRefused$'
 
+# The two places a block table is dropped because the bytes it describes stopped
+# being there. Both are defence in depth over the extent check above -- and both
+# exist because that check can be satisfied by accident: a rewrite that dropped
+# nothing lands on the same size, and an offload deletes the file entirely. They
+# are one-line calls with no return value, which is exactly the kind of thing a
+# refactor removes without anything going red.
+run_guard "installing a rewrite drops the old table" segment.go   '	removeLocalBlockTable(s)
+	removeLocalBlockTable(old)
+	s.suffix = ""' '	s.suffix = ""'   '^TestInstallingARewriteDropsTheReplacedBlockTable$'
+
+run_guard "offloading drops the local table" segment.go   '	removeLocalBlockTable(s)
+
+	s.backing = sb' '	s.backing = sb'   '^TestOffloadingASegmentRemovesItsLocalBlockTable$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
