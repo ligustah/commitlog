@@ -746,6 +746,15 @@ run_guard "offloading drops the local table" segment.go   '	removeLocalBlockTabl
 
 	s.backing = sb' '	s.backing = sb'   '^TestOffloadingASegmentRemovesItsLocalBlockTable$'
 
+# An index with no .log beside it is the NORMAL resting state of an offloaded
+# segment, not damage, so open()'s orphan sweep asks the manifest before it
+# removes one. Without the consult the sweep looks entirely reasonable -- it
+# still only deletes indexes with no log -- and it silently collects the local
+# index of every tiered segment on every boot, costing a download of the index
+# object on the next read of each. Nothing else notices: the log opens, serves,
+# and is correct.
+run_guard "an orphan sweep asks the manifest" commitlog.go   '		if !hasLog[stem] && (convErr != nil || !offloaded[int64(base)]) {' '		if !hasLog[stem] && (convErr != nil || true) {'   '^TestAnOffloadedSegmentsIndexSurvivesOpen$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

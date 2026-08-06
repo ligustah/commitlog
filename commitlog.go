@@ -559,19 +559,32 @@ func (l *commitLog) open() error {
 	if err != nil {
 		return errors.Wrap(err, "read dir failed")
 	}
+	// Which base offsets have local log bytes. The listing above already answers
+	// that for every file in the directory, so the orphan check below reads it
+	// instead of stat-ing the disk once per index file — the question is "is
+	// there a .log for this stem", and the .log entries are right here. On the
+	// 336-segment logs durable_streams reports, that was 336 syscalls asking
+	// what one directory read had already returned.
+	//
+	// Same snapshot for both, which is also the more defensible answer: an index
+	// and its log are judged against ONE view of the directory rather than
+	// against a listing and a later stat that can disagree.
+	hasLog := make(map[string]bool, len(files))
+	for _, file := range files {
+		if name := file.Name(); strings.HasSuffix(name, logFileSuffix) {
+			hasLog[strings.TrimSuffix(name, logFileSuffix)] = true
+		}
+	}
 	for _, file := range files {
 		// If this file is an index file, make sure it has a corresponding .log
 		// file OR a manifest entry. Only a truly orphaned index is removed.
 		if strings.HasSuffix(file.Name(), indexFileSuffix) {
 			stem := strings.TrimSuffix(file.Name(), indexFileSuffix)
-			_, logErr := os.Stat(filepath.Join(l.Path, stem+logFileSuffix))
 			base, convErr := strconv.Atoi(stem)
-			if os.IsNotExist(logErr) && (convErr != nil || !offloaded[int64(base)]) {
+			if !hasLog[stem] && (convErr != nil || !offloaded[int64(base)]) {
 				if err := os.Remove(filepath.Join(l.Path, file.Name())); err != nil {
 					return err
 				}
-			} else if logErr != nil && !os.IsNotExist(logErr) {
-				return errors.Wrap(logErr, "stat file failed")
 			}
 		} else if strings.HasSuffix(file.Name(), logFileSuffix) {
 			offsetStr := strings.TrimSuffix(file.Name(), logFileSuffix)
