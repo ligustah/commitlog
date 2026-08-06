@@ -755,6 +755,15 @@ run_guard "offloading drops the local table" segment.go   '	removeLocalBlockTabl
 # and is correct.
 run_guard "an orphan sweep asks the manifest" commitlog.go   '		if !hasLog[stem] && (convErr != nil || !offloaded[int64(base)]) {' '		if !hasLog[stem] && (convErr != nil || !offloaded[int64(base)] || true) {'   '^TestAnOffloadedSegmentsIndexSurvivesOpen$'
 
+# CompactMaxGoroutines reaches make(chan struct{}, n) in loadOrBuildDigests, and
+# a negative one panics there -- in the cleaner's own goroutine, on a ticker, so
+# there is no caller left to hand an error to. The default arm below is a test
+# for ZERO, which is what let a negative through: it reads as "the caller
+# supplied a number" for every value that is not exactly the zero value. Without
+# this check New accepts the option, returns a working log, and the process dies
+# at the first clean.
+run_guard "a negative goroutine cap is refused" commitlog.go   '	if opts.CompactMaxGoroutines < 0 {' '	if false {'   '^TestANegativeCompactMaxGoroutinesIsRefused$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

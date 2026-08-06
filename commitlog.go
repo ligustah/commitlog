@@ -211,11 +211,20 @@ type Options struct {
 	//
 	// Zero keeps everything in the tier, which is what makes this compatible: a
 	// log with no SegmentStore has no offloaded segments, so these never apply.
-	MaxTierBytes         int64
-	MaxTierMessages      int64
-	MaxTierAge           time.Duration
-	Compact              bool // Run compaction on log clean
-	CompactMaxGoroutines int  // Max number of goroutines to use in a log compaction
+	MaxTierBytes    int64
+	MaxTierMessages int64
+	MaxTierAge      time.Duration
+	Compact         bool // Run compaction on log clean
+	// CompactMaxGoroutines bounds concurrent key-digest builds during a
+	// compaction pass. Zero picks the default; negative is refused by New.
+	//
+	// It no longer means what its name suggests, and the gap is worth stating
+	// rather than leaving for the next reader to discover in loadOrBuildDigests:
+	// digest builds are capped at 2 regardless, because each holds a transient
+	// per-segment key map and ten at once measured over 1GB on a soak. So the
+	// only value of this field that changes anything is 1, which makes the
+	// builds serial. Anything above 2 is the same as 2.
+	CompactMaxGoroutines int
 	// CompactMinAge is a protected compaction horizon: a segment is not eligible
 	// for compaction until its most recent write is at least this old, so recent
 	// segments keep their full per-record history. Zero disables the lag (any
@@ -390,6 +399,18 @@ func New(opts Options) (CommitLog, error) {
 	// in; checking it where it arrives is the whole fix.
 	if !opts.Compression.Valid() {
 		return nil, errors.Errorf("commitlog: unknown compression codec %d", byte(opts.Compression))
+	}
+	// Same reasoning, one field along. Zero means "unset" and picks the default,
+	// which made the guard for it a test for zero — and a test for zero treats
+	// every other value, including a negative one, as a number the caller meant.
+	// It reaches make(chan struct{}, n) in loadOrBuildDigests and panics
+	// "makechan: size out of range", inside the cleaner, which runs on a ticker
+	// in its own goroutine: not an error the caller can be handed, a dead
+	// process, on the first clean rather than at the call that set it.
+	if opts.CompactMaxGoroutines < 0 {
+		return nil, errors.Errorf(
+			"commitlog: CompactMaxGoroutines is %d; it must not be negative",
+			opts.CompactMaxGoroutines)
 	}
 
 	if opts.MaxSegmentBytes == 0 {
