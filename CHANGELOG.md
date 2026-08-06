@@ -5,6 +5,19 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed
+
+- **CI runs staticcheck.** `go vet` is deliberately narrow, and nothing else
+  looked at the code, so a first run turned up four findings that had
+  accumulated unnoticed — one of them worth having: `blockHeaderLen` sat in a
+  const group under `blockMagic byte` with its own value, which does not inherit
+  that type but reads exactly as though it does. All four are cleared and the
+  step is pinned, with `U1000,S1*,SA*` rather than the default set: `ST*` is a
+  naming and comment-style opinion this repo does not share, and enabling it
+  would buy a large reformat or an exclusion list to maintain.
+
 ## v0.58.0 — 2026-08-06
 
 ### Changed

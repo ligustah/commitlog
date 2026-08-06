@@ -99,7 +99,7 @@ jobs:
   # Formatting, vet, and module integrity. .gitattributes stores *.go with LF,
   # so gofmt (which normalizes to LF) agrees on every runner.
   format:
-    name: gofmt + vet + mod + actionlint
+    name: gofmt + vet + mod + staticcheck + actionlint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -121,6 +121,20 @@ jobs:
         run: go vet ./...
       - name: go mod verify
         run: go mod verify
+      # go vet is deliberately narrow — it reports only what is almost certainly
+      # a mistake. These three checks cover what it leaves: dead unexported code
+      # (U1000), the simplifications (S1*), and the correctness set (SA*), which
+      # is where the one finding worth having came from. Pinned, and installed
+      # through the module proxy for the same reason actionlint is.
+      #
+      # Not the default check set: ST* is a naming and comment-style opinion this
+      # repo does not share, and turning it on would mean either a large
+      # reformat or an exclusion list that has to be maintained. Three families
+      # that only ever fire on something real keeps a green here meaningful.
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          "$(go env GOPATH)/bin/staticcheck" -checks 'U1000,S1*,SA*' ./...
       # Static check of the workflows themselves: bad expressions, unknown
       # action inputs, and — via shellcheck, preinstalled on the runner — the
       # `run:` blocks. Pinned and fetched through the module proxy rather than
