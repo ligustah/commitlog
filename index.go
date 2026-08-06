@@ -232,26 +232,30 @@ func (idx *index) ReadAt(p []byte, offset int64) (n int, err error) {
 }
 
 func (idx *index) writeAt(p []byte, offset int64) error {
-	// Expand when the MAPPING is too small, not when the recorded size is.
+	// A write needs room in TWO things, and they can run out separately.
 	//
-	// This used to ask `offset+pSize >= idx.size`, with size standing in for how
-	// much room the write has. The two agree only while every expansion
-	// completes: the file grows, then the old mapping is torn down and a new one
-	// built, and BOTH of those steps can fail. size was recorded at the truncate,
-	// so a failure after it left size describing a file while the write copies
-	// into a mapping — a shorter one if the unmap failed, none at all if the
-	// remap did. The next write then read size, concluded the room was already
-	// there, skipped the expansion, and sliced past the end of the mapping. A
-	// panic inside a library takes the caller's process down with it. (Slicing a
-	// nil mapping at [0:] is legal instead, so an index shrunk while empty went
-	// the other way and silently wrote nothing; see Shrink.)
+	// This used to ask `offset+pSize >= idx.size` alone, with the recorded size
+	// standing in for how much room there is. It stops being true when an
+	// expansion fails partway: the file grows, then the old mapping is torn down
+	// and a new one built, and both of those steps can fail. size was recorded at
+	// the truncate, so a failure after it left size describing a file while the
+	// write copies into a mapping — a shorter one if the unmap failed, none at
+	// all if the remap did. The next write read size, concluded the room was
+	// already there, skipped the expansion, and sliced past the end of the
+	// mapping: a panic raised inside a library, in the caller's goroutine.
+	// (Slicing a nil mapping at [0:] is legal instead, so an index shrunk while
+	// empty went the other way and silently wrote nothing; see Shrink.)
 	//
-	// Asking the mapping removes the disagreement rather than repairing it: the
-	// thing consulted is now the thing written into, so a failed expansion just
-	// leaves the next write expanding again — the file is already big enough, so
-	// its truncate is a no-op and only the mapping gets rebuilt. It also matches
-	// what the read path already does one function up.
-	if pSize := int64(len(p)); offset+pSize > int64(len(idx.mmap)) {
+	// Asking the mapping alone is wrong in the opposite direction, and worse. The
+	// unix shrink truncates WITHOUT unmapping, so there the mapping outlives the
+	// file it describes and stays longer than it: a write inside such a mapping
+	// but past the end of the file is a SIGBUS, which is not a Go panic and
+	// cannot be recovered. Windows hides that — its shrink must unmap to
+	// truncate at all, so the two agree there and only there.
+	//
+	// So require both. Neither is a proxy for the other, and the write has to
+	// land in bytes that are mapped AND backed by the file.
+	if pSize := int64(len(p)); offset+pSize >= idx.size || offset+pSize > int64(len(idx.mmap)) {
 		// Expand the index file.
 		newSize := roundDown(idx.size+idx.bytes, entryWidth)
 		if newSize < offset+pSize {

@@ -683,7 +683,7 @@ run_guard_windows "a failed shrink leaves the index readable" index_mmap_windows
 # neutralization is the old test put back: after a refused remap, size still
 # claims the room, the next write skips the expansion it needs, and slicing the
 # mapping panics inside a library, in the caller's goroutine.
-run_guard "index expansion asks the mapping" index.go   '	if pSize := int64(len(p)); offset+pSize > int64(len(idx.mmap)) {' '	if pSize := int64(len(p)); offset+pSize >= idx.size {'   '^TestAFailedRemapLeavesTheIndexCoherent$'
+run_guard "index expansion asks the mapping" index.go   '	if pSize := int64(len(p)); offset+pSize >= idx.size || offset+pSize > int64(len(idx.mmap)) {' '	if pSize := int64(len(p)); offset+pSize >= idx.size {'   '^TestAFailedRemapLeavesTheIndexCoherent$'
 
 # Close reports a failure only AFTER releasing the mapping and the handle -- a
 # mapped or open index file cannot be unlinked on Windows, so an early return

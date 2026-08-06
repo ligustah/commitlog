@@ -17,10 +17,11 @@ library from that fork onward.
   only test for expansion was `offset+pSize >= idx.size`, the next write
   concluded the room was already there, skipped the expansion, and sliced past
   the end of the mapping. A panic raised inside a library takes the caller's
-  process down with it. Expansion now asks the mapping how much room there is,
-  which is the thing being written into, so a failed expansion simply leaves the
-  next write expanding again. Found while auditing for the same shape as the
-  v0.57.1 shrink wedge; not reported in the wild.
+  process down with it. An expansion now requires room in both the file and the
+  mapping: neither is a proxy for the other, since a failed expansion leaves the
+  mapping shorter than the recorded size, while the unix shrink truncates
+  without unmapping and so leaves it longer. Found while auditing for the same
+  shape as the v0.57.1 shrink wedge; not reported in the wild.
 - **A failed shrink while closing an index leaked the file handle**, leaving the
   index marked open and the segment permanently undeletable on Windows —
   `closeIndex` states that rule in its own comment and applied it only to the
