@@ -753,7 +753,7 @@ run_guard "offloading drops the local table" segment.go   '	removeLocalBlockTabl
 # index of every tiered segment on every boot, costing a download of the index
 # object on the next read of each. Nothing else notices: the log opens, serves,
 # and is correct.
-run_guard "an orphan sweep asks the manifest" commitlog.go   '		if !hasLog[stem] && (convErr != nil || !offloaded[int64(base)]) {' '		if !hasLog[stem] && (convErr != nil || true) {'   '^TestAnOffloadedSegmentsIndexSurvivesOpen$'
+run_guard "an orphan sweep asks the manifest" commitlog.go   '		if !hasLog[stem] && (convErr != nil || !offloaded[int64(base)]) {' '		if !hasLog[stem] && (convErr != nil || !offloaded[int64(base)] || true) {'   '^TestAnOffloadedSegmentsIndexSurvivesOpen$'
 
 echo
 if [ "$failures" -ne 0 ]; then
