@@ -21,8 +21,11 @@
 # require that the test FAILS. A guard whose removal leaves its test green has no
 # coverage, whatever the test is named.
 #
-# Usage:  hack/guardcheck.sh          (all guards)
+# Usage:  hack/guardcheck.sh          (every guard this platform can check)
 #         hack/guardcheck.sh crc      (only guards whose name matches)
+#
+#         GUARDCHECK_SET=platform hack/guardcheck.sh
+#                                     (only the guards that REQUIRE this OS)
 #
 # It edits tracked files in place and restores them on any exit path, including
 # Ctrl-C. It refuses to start on a dirty tree so a failed restore can never be
@@ -54,6 +57,13 @@ trap restore EXIT INT TERM
 filter="${1:-}"
 failures=0
 checked=0
+deferred=0
+
+# Which OS is running this, and which guards it was asked for. GUARDCHECK_SET is
+# "platform" for the runner that exists ONLY to check the guards the primary
+# runner cannot; anything else means "everything checkable here".
+goos="$(go env GOOS)"
+set_sel="${GUARDCHECK_SET:-all}"
 
 # name | file | old text | replacement text | test regex | [race]
 #
@@ -99,11 +109,44 @@ open(p, "w", encoding="utf-8", newline="").write(s.replace(old, new, 1))
 ' "$file"
 }
 
-# guard_start NAME — filter, count and print. Returns 1 if this guard is filtered out.
-guard_start() {
-  if [ -n "$filter" ] && [[ "$1" != *"$filter"* ]]; then
+# guard_platform GOOS NAME — decide whether this guard can be checked HERE.
+# Returns 1 when it cannot, or when this run did not ask for it.
+#
+# A guard inside a `//go:build windows` file is unfalsifiable on Linux, and NOT
+# in a way that shows up as a skip: the file is never compiled, the test named
+# for it does not exist, and `go test -run` with nothing to run exits 0. This
+# script reads that 0 as "the test passed with the guard removed" and reports NO
+# COVERAGE — which is what the ubuntu job did the day the first Windows-only
+# guard landed. The guard was fine; the runner was wrong.
+#
+# So such a guard is DEFERRED here and checked by a second job on the OS it
+# belongs to. Deferral is only honest while that job exists, so the summary
+# names the platform and says outright that this run did not cover it — the one
+# thing a coverage tool must never do is stay quiet about what it skipped.
+guard_platform() {
+  local want="$1" name="$2"
+  if [ -n "$filter" ] && [[ "$name" != *"$filter"* ]]; then
     return 1
   fi
+  if [ "$set_sel" = "platform" ] && [ -z "$want" ]; then
+    return 1
+  fi
+  if [ -n "$want" ] && [ "$want" != "$goos" ]; then
+    printf '  %-34s deferred to %s\n' "$name" "$want"
+    deferred=$((deferred + 1))
+    return 1
+  fi
+  return 0
+}
+
+# The OS the guard being registered requires, empty for the portable majority.
+# Set by run_guard_windows around its call and read by guard_start, so that the
+# platform decision is made in ONE place no matter which entry point was used.
+guard_want=""
+
+# guard_start NAME — filter, count and print. Returns 1 if this guard is filtered out.
+guard_start() {
+  guard_platform "$guard_want" "$1" || return 1
   checked=$((checked + 1))
   printf '  %-34s ' "$1"
   return 0
@@ -160,6 +203,16 @@ run_guard() {
     return 0
   fi
   guard_finish "$test_re" "$mode" "$file"
+}
+
+# run_guard_windows — a guard that lives in a `//go:build windows` file, so only
+# a Windows runner can falsify it. Same arguments as run_guard. Elsewhere it is
+# announced as deferred rather than checked; see guard_platform for why silence
+# is not an option here.
+run_guard_windows() {
+  guard_want=windows
+  run_guard "$@"
+  guard_want=""
 }
 
 # Some guards are ONE defence implemented at two sites, where each site masks
@@ -618,7 +671,7 @@ run_guard "a rolling tick still cleans" clean.go   '	if _, err := l.checkAndPerf
 # read of the segment answers "corrupt index file" for the life of the process,
 # and seal discards this error by design. The neutralization is that early
 # return put back.
-run_guard "a failed shrink leaves the index readable" index_mmap_windows.go   '		return errors.Wrap(stderrors.Join(err, idx.restoreMapping(remap)),
+run_guard_windows "a failed shrink leaves the index readable" index_mmap_windows.go   '		return errors.Wrap(stderrors.Join(err, idx.restoreMapping(remap)),
 			"truncate failed during shrink")' '		return errors.Wrap(err, "truncate failed during shrink")'   '^TestAFailedShrinkLeavesTheIndexReadable$'
 
 echo
@@ -626,4 +679,18 @@ if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
   exit 1
 fi
-echo "guardcheck: all $checked guards covered."
+# A run that checked nothing prints the same green as one that checked
+# everything, and this is the mode where that is likely: GUARDCHECK_SET=platform
+# exists to check the guards no other runner can, so if it finds none, either
+# they moved off this OS or the job is on the wrong runner. Either way its green
+# would be covering for guards nobody is checking at all.
+if [ "$set_sel" = "platform" ] && [ "$checked" -eq 0 ]; then
+  echo "guardcheck: GUARDCHECK_SET=platform ran NO guards on $goos — this run proves nothing."
+  exit 1
+fi
+if [ "$checked" -gt 0 ]; then
+  echo "guardcheck: all $checked guards covered."
+fi
+if [ "$deferred" -ne 0 ]; then
+  echo "guardcheck: $deferred guard(s) NOT covered here — deferred to another platform's run."
+fi

@@ -166,6 +166,32 @@ jobs:
       - name: guardcheck
         run: bash hack/guardcheck.sh
 
+  # The guards the job above CANNOT check. A guard inside a `//go:build windows`
+  # file is not merely skipped on Linux — the file is not compiled, the test
+  # named for it does not exist, and `go test -run` with nothing to run exits 0,
+  # which guardcheck reads as "passed without the guard". So those guards are
+  # deferred there and falsified here, on the OS they are written for.
+  #
+  # GUARDCHECK_SET=platform runs ONLY them, so this is a couple of test runs
+  # rather than the full 15-minute sweep, and it fails rather than passes if it
+  # finds none to run — a job that checks nothing looks exactly like one that
+  # checked everything.
+  guards-windows:
+    name: guard coverage (windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+      - name: guardcheck
+        shell: bash
+        env:
+          GUARDCHECK_SET: platform
+        run: bash hack/guardcheck.sh
+
   # A short active fuzzing sweep on top of the seed corpus (the seeds already run
   # as normal subtests in the `test` job). Bounded so it stays a smoke test; a
   # crasher fails the job and is written to testdata/fuzz for a maintainer to pull.
