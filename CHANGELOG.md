@@ -7,6 +7,29 @@ library from that fork onward.
 
 ## Unreleased
 
+### Added
+
+- **`Options.LocalRetentionAge` — the log schedules its own offload.** A clean now
+  offloads every sealed segment lying entirely before `now - LocalRetentionAge`.
+  Zero never offloads, which is what every log that has not opted in is carrying.
+
+  This is a *schedule*, not a retention limit: nothing is deleted, the segment
+  keeps serving, and `MaxTier*` still decide when the records finally go. It
+  moves here because every input to the decision already was here — the horizon
+  is this duration and a clock, the offset lookup is
+  `EarliestOffsetAfterTimestamp`, and whether a process may write to the store
+  at all is `tierWritable`, which `OffloadBefore` consults for itself. A caller
+  scheduling this from outside had to keep a second copy of that ownership rule,
+  and the copy that does not sit beside `SetTierReadOnly` is the one that
+  drifts. `OffloadBefore` and `EarliestOffsetAfterTimestamp` both stay public.
+
+  The offload runs *after* the pass and outside its lock. That is not stylistic:
+  the pass holds `cleanMu` for its whole body and `OffloadBefore` takes `cleanMu`
+  itself, so scheduling it inside deadlocks the log rather than answering wrong —
+  and the pass is what decides which segments still exist, so offloading first
+  would copy records to the store that the pass was about to drop. Registered as
+  guard 56.
+
 ### Fixed
 
 - **Four options accepted a negative value and failed somewhere else entirely.**
@@ -31,6 +54,11 @@ library from that fork onward.
   `CleanRewriteBudget` is defaulted the same way and is deliberately *not*
   refused — a negative budget there means "no budget at all", which is what
   every spec-less pass had before budgets existed.
+
+  `LocalRetentionAge` is refused too, for the plainer reason: zero already means
+  "never offload", so a negative is not an unset value reaching a default — it
+  is a horizon in the *future*, which makes every sealed segment older than it
+  and offloads the whole log on the first pass.
 
 ### Changed
 
