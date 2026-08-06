@@ -400,17 +400,41 @@ func New(opts Options) (CommitLog, error) {
 	if !opts.Compression.Valid() {
 		return nil, errors.Errorf("commitlog: unknown compression codec %d", byte(opts.Compression))
 	}
-	// Same reasoning, one field along. Zero means "unset" and picks the default,
-	// which made the guard for it a test for zero — and a test for zero treats
-	// every other value, including a negative one, as a number the caller meant.
-	// It reaches make(chan struct{}, n) in loadOrBuildDigests and panics
-	// "makechan: size out of range", inside the cleaner, which runs on a ticker
-	// in its own goroutine: not an error the caller can be handed, a dead
-	// process, on the first clean rather than at the call that set it.
-	if opts.CompactMaxGoroutines < 0 {
-		return nil, errors.Errorf(
-			"commitlog: CompactMaxGoroutines is %d; it must not be negative",
-			opts.CompactMaxGoroutines)
+	// Same reasoning, four fields along, and one defect rather than four.
+	//
+	// Each of these is defaulted by a test for ZERO, because zero is the unset
+	// value. A test for zero reads as "the caller supplied a number" for every
+	// value that is not exactly the zero value — so a negative passes the arm
+	// that exists to catch a missing one and arrives somewhere that cannot cope:
+	//
+	//   CompactMaxGoroutines  make(chan struct{}, n)  panic: makechan: size out
+	//                                                 of range
+	//   HWCheckpointInterval  time.NewTicker(d)       panic: non-positive
+	//   CleanerInterval       time.NewTicker(d)       interval for NewTicker
+	//   MaxSegmentBytes       the split check         no panic — every append
+	//                                                 rolls, forever. Measured:
+	//                                                 the probe never returned.
+	//
+	// Not one of those failures happens at the call that set the option. Two are
+	// panics on background tickers, with no caller left to hand an error to; the
+	// third is a hang. Refused here, and refused rather than clamped, for the
+	// reason the codec above is: clamping keeps the caller's mistake and hides
+	// it, and a log built on a value nobody meant is not a log anyone can debug.
+	for _, c := range []struct {
+		name string
+		bad  bool
+		got  any
+	}{
+		{"CompactMaxGoroutines", opts.CompactMaxGoroutines < 0, opts.CompactMaxGoroutines},
+		{"MaxSegmentBytes", opts.MaxSegmentBytes < 0, opts.MaxSegmentBytes},
+		{"HWCheckpointInterval", opts.HWCheckpointInterval < 0, opts.HWCheckpointInterval},
+		{"CleanerInterval", opts.CleanerInterval < 0, opts.CleanerInterval},
+		{"CleanRewriteBudget", opts.CleanRewriteBudget < 0, opts.CleanRewriteBudget},
+	} {
+		if c.bad {
+			return nil, errors.Errorf("commitlog: %s is %v; it must not be negative",
+				c.name, c.got)
+		}
 	}
 
 	if opts.MaxSegmentBytes == 0 {

@@ -2,41 +2,66 @@ package commitlog
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// A negative CompactMaxGoroutines is refused where it arrives.
+// Every option defaulted by a test for zero refuses a negative value.
 //
-// Zero means "unset" and selects the default, so the guard for it was a test
-// for zero — and a test for zero accepts every other value as one the caller
-// meant, including a negative. That value is passed to make(chan struct{}, n)
-// in loadOrBuildDigests, which panics "makechan: size out of range".
+// Zero is the unset value, so the arm that supplies the default is a test for
+// zero — and a test for zero reads as "the caller supplied a number" for every
+// value that is not exactly the zero value. A negative therefore passes the
+// check that exists to catch a missing one and lands somewhere that cannot
+// cope. Measured, before this was refused:
 //
-// The panic is the reason this is refused in New rather than clamped there.
-// Cleans run on a ticker in their own goroutine, so the panic is not an error
-// any caller can be handed — it takes the process down, at the first clean,
-// arbitrarily far from the line that set the option. Clamping would hide the
-// mistake instead; New already refuses an unknown compression codec for the
-// same reason, and this is the same shape one field along.
-func TestANegativeCompactMaxGoroutinesIsRefused(t *testing.T) {
-	_, err := New(Options{
-		Path:                 tempDir(t),
-		Compact:              true,
-		CompactMaxGoroutines: -1,
-	})
-	require.Error(t, err,
-		"New accepted a negative CompactMaxGoroutines; it reaches make(chan) "+
-			"in the cleaner goroutine and takes the process down on the first clean")
-	require.Contains(t, err.Error(), "CompactMaxGoroutines")
+//	CompactMaxGoroutines  panic: makechan: size out of range
+//	HWCheckpointInterval  panic: non-positive interval for NewTicker
+//	CleanerInterval       panic: non-positive interval for NewTicker
+//	MaxSegmentBytes       no panic — the probe never returned
+//
+// None of those happen at the call that set the option. Two are panics on
+// background tickers, where there is no caller left to hand an error to, and
+// the third is a hang. That is why the answer is refusal at New rather than a
+// clamp: a clamp keeps the caller's mistake and hides it.
+//
+// Table-driven on purpose. The defect is one defect in five places, and the
+// next option defaulted this way should be added here rather than discovered.
+func TestNegativeOptionsAreRefused(t *testing.T) {
+	for name, mut := range map[string]func(*Options){
+		"CompactMaxGoroutines": func(o *Options) { o.CompactMaxGoroutines = -1 },
+		"MaxSegmentBytes":      func(o *Options) { o.MaxSegmentBytes = -1 },
+		"HWCheckpointInterval": func(o *Options) { o.HWCheckpointInterval = -time.Second },
+		"CleanerInterval":      func(o *Options) { o.CleanerInterval = -time.Second },
+		"CleanRewriteBudget":   func(o *Options) { o.CleanRewriteBudget = -time.Second },
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := Options{Path: tempDir(t), Compact: true}
+			mut(&opts)
+			l, err := New(opts)
+			if err == nil {
+				l.Close()
+			}
+			require.Error(t, err, "New accepted a negative %s", name)
+			require.Contains(t, err.Error(), name,
+				"the error must name the option the caller got wrong")
+		})
+	}
 }
 
-// Zero still means "use the default", which is the whole reason the check has
-// to be < 0 and not != 0.
-func TestAZeroCompactMaxGoroutinesIsTheDefault(t *testing.T) {
+// Zero still means "use the default", which is the whole reason these checks
+// have to be < 0 and not != 0. Without this, refusing negatives could be
+// "implemented" by refusing everything unset, and every caller using a default
+// would break.
+func TestAZeroOptionStillTakesTheDefault(t *testing.T) {
 	l, err := New(Options{Path: tempDir(t), Compact: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { l.Close() })
-	require.Equal(t, defaultCompactMaxGoroutines,
-		l.(*commitLog).compactCleaner.MaxGoroutines)
+
+	cl := l.(*commitLog)
+	require.Equal(t, defaultCompactMaxGoroutines, cl.compactCleaner.MaxGoroutines)
+	require.Equal(t, int64(defaultMaxSegmentBytes), cl.Options.MaxSegmentBytes)
+	require.Equal(t, defaultHWCheckpointInterval, cl.Options.HWCheckpointInterval)
+	require.Equal(t, defaultCleanerInterval, cl.Options.CleanerInterval)
+	require.Equal(t, cl.Options.CleanerInterval, cl.Options.CleanRewriteBudget)
 }
