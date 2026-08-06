@@ -21,6 +21,11 @@ library from that fork onward.
   which is the thing being written into, so a failed expansion simply leaves the
   next write expanding again. Found while auditing for the same shape as the
   v0.57.1 shrink wedge; not reported in the wild.
+- **A failed shrink while closing an index leaked the file handle**, leaving the
+  index marked open and the segment permanently undeletable on Windows —
+  `closeIndex` states that rule in its own comment and applied it only to the
+  flush, while the steps after it still returned early. Every step now runs the
+  teardown to the end and reports at the bottom.
 
 ## v0.57.1 — 2026-08-06
 

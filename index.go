@@ -3,6 +3,7 @@ package commitlog
 import (
 	"bytes"
 	"encoding/binary"
+	stderrors "errors"
 	"io"
 	"os"
 	"sort"
@@ -360,14 +361,21 @@ func (idx *index) closeIndex(durable bool) error {
 	if idx.closed {
 		return nil
 	}
-	// Report a failed flush, but NEVER before releasing the mapping and the
-	// handle: an index left mapped cannot have its file unlinked on Windows, so
-	// bailing out here turns a flush failure into a segment that can never be
-	// deleted and a maintenance pass that fails identically forever. Losing the
-	// unflushed tail is recoverable; leaking the mapping is not.
-	var syncErr error
+	// Report what failed, but NEVER before releasing the mapping and the handle:
+	// an index left mapped cannot have its file unlinked on Windows, so bailing
+	// out turns a failure here into a segment that can never be deleted and a
+	// maintenance pass that fails identically forever. Losing the unflushed tail
+	// is recoverable; leaking the mapping is not.
+	//
+	// That rule was written for the flush and applied only to the flush, while
+	// the two steps after it still returned early — so a refused SetEndOfFile
+	// (the shrink) left the index unmapped, the handle open and the index marked
+	// OPEN, which is the wedge the flush path exists to avoid, reached one step
+	// later. Every failure now runs the teardown to the end and reports at the
+	// bottom; each step's error is collected rather than returned.
+	var errs []error
 	if durable {
-		syncErr = idx.sync()
+		errs = append(errs, idx.sync())
 	}
 	// Unmap before shrinking: on Windows, SetEndOfFile fails with
 	// ERROR_USER_MAPPED_FILE if any view of the file mapping is still open.
@@ -377,27 +385,22 @@ func (idx *index) closeIndex(durable bool) error {
 		err := unmapFile(idx.mmap)
 		idx.mmap = nil
 		idx.mapMu.Unlock()
-		if err != nil {
-			return err
-		}
+		errs = append(errs, err)
 	}
-	if syncErr != nil {
-		// The mapping is gone; drop the handle too so the file is removable,
-		// then report why the flush failed.
-		idx.file.Close() // nolint: errcheck
-		idx.closed = true
-		return syncErr
+	// The shrink is the one step worth SKIPPING after an earlier failure. It
+	// trims a file that is being closed, so it is an optimization either way —
+	// and if the unmap is what failed, the view it could not release is exactly
+	// what makes SetEndOfFile refuse, so attempting it would only add a second
+	// error describing the first.
+	if durable && stderrors.Join(errs...) == nil {
+		errs = append(errs, idx.shrink())
 	}
-	if durable {
-		if err := idx.shrink(); err != nil {
-			return err
-		}
-	}
-	if err := idx.file.Close(); err != nil {
-		return err
-	}
+	errs = append(errs, idx.file.Close())
+	// Marked closed even when a step failed. The handle is gone either way, so
+	// there is nothing a second attempt could release — and leaving it open
+	// invites a caller to retry forever against a file it no longer holds.
 	idx.closed = true
-	return nil
+	return stderrors.Join(errs...)
 }
 
 // reset discards every entry, leaving an empty index over the same file. The

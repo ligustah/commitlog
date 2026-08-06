@@ -205,10 +205,13 @@ run_guard() {
   guard_finish "$test_re" "$mode" "$file"
 }
 
-# run_guard_windows — a guard that lives in a `//go:build windows` file, so only
-# a Windows runner can falsify it. Same arguments as run_guard. Elsewhere it is
-# announced as deferred rather than checked; see guard_platform for why silence
-# is not an option here.
+# run_guard_windows — a guard only a Windows runner can falsify. Same arguments
+# as run_guard. Elsewhere it is announced as deferred rather than checked; see
+# guard_platform for why silence is not an option here.
+#
+# What decides this is the TEST, not the guarded file: a guard in portable code
+# whose only failure mode is a Windows one is checked by a `//go:build windows`
+# test, and that test does not exist on Linux either.
 run_guard_windows() {
   guard_want=windows
   run_guard "$@"
@@ -681,6 +684,19 @@ run_guard_windows "a failed shrink leaves the index readable" index_mmap_windows
 # claims the room, the next write skips the expansion it needs, and slicing the
 # mapping panics inside a library, in the caller's goroutine.
 run_guard "index expansion asks the mapping" index.go   '	if pSize := int64(len(p)); offset+pSize > int64(len(idx.mmap)) {' '	if pSize := int64(len(p)); offset+pSize >= idx.size {'   '^TestAFailedRemapLeavesTheIndexCoherent$'
+
+# Close reports a failure only AFTER releasing the mapping and the handle -- a
+# mapped or open index file cannot be unlinked on Windows, so an early return
+# makes the segment permanently undeletable. The rule is in closeIndex's own
+# comment; it was applied to the flush and not to the shrink after it. The
+# neutralization is that early return put back.
+run_guard_windows "a failed close still frees the handle" index.go   '	if durable && stderrors.Join(errs...) == nil {
+		errs = append(errs, idx.shrink())
+	}' '	if durable && stderrors.Join(errs...) == nil {
+		if err := idx.shrink(); err != nil {
+			return err
+		}
+	}'   '^TestAFailedShrinkOnCloseStillReleasesTheHandle$'
 
 echo
 if [ "$failures" -ne 0 ]; then
