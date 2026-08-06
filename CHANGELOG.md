@@ -5,6 +5,22 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **Installing a compaction rewrite now waits out the Windows handle-release
+  window.** Past both renames `Replace` has nothing left to undo, and the step
+  that can fail there is opening a log this process closed microseconds earlier
+  — the same asynchronous handle reclamation `ReadFileWithRetry` exists for. The
+  redirect link from the source to the replacement also goes up only once the
+  replacement is fully open; it used to be set before the positions and index
+  were built, so a failure there handed readers a half-open segment. If the open
+  still fails after the budget the segment stays closed and reads of it report
+  `segment has been closed` until a restart — deliberately, since the
+  alternative (marking it gone so readers skip it) would silently lose records
+  that are intact on disk.
+
 ## v0.57.3 — 2026-08-06
 
 ### Fixed

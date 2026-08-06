@@ -2111,23 +2111,63 @@ func (s *segment) Replace(old *segment) error {
 			old.reopenLocked())
 	}
 	// Past here both files are installed under old's names and there is nothing
-	// left to put back: old's log no longer exists to reopen, and s's identity
-	// has moved onto it. A failure below leaves the segment closed and the pass
-	// aborted, which is loud rather than silent — the honest report for a state
-	// that genuinely is indeterminate.
+	// left to put back — old's log no longer exists to reopen, and s's identity
+	// has moved onto it. So this step is made to SUCCEED rather than recovered
+	// from: what fails here is opening a log this process closed microseconds
+	// ago, which is the Windows handle-release window, and waiting it out is
+	// what the rest of the codebase already does for it.
 	s.suffix = ""
-	backing, err := openLocalBacking(s.logPath())
-	if err != nil {
-		return errors.Wrap(err, "open file failed")
+	if err := s.reopenLocked(); err != nil {
+		// Terminal. The segment stays closed and published, so every read of it
+		// reports ErrSegmentClosed until the process restarts — which is bad,
+		// and still the best of the three states available.
+		//
+		// It is tempting to mark old `gone` instead, so current() lets readers
+		// skip past it rather than erroring. That is worse, not better: `gone`
+		// means the records legitimately no longer exist, and here they exist —
+		// complete and rewritten — in the very files this failed to open. A
+		// reader told to skip them silently loses records that are sitting on
+		// disk, and silent loss beats loud failure only for the person reading
+		// the alert. The remaining option, adopting those files under old's
+		// identity, runs the same initPositions and setupIndex that just failed
+		// on them.
+		//
+		// So it stays loud, and stays recoverable by a restart, which reopens
+		// the segment from files that are intact.
+		return errors.Wrap(err, "installing the rewrite")
 	}
-	s.backing = backing
-	s.closed = false
+	// Linked only now. Set before the segment was fully up, this pointed readers
+	// at a replacement whose positions and index had not been built — so a
+	// failure below handed every reader a half-open segment instead of the loud
+	// error above.
 	old.replaced = true
 	old.replacement = s
-	if err := s.initPositions(); err != nil {
-		return err
+	return nil
+}
+
+// openBackingWithRetry opens a segment's log, waiting out the window in which
+// the handle that was just closed on it has not been released yet.
+//
+// This is the same Windows behaviour ReadFileWithRetry exists for — a handle is
+// reclaimed asynchronously, and an open inside that window fails with
+// ERROR_SHARING_VIOLATION rather than succeeding — reached from the other
+// direction: Replace closes a segment and renames over it precisely so it can
+// open the result immediately afterwards. It is the closest race in the
+// codebase, because the handle it is waiting on is one this process closed
+// microseconds earlier.
+//
+// The budget is the read side's, not the write side's, for the read side's
+// reason: what is being waited out is a handle release, not a rename retry.
+// On unix the first attempt always succeeds and nothing is added.
+func openBackingWithRetry(path string) (*localBacking, error) {
+	deadline := time.Now().Add(readRetryBudget)
+	for {
+		backing, err := openLocalBacking(path)
+		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
+			return backing, err
+		}
+		time.Sleep(atomicWriteRetryDelay)
 	}
-	return s.setupIndex()
 }
 
 // reopenLocked brings a segment that was closed for a rename back up from the
@@ -2140,7 +2180,7 @@ func (s *segment) Replace(old *segment) error {
 // left closed therefore stays in the LIVE list, where current() hands it to
 // readers as usable.
 func (s *segment) reopenLocked() error {
-	backing, err := openLocalBacking(s.logPath())
+	backing, err := openBackingWithRetry(s.logPath())
 	if err != nil {
 		return errors.Wrap(err, "reopening a segment after a failed replace")
 	}
