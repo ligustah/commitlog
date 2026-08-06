@@ -214,7 +214,24 @@ type Options struct {
 	MaxTierBytes    int64
 	MaxTierMessages int64
 	MaxTierAge      time.Duration
-	Compact         bool // Run compaction on log clean
+	// LocalRetentionAge is how long a record's bytes stay on local disk before
+	// the log offloads them to the SegmentStore. Zero never offloads.
+	//
+	// This is the SCHEDULE for offloading, not a retention limit: nothing is
+	// deleted, the segment keeps serving, and MaxTier* above decide when the
+	// records finally go. Only whole sealed segments move, so a segment lives
+	// locally until its NEWEST record is past the horizon.
+	//
+	// It lives here because every input to the decision already did — the
+	// horizon is this duration and a clock, the offset lookup is
+	// EarliestOffsetAfterTimestamp, and whether this process may write to the
+	// store at all is tierWritable, which OffloadBefore consults for itself. A
+	// caller scheduling this from outside had to keep its own copy of that
+	// ownership rule, and a copy that does not sit beside SetTierReadOnly is
+	// the one that drifts. OffloadBefore stays public for a caller that wants
+	// to force one.
+	LocalRetentionAge time.Duration
+	Compact           bool // Run compaction on log clean
 	// CompactMaxGoroutines bounds concurrent key-digest builds during a
 	// compaction pass. Zero picks the default; negative is refused by New.
 	//
@@ -400,12 +417,13 @@ func New(opts Options) (CommitLog, error) {
 	if !opts.Compression.Valid() {
 		return nil, errors.Errorf("commitlog: unknown compression codec %d", byte(opts.Compression))
 	}
-	// Same reasoning, four fields along, and one defect rather than four.
+	// Options where a negative is not a value any caller can mean.
 	//
-	// Each of these is defaulted by a test for ZERO, because zero is the unset
-	// value. A test for zero reads as "the caller supplied a number" for every
-	// value that is not exactly the zero value — so a negative passes the arm
-	// that exists to catch a missing one and arrives somewhere that cannot cope:
+	// Four of them are here because of one defect wearing four hats: each is
+	// defaulted by a test for ZERO, because zero is the unset value, and a test
+	// for zero reads as "the caller supplied a number" for every value that is
+	// not exactly the zero value. So a negative passed the arm that exists to
+	// catch a missing one and arrived somewhere that could not cope:
 	//
 	//   CompactMaxGoroutines  make(chan struct{}, n)  panic: makechan: size out
 	//                                                 of range
@@ -417,9 +435,18 @@ func New(opts Options) (CommitLog, error) {
 	//
 	// Not one of those failures happens at the call that set the option. Two are
 	// panics on background tickers, with no caller left to hand an error to; the
-	// third is a hang. Refused here, and refused rather than clamped, for the
-	// reason the codec above is: clamping keeps the caller's mistake and hides
-	// it, and a log built on a value nobody meant is not a log anyone can debug.
+	// third is a hang.
+	//
+	// LocalRetentionAge is here for the plainer reason: zero already means
+	// "never offload", so a negative is not an unset value reaching a default —
+	// it is a horizon in the FUTURE, which makes every sealed segment older than
+	// it and offloads the whole log on the first pass. No crash, just a log
+	// that emptied itself onto the store because a subtraction went the wrong
+	// way.
+	//
+	// Refused rather than clamped, for the reason the codec above is refused:
+	// clamping keeps the caller's mistake and hides it, and a log built on a
+	// value nobody meant is not a log anyone can debug.
 	for _, c := range []struct {
 		name string
 		bad  bool
@@ -429,6 +456,7 @@ func New(opts Options) (CommitLog, error) {
 		{"MaxSegmentBytes", opts.MaxSegmentBytes < 0, opts.MaxSegmentBytes},
 		{"HWCheckpointInterval", opts.HWCheckpointInterval < 0, opts.HWCheckpointInterval},
 		{"CleanerInterval", opts.CleanerInterval < 0, opts.CleanerInterval},
+		{"LocalRetentionAge", opts.LocalRetentionAge < 0, opts.LocalRetentionAge},
 		// CleanRewriteBudget is NOT here, and the omission is deliberate: a
 		// negative budget means "no budget at all", which is what every
 		// spec-less pass had before one existed. It is the one field in this

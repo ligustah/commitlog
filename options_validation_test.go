@@ -40,6 +40,11 @@ func TestNegativeOptionsAreRefused(t *testing.T) {
 		"MaxSegmentBytes":      func(o *Options) { o.MaxSegmentBytes = -1 },
 		"HWCheckpointInterval": func(o *Options) { o.HWCheckpointInterval = -time.Second },
 		"CleanerInterval":      func(o *Options) { o.CleanerInterval = -time.Second },
+		// Not one of the four — zero already means "never offload" here, so a
+		// negative is not an unset value reaching a default. It is a horizon in
+		// the future, which makes every sealed segment older than it and
+		// offloads the whole log on the first pass.
+		"LocalRetentionAge": func(o *Options) { o.LocalRetentionAge = -time.Second },
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := Options{Path: tempDir(t), Compact: true}

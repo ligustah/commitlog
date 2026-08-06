@@ -762,6 +762,13 @@ run_guard "an orphan sweep asks the manifest" commitlog.go   '		if !hasLog[stem]
 # log and the process dies later, somewhere else.
 run_guard "a negative option is refused" commitlog.go   '		if c.bad {' '		if false {'   '^TestNegativeOptionsAreRefused$'
 
+# Zero LocalRetentionAge means NEVER offload, and it is the value every log that
+# has not opted in is carrying. Lose this arm and horizon becomes "now minus
+# nothing", every sealed segment is older than it, and the first clean of every
+# log with a SegmentStore pushes the whole thing to the store -- no error, no
+# data loss, just every log in the process silently offloading itself.
+run_guard "zero local retention never offloads" clean.go   '	if l.Options.LocalRetentionAge <= 0 || l.SegmentStore == nil {' '	if l.SegmentStore == nil {'   '^TestAZeroLocalRetentionAgeNeverOffloads$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

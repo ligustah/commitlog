@@ -12,6 +12,8 @@ package commitlog
 import (
 	"log/slog"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 func (l *commitLog) cleanerLoop() {
@@ -249,9 +251,62 @@ func (l *commitLog) Clean() error {
 	return err
 }
 
-// CleanWithSpec applies retention and a transaction-aware compaction pass.
-// See the interface doc for the returned verified floor.
+// CleanWithSpec applies retention and a transaction-aware compaction pass, then
+// offloads whatever LocalRetentionAge now puts past the local horizon. See the
+// interface doc for the returned verified floor.
 func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
+	verified, err := l.cleanPass(spec)
+	// AFTER the pass, and outside it, for a reason that is not stylistic:
+	// cleanPass holds cleanMu for its whole body and OffloadBefore takes cleanMu
+	// itself, so calling this from inside would deadlock the log rather than
+	// return anything. The offload also WANTS to be second — the pass is what
+	// decides which segments still exist and which bytes they hold, and
+	// offloading before it would copy records to the store that the pass was
+	// about to drop.
+	//
+	// Its error does not mask the pass's. The pass already installed segments
+	// and published a manifest by the time this runs; a failure to offload
+	// leaves those bytes local, which is the state every log starts in and the
+	// next pass retries from.
+	if offErr := l.offloadLocalRetention(); offErr != nil && err == nil {
+		err = offErr
+	}
+	return verified, err
+}
+
+// offloadLocalRetention offloads every sealed segment lying entirely before the
+// local retention horizon. Zero LocalRetentionAge disables it.
+//
+// This is scheduling that used to sit outside the log, in durable_streams, and
+// every input to it was already here: the horizon is this duration and a clock,
+// the offset lookup is EarliestOffsetAfterTimestamp, and the "may this process
+// write to the store" rule is tierWritable, which OffloadBefore consults for
+// itself. A caller reproducing that rule keeps a second copy of it, and the
+// copy that is not next to SetTierReadOnly is the one that drifts.
+func (l *commitLog) offloadLocalRetention() error {
+	if l.Options.LocalRetentionAge <= 0 || l.SegmentStore == nil {
+		return nil
+	}
+	// No tierWritable() check here on purpose. OffloadBefore answers (0, nil)
+	// for a log that does not own its tier, deliberately, so that every process
+	// can run the same schedule and a role change is not a source of errors.
+	// Repeating the check here would be the very duplication this exists to
+	// remove.
+	off, err := l.EarliestOffsetAfterTimestamp(timestamp() - int64(l.Options.LocalRetentionAge))
+	if err != nil {
+		return errors.Wrap(err, "local retention horizon")
+	}
+	if off <= 0 {
+		// 0 means the oldest record in the log is already at or after the
+		// horizon, so nothing is old enough. Not an error, and not a no-op worth
+		// reporting.
+		return nil
+	}
+	_, err = l.OffloadBefore(off)
+	return err
+}
+
+func (l *commitLog) cleanPass(spec CleanSpec) (int64, error) {
 	l.cleanMu.Lock()
 	defer l.cleanMu.Unlock()
 	l.mu.RLock()
