@@ -25,15 +25,21 @@ import (
 // the third is a hang. That is why the answer is refusal at New rather than a
 // clamp: a clamp keeps the caller's mistake and hides it.
 //
-// Table-driven on purpose. The defect is one defect in five places, and the
+// Table-driven on purpose. The defect is one defect in four places, and the
 // next option defaulted this way should be added here rather than discovered.
+//
+// CleanRewriteBudget is deliberately absent. It is defaulted the same way, but
+// a negative one MEANS something there — no budget at all, which is what every
+// spec-less pass had before budgets existed — and TestTheAutomaticCleanIsBounded
+// asserts it survives the zero-means-default rule. "Defaulted by a test for
+// zero" is what makes an option worth checking here; it is not what makes a
+// negative wrong.
 func TestNegativeOptionsAreRefused(t *testing.T) {
 	for name, mut := range map[string]func(*Options){
 		"CompactMaxGoroutines": func(o *Options) { o.CompactMaxGoroutines = -1 },
 		"MaxSegmentBytes":      func(o *Options) { o.MaxSegmentBytes = -1 },
 		"HWCheckpointInterval": func(o *Options) { o.HWCheckpointInterval = -time.Second },
 		"CleanerInterval":      func(o *Options) { o.CleanerInterval = -time.Second },
-		"CleanRewriteBudget":   func(o *Options) { o.CleanRewriteBudget = -time.Second },
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := Options{Path: tempDir(t), Compact: true}
@@ -64,4 +70,6 @@ func TestAZeroOptionStillTakesTheDefault(t *testing.T) {
 	require.Equal(t, defaultHWCheckpointInterval, cl.Options.HWCheckpointInterval)
 	require.Equal(t, defaultCleanerInterval, cl.Options.CleanerInterval)
 	require.Equal(t, cl.Options.CleanerInterval, cl.Options.CleanRewriteBudget)
+	require.Positive(t, cl.Options.CleanRewriteBudget,
+		"an unset budget must default to the tick, not to unbounded")
 }

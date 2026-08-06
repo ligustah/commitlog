@@ -429,7 +429,12 @@ func New(opts Options) (CommitLog, error) {
 		{"MaxSegmentBytes", opts.MaxSegmentBytes < 0, opts.MaxSegmentBytes},
 		{"HWCheckpointInterval", opts.HWCheckpointInterval < 0, opts.HWCheckpointInterval},
 		{"CleanerInterval", opts.CleanerInterval < 0, opts.CleanerInterval},
-		{"CleanRewriteBudget", opts.CleanRewriteBudget < 0, opts.CleanRewriteBudget},
+		// CleanRewriteBudget is NOT here, and the omission is deliberate: a
+		// negative budget means "no budget at all", which is what every
+		// spec-less pass had before one existed. It is the one field in this
+		// group where a negative is a value the caller can mean, and
+		// TestTheAutomaticCleanIsBounded asserts it survives the
+		// zero-means-default rule. Adding it here turns that assertion red.
 	} {
 		if c.bad {
 			return nil, errors.Errorf("commitlog: %s is %v; it must not be negative",
