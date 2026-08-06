@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"os"
@@ -2074,23 +2075,46 @@ func (s *segment) Finalize() error {
 }
 
 // Replace replaces the given segment with the callee.
+// Every step here tears something down before the next builds it back up, and a
+// failure in between used to return with old CLOSED and unlinked. That is worse
+// than it sounds: the caller aborts the pass WITHOUT swapping l.segments, so the
+// closed segment stays published, and current() reports it usable because the
+// link that would redirect a reader is set at the very end. Every read of that
+// segment then failed with ErrSegmentClosed until the process restarted — which
+// is, verbatim, the symptom current() exists to eliminate.
+//
+// So each failure undoes what it got through. Up to and including the log
+// rename that is exact: old's files are either untouched or moved back, and
+// reopening it restores the state Replace was called in. Past that point it is
+// not, and the comment there says why.
 func (s *segment) Replace(old *segment) error {
 	s.Lock()
 	defer s.Unlock()
 	old.Lock()
 	defer old.Unlock()
 	if err := old.close(); err != nil {
-		return err
+		return stderrors.Join(err, old.reopenLocked())
 	}
 	if err := s.close(); err != nil {
-		return err
+		return stderrors.Join(err, old.reopenLocked())
 	}
 	if err := os.Rename(s.logPath(), old.logPath()); err != nil {
-		return err
+		return stderrors.Join(err, old.reopenLocked())
 	}
 	if err := os.Rename(s.indexPath(), old.indexPath()); err != nil {
-		return err
+		// old's log is now s's, so put it back BEFORE reopening old. Reopening
+		// it as-is would bring it up over the rewrite's records while carrying
+		// old's own key digest, which trades a visible failure for a wrong
+		// answer on the next pass.
+		return stderrors.Join(err,
+			os.Rename(old.logPath(), s.logPath()),
+			old.reopenLocked())
 	}
+	// Past here both files are installed under old's names and there is nothing
+	// left to put back: old's log no longer exists to reopen, and s's identity
+	// has moved onto it. A failure below leaves the segment closed and the pass
+	// aborted, which is loud rather than silent — the honest report for a state
+	// that genuinely is indeterminate.
 	s.suffix = ""
 	backing, err := openLocalBacking(s.logPath())
 	if err != nil {
@@ -2104,6 +2128,28 @@ func (s *segment) Replace(old *segment) error {
 		return err
 	}
 	return s.setupIndex()
+}
+
+// reopenLocked brings a segment that was closed for a rename back up from the
+// files at its current paths. The caller holds the segment's lock, as Replace
+// holds it for both segments.
+//
+// It is the same sequence Replace runs on the rewrite it installs, which is the
+// point: a failed Replace has to be able to put back exactly what it tore down,
+// because the pass it belongs to publishes nothing on the way out. A segment
+// left closed therefore stays in the LIVE list, where current() hands it to
+// readers as usable.
+func (s *segment) reopenLocked() error {
+	backing, err := openLocalBacking(s.logPath())
+	if err != nil {
+		return errors.Wrap(err, "reopening a segment after a failed replace")
+	}
+	s.backing = backing
+	s.closed = false
+	if err := s.initPositions(); err != nil {
+		return errors.Wrap(err, "reopening a segment after a failed replace")
+	}
+	return errors.Wrap(s.setupIndex(), "reopening a segment after a failed replace")
 }
 
 // SupersededBy records that next carries the records this segment still owes a

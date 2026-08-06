@@ -698,6 +698,17 @@ run_guard_windows "a failed close still frees the handle" index.go   '	if durabl
 		}
 	}'   '^TestAFailedShrinkOnCloseStillReleasesTheHandle$'
 
+# A failed Replace puts back what it tore down. The pass that calls it publishes
+# nothing on the way out, so a segment left closed stays in the LIVE list, and
+# current() hands it to readers as usable because the link that would redirect
+# them is written only on success. The neutralization is the bare early return:
+# the source segment then answers ErrSegmentClosed for the life of the process.
+run_guard_windows "a failed replace reopens the source" segment.go   '	if err := os.Rename(s.logPath(), old.logPath()); err != nil {
+		return stderrors.Join(err, old.reopenLocked())
+	}' '	if err := os.Rename(s.logPath(), old.logPath()); err != nil {
+		return err
+	}'   '^TestAFailedReplaceLeavesTheSourceReadable$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

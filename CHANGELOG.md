@@ -5,6 +5,21 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A compaction whose install failed left the segment it was replacing closed
+  and published**, so every read of it reported `segment has been closed` until
+  the process restarted. `Replace` closes both segments, renames the rewrite
+  over its source and links the two — and it wrote that link only on success,
+  while the pass that calls it publishes nothing on the way out. The source
+  therefore stayed in the live segment list, closed, with nothing to redirect a
+  reader to. Each failure now puts back what it got through: up to and including
+  the log rename that restores the exact prior state. Past that point the files
+  are installed under the source's names and there is nothing left to undo, so
+  the failure is reported rather than papered over.
+
 ## v0.57.2 — 2026-08-06
 
 Both fixes below came out of an audit prompted by the v0.57.1 report: looking
