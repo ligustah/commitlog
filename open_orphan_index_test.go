@@ -2,8 +2,10 @@ package commitlog
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -41,16 +43,26 @@ func TestAnIndexWithNoLogAndNoManifestEntryIsRemovedAtOpen(t *testing.T) {
 // An offloaded segment's index has no .log beside it and must NOT be removed.
 //
 // This is the whole reason the orphan check consults the manifest rather than
-// the directory alone. Offloading drops the local log and, when no remote index
-// cache is configured, deliberately keeps the local index — so "index with no
-// log" is the NORMAL resting state of a tiered segment, not damage. Removing it
-// costs a download of the index object on the next read of that segment, and
-// the check that prevents it is one map lookup against the manifest read at the
-// top of open().
+// the directory alone. Offloading drops the local log and, when the index is not
+// offloaded with it, deliberately keeps the local index — so "index with no log"
+// is the NORMAL resting state of a tiered segment, not damage.
+//
+// The assertion is on BYTES PULLED FROM THE STORE, not on the file existing.
+// The file exists either way: adoptTierManifestLocked opens every manifested
+// segment after the sweep and calls reconcileIndexTail on the ones whose index
+// stayed local, which recreates the file. What it cannot recreate for free is
+// the content — with the index gone, "rebuild the missing tail" is a rebuild of
+// the WHOLE index, which is a front-to-back pass over the segment, downloaded
+// from the store, for every tiered segment, on every boot.
+//
+// That is the cost the manifest lookup prevents, and asserting on the file's
+// existence would not have seen a byte of it. The first version of this test did
+// exactly that and passed with the guard removed.
 func TestAnOffloadedSegmentsIndexSurvivesOpen(t *testing.T) {
 	dir := tempDir(t)
-	store, err := NewFileSegmentStore(filepath.Join(dir, "store"))
+	fs, err := NewFileSegmentStore(filepath.Join(dir, "store"))
 	require.NoError(t, err)
+	store := &byteCountingStore{FileSegmentStore: fs}
 
 	opts := Options{
 		Path:             dir,
@@ -82,15 +94,80 @@ func TestAnOffloadedSegmentsIndexSurvivesOpen(t *testing.T) {
 
 	require.NoError(t, l.Close())
 
+	store.reset()
 	reopened, err := New(opts)
 	require.NoError(t, err)
 	t.Cleanup(func() { reopened.Close() })
 
+	// Measured on this fixture: 2184 bytes with the manifest lookup in place —
+	// the manifest object plus the headers adoption reads to open each segment —
+	// against 31059 without it, which is every offloaded segment streamed back
+	// end to end to rebuild an index that was already on disk. The bound sits
+	// between them with room on both sides, so it is neither met by accident nor
+	// broken by a fixture that grows a segment.
+	read := store.bytesRead()
+	require.Less(t, read, int64(8<<10),
+		"open pulled %d bytes from the store for a log whose segment indexes "+
+			"were already on disk — the orphan sweep collected them and adoption "+
+			"rebuilt each index by streaming its segment back", read)
+
+	// And the log still works, which is the other half: not reading is only
+	// correct if the indexes that were kept are the right ones.
+	require.Equal(t, last, reopened.NewestOffset())
 	for _, p := range stranded {
-		require.FileExists(t, p,
-			"open removed an offloaded segment's local index as an orphan; the "+
-				"manifest names that base offset")
+		require.FileExists(t, p, "an offloaded segment's index went missing")
 	}
+}
+
+// byteCountingStore counts bytes served out of the store, so a test can assert
+// that an operation did not fall back to streaming segments it should not need.
+type byteCountingStore struct {
+	*FileSegmentStore
+	mu    sync.Mutex
+	bytes int64
+}
+
+func (s *byteCountingStore) add(n int64) {
+	s.mu.Lock()
+	s.bytes += n
+	s.mu.Unlock()
+}
+
+func (s *byteCountingStore) reset() {
+	s.mu.Lock()
+	s.bytes = 0
+	s.mu.Unlock()
+}
+
+func (s *byteCountingStore) bytesRead() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bytes
+}
+
+func (s *byteCountingStore) ReadAt(key string, p []byte, off int64) (int, error) {
+	n, err := s.FileSegmentStore.ReadAt(key, p, off)
+	s.add(int64(n))
+	return n, err
+}
+
+func (s *byteCountingStore) Stream(key string, off int64) (io.ReadCloser, error) {
+	rc, err := s.FileSegmentStore.Stream(key, off)
+	if err != nil {
+		return nil, err
+	}
+	return &countingReadCloser{ReadCloser: rc, store: s}, nil
+}
+
+type countingReadCloser struct {
+	io.ReadCloser
+	store *byteCountingStore
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.store.add(int64(n))
+	return n, err
 }
 
 // strandedIndexes returns the .index files in dir with no .log beside them.
