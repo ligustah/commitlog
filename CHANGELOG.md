@@ -5,7 +5,11 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.57.2 — 2026-08-06
+
+Both fixes below came out of an audit prompted by the v0.57.1 report: looking
+for the same shape — a step that tears something down before rebuilding it,
+with a failure in between — rather than waiting for the next symptom.
 
 ### Fixed
 
