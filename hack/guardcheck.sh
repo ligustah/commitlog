@@ -729,7 +729,7 @@ run_guard "a block table must fit its file" block_table_local.go   '	logical, ph
 	if phys != physSize {
 		return nil, 0, false
 	}
-	return blocks, logical, true' '	logical, _ := blockTableExtent(blocks)
+	return blocks, logical, true' '	logical, _ = blockTableExtent(blocks)
 	return blocks, logical, true'   '^TestABlockTableForDifferentBytesIsRefused$'
 
 echo
