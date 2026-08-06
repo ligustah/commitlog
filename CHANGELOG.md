@@ -5,6 +5,32 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+Both from the same audit as v0.57.2 through v0.57.4: a step that tears something
+down before rebuilding it, with an early error return in between that leaves the
+torn-down state published.
+
+### Fixed
+
+- **An offload whose local cleanup failed stranded the segment halfway.** The
+  attach drops the now-redundant local files and swaps the backing over to the
+  store object — and it returned early from each of those steps, leaving the
+  segment published with a closed local backing and no store, against a manifest
+  entry naming its objects that had *already* been written. Every read of it then
+  failed until the process restarted, and `OffloadBefore`, which aborts its pass
+  on that error, reported one fewer offload than the manifest recorded. Nothing
+  after the store backing is open can make staying local correct — the commit
+  happened in the store — so the swap now happens regardless and a cleanup
+  failure is reported alongside it.
+- **A segment whose close failed during retention was left neither closed nor
+  gone.** `Delete` marks the segment gone so readers skip the offsets retention
+  lawfully collected, but returned from a failed close before setting the flag —
+  and retention keeps a failed segment in the surviving list, so it stayed
+  published and answered a raw `segment has been closed` for those offsets. The
+  records are being collected either way; a close that failed does not make them
+  readable again.
+
 ## v0.57.4 — 2026-08-06
 
 ### Fixed

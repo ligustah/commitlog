@@ -709,6 +709,15 @@ run_guard_windows "a failed replace reopens the source" segment.go   '	if err :=
 		return err
 	}'   '^TestAFailedReplaceLeavesTheSourceReadable$'
 
+# The offload attach swaps in the store backing whatever the local cleanup
+# reports. The commit already happened IN THE STORE -- the caller published the
+# manifest naming these objects before calling -- so nothing below can make
+# staying local correct. The neutralization is an early return on the removal:
+# the segment then holds a closed local backing and no store, against a manifest
+# entry that already says its bytes are in the tier, and every read of it fails
+# until the process restarts.
+run_guard_windows "a failed local cleanup still offloads" segment.go   '		errs = append(errs, errors.Wrap(err, "remove local log"))' '		return errors.Wrap(err, "remove local log")'   '^TestAFailedLocalCleanupStillLeavesTheSegmentOffloaded$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

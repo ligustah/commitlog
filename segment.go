@@ -364,37 +364,43 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 	if err != nil {
 		return err
 	}
-	// The table this segment already has stays; only the key it would be
-	// re-fetched from is new. A rewrite (swapReplacement) or a reopen is what
-	// reads the object.
-	s.blocksKey = meta.BlocksKey
+	// Past this point the swap happens whatever the teardown below reports. The
+	// commit already happened, in the store: the caller published a manifest
+	// naming these objects before calling this, and the replacement backing above
+	// is already open. So there is no failure below that makes staying local the
+	// right answer — the manifest already says these bytes are in the store, and
+	// the local copies are redundant by that fact alone. Dropping them is cleanup,
+	// and cleanup that fails is reported, not obeyed.
+	//
+	// Returning early instead left the segment published with a CLOSED local
+	// backing and store still nil, so every read of it failed until a restart,
+	// against a manifest entry that had already been published. The caller
+	// (OffloadBefore) aborts its pass on that error, so nothing put it right.
+	var errs []error
 	localLog := s.backing.Name()
-	if err := s.backing.Close(); err != nil {
-		return errors.Wrap(err, "close local backing")
-	}
+	errs = append(errs, errors.Wrap(s.backing.Close(), "close local backing"))
 	var localIndex string
 	if meta.IndexKey != "" && cache != nil {
 		localIndex = s.Index.Name()
-		if err := s.Index.Close(); err != nil {
-			return errors.Wrap(err, "close local index")
-		}
+		errs = append(errs, errors.Wrap(s.Index.Close(), "close local index"))
 	}
-
-	// The commit already happened, in the store: the caller published a manifest
-	// naming these objects before calling this. What is left is to drop the local
-	// copies, which is why nothing here is a commit point.
 	if err := os.Remove(localLog); err != nil && !os.IsNotExist(err) {
-		return errors.Wrap(err, "remove local log")
+		errs = append(errs, errors.Wrap(err, "remove local log"))
 	}
 	if localIndex != "" {
 		if err := os.Remove(localIndex); err != nil && !os.IsNotExist(err) {
-			return errors.Wrap(err, "remove local index")
+			errs = append(errs, errors.Wrap(err, "remove local index"))
 		}
 	}
 
 	s.backing = sb
 	s.store = store
 	s.storeKey = meta.LogKey
+	// The table this segment already has stays; only the key it would be
+	// re-fetched from is new. A rewrite (swapReplacement) or a reopen is what
+	// reads the object. Set here with the rest of the swap rather than before it,
+	// so no failure can leave a blocksKey on a segment that is still local.
+	s.blocksKey = meta.BlocksKey
 	// Set explicitly rather than left to the zero value. A first offload is
 	s.firstOffset = meta.FirstOffset
 	s.lastOffset = meta.LastOffset
@@ -408,7 +414,7 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 		s.indexKey = meta.IndexKey
 		s.indexCache = cache
 	}
-	return nil
+	return stderrors.Join(errs...)
 }
 
 func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec) (*segment, error) {
@@ -2501,9 +2507,14 @@ func (s *segment) Delete() error {
 	// closeDiscarding, not close: everything this segment owns is unlinked
 	// below, so flushing and shrinking its index first is work whose result
 	// nothing can ever read.
-	if err := s.closeDiscarding(); err != nil {
-		return err
-	}
+	//
+	// Its error is captured rather than returned, so that the flag below is set
+	// whatever the close reported. Returning here left the segment published and
+	// neither closed nor gone — and its records are being collected either way,
+	// so a close that failed does not make them readable again. A reader
+	// resolving into it then got a raw error for offsets retention had lawfully
+	// collected, which is the exact case the flag exists to turn into a skip.
+	closeErr := s.closeDiscarding()
 	// Nothing may resolve an offset through this segment again. It matters
 	// because a retention pass, exactly like a compaction one, deletes as it goes
 	// and does not publish the surviving list until the pass ends — so a deleted
@@ -2520,6 +2531,9 @@ func (s *segment) Delete() error {
 	// skipped rather than errored on — and it is closed either way, so skipping is
 	// the better of the two answers.
 	s.gone = true
+	if closeErr != nil {
+		return closeErr
+	}
 	if s.isOffloaded() {
 		if err := s.store.Delete(s.storeKey); err != nil {
 			return errors.Wrap(err, "delete offloaded object")

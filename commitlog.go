@@ -1601,6 +1601,14 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 			return n, err
 		}
 		if err := s.attachOffloaded(l.SegmentStore, meta, l.RemoteIndexCache); err != nil {
+			// An error there no longer means the segment stayed local: past the
+			// point where the store backing is open the swap happens regardless,
+			// and what is reported is a local cleanup that did not fully succeed.
+			// The pass still stops, but the count has to agree with the manifest,
+			// which already names this segment.
+			if s.isOffloaded() {
+				n++
+			}
 			return n, err
 		}
 		n++
