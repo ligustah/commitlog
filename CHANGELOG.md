@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed
+
+- **Opening a block-compressed log no longer walks every block header in it.** A
+  segment's block table was rebuilt on every open by following the chain — each
+  block's header carries the length that locates the next, so it was one read per
+  block, across every segment, before a single record was served. The cost scales
+  with the block *count*, and the append path writes one block per message set,
+  so it is set by how small the commits were rather than by how much data there
+  is; `cleanBlockTarget`'s comment records 18.6M ~140-byte blocks in one real run.
+  A sealed segment now persists its table beside its files, in exactly the bytes
+  the tier already writes as a store object, and the open reads it instead. With
+  the walk isolated from per-segment work, an open of 40000 blocks goes from
+  209ms to 87ms; at 18.6M blocks the walk alone is the better part of a minute.
+
+  Nothing to migrate and nothing to configure. Opening a log seals its non-active
+  segments, and sealing is where the table is written, so a log written by an
+  earlier build gains its tables the first time this one opens it. A table that
+  is absent, unreadable, or that does not account for exactly the bytes in the
+  file beside it is recomputed by the walk — the table is derived data, and the
+  bytes it describes are on the same disk, so an unusable one costs a slow open
+  and never the log. (That is the deliberate opposite of the rule for the store
+  object, where walking means downloading it again.)
+
 ## v0.57.5 — 2026-08-06
 
 Both from the same audit as v0.57.2 through v0.57.4: a step that tears something

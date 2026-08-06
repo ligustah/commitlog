@@ -74,6 +74,12 @@ type segment struct {
 	sealed         bool
 	closed         bool
 	replaced       bool
+	// blocksWalked is how many blocks the last scanBlocks resolved by walking the
+	// header chain — one read each. Zero for a segment that loaded its block
+	// table from the sidecar instead, which is the whole point of persisting it:
+	// see BenchmarkReopenWalksEveryBlockHeader for what the walk costs. Guarded
+	// by the segment lock.
+	blocksWalked int
 	// gone marks a segment whose files have been removed (Delete). Distinct from
 	// closed, which a segment can also be while its files are intact. See
 	// current(). Guarded by the segment lock.
@@ -392,6 +398,10 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 			errs = append(errs, errors.Wrap(err, "remove local index"))
 		}
 	}
+	// The local block table goes with the local bytes it describes. This
+	// segment's table now lives in the store under blocksKey, so the sidecar is
+	// not merely redundant — it describes a file that no longer exists.
+	removeLocalBlockTable(s)
 
 	s.backing = sb
 	s.store = store
@@ -619,6 +629,14 @@ func (s *segment) initPositions() error {
 	}
 	if magic[0] == blockMagic {
 		s.blockMode = true
+		// The chain walk is one read per block over every segment in the log, so
+		// a sealed segment persists the table it built rather than making every
+		// future open rebuild it. Absent or unusable, the walk still answers.
+		if blocks, logical, ok := loadLocalBlockTable(s, size); ok {
+			s.blocks = append(s.blocks[:0], blocks...)
+			s.position = logical
+			return nil
+		}
 		return s.scanBlocks(size)
 	}
 	s.blockMode = false
@@ -687,6 +705,10 @@ func (s *segment) scanBlocks(size int64) error {
 	}
 	s.position = logical
 	s.physPosition = phys
+	// What this walk cost, so a test can assert it did not happen. One header
+	// read resolved one block, so the count is exact for the case that matters:
+	// a segment whose table came from its sidecar walks nothing and reports 0.
+	s.blocksWalked = len(s.blocks)
 	return nil
 }
 
@@ -1169,6 +1191,15 @@ func (s *segment) seal() {
 		// index tail, not data, and seal runs on paths that cannot return one.
 		s.Index.Sync() // nolint: errcheck
 		s.dirtyIndex = false
+	}
+	// Same reasoning one level out: this is the moment the segment's bytes stop
+	// changing, so it is the moment its block table becomes worth keeping.
+	// Rebuilding it costs the next open a read per block — see
+	// BenchmarkReopenWalksEveryBlockHeader — and seal cannot return an error, so
+	// this is best-effort like the two above. A failure costs that walk, which is
+	// what every open paid before.
+	if s.blockMode && len(s.blocks) > 0 {
+		writeLocalBlockTable(s) // nolint: errcheck
 	}
 }
 
@@ -2067,7 +2098,15 @@ func (s *segment) Finalize() error {
 	if err := os.Rename(s.indexPath(), finalIdx); err != nil {
 		return errors.Wrap(err, "rename trimmed index failed")
 	}
+	// The working copy's own table, and then the PRE-TRIM segment's, which is
+	// now sitting beside bytes it does not describe. Dropped rather than left to
+	// the size check below it: that check refuses a table accounting for a
+	// different number of bytes, and a trim that happened to land on the same
+	// size would slip past it and map logical offsets onto the wrong records.
+	// The reopen a few lines down would read it.
+	removeLocalBlockTable(s)
 	s.suffix = ""
+	removeLocalBlockTable(s)
 	backing, err := openLocalBacking(s.logPath())
 	if err != nil {
 		return errors.Wrap(err, "reopen trimmed segment failed")
@@ -2122,6 +2161,15 @@ func (s *segment) Replace(old *segment) error {
 	// from: what fails here is opening a log this process closed microseconds
 	// ago, which is the Windows handle-release window, and waiting it out is
 	// what the rest of the codebase already does for it.
+	//
+	// The rewrite's own block table goes with its working suffix, and old's goes
+	// because the rewrite's bytes now sit under old's names — the reopen below
+	// runs initPositions, which would read it. Not left to the size check that
+	// backs it up: a rewrite that dropped nothing can land on the same size, and
+	// a table believed on that evidence maps logical offsets onto the wrong
+	// records, which is a wrong answer rather than a failure.
+	removeLocalBlockTable(s)
+	removeLocalBlockTable(old)
 	s.suffix = ""
 	if err := s.reopenLocked(); err != nil {
 		// Terminal. The segment stays closed and published, so every read of it
@@ -2559,6 +2607,10 @@ func (s *segment) Delete() error {
 	// A final segment (no working suffix) also owns a key-digest sidecar;
 	// suffixed working copies (.cleaned/.truncated/.trimmed) share the base
 	// offset with the real segment and must not remove its digest.
+	// The block table is removed for a working copy too, unconditionally: its
+	// path carries the suffix, so unlike the digest above it names this
+	// segment's own sidecar and never the real segment's.
+	removeLocalBlockTable(s)
 	if s.suffix == "" {
 		removeKeyDigest(s)
 	}

@@ -718,6 +718,20 @@ run_guard_windows "a failed replace reopens the source" segment.go   '	if err :=
 # until the process restarts.
 run_guard_windows "a failed local cleanup still offloads" segment.go   '		errs = append(errs, errors.Wrap(err, "remove local log"))' '		return errors.Wrap(err, "remove local log")'   '^TestAFailedLocalCleanupStillLeavesTheSegmentOffloaded$'
 
+# A persisted block table is believed only if it accounts for exactly the bytes
+# in the file beside it. That check is the WHOLE staleness story -- the sidecar
+# carries no generation of its own -- and it is the kind whose absence is silent:
+# a table describing different bytes still decodes, still passes its CRC, and
+# maps logical offsets onto the wrong records, so the segment answers reads with
+# plausible garbage rather than an error. The neutralization keeps the decode and
+# drops the extent comparison.
+run_guard "a block table must fit its file" block_table_local.go   '	logical, phys := blockTableExtent(blocks)
+	if phys != physSize {
+		return nil, 0, false
+	}
+	return blocks, logical, true' '	logical, _ := blockTableExtent(blocks)
+	return blocks, logical, true'   '^TestABlockTableForDifferentBytesIsRefused$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
