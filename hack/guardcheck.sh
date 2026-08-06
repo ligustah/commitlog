@@ -760,6 +760,17 @@ if [ "$set_sel" = "platform" ] && [ "$checked" -eq 0 ]; then
   echo "guardcheck: GUARDCHECK_SET=platform ran NO guards on $goos — this run proves nothing."
   exit 1
 fi
+# The same hole, reached the other way. The filter is a plain substring match,
+# so a caller who reaches for a regex — "the old table|the local table" — selects
+# nothing, and an empty selection printed the header, no summary, and exit 0.
+# Indistinguishable from a run that checked every guard it was asked for. Count
+# the deferred ones as selected: a filter naming only a windows guard on linux
+# picked something out, it just isn't checkable here, and the deferral line
+# already says so.
+if [ -n "$filter" ] && [ $((checked + deferred)) -eq 0 ]; then
+  echo "guardcheck: no guard name contains '$filter' — the filter is a substring, not a regex."
+  exit 1
+fi
 if [ "$checked" -gt 0 ]; then
   echo "guardcheck: all $checked guards covered."
 fi

@@ -30,6 +30,16 @@ library from that fork onward.
   and never the log. (That is the deliberate opposite of the rule for the store
   object, where walking means downloading it again.)
 
+### Fixed
+
+- **`hack/guardcheck.sh` reported a filter that matched no guard as a pass.** The
+  optional argument is a plain substring match, so a caller who reached for a
+  regex selected nothing — and an empty selection printed the header, no summary,
+  and exit 0, which is what a run that checked everything asked of it also looks
+  like. It now names the filter and exits 1. Guards deferred to another platform
+  count as selected: a filter naming only a windows guard did pick something out
+  on linux, and the deferral line already says it was not checked here.
+
 ## v0.57.5 — 2026-08-06
 
 Both from the same audit as v0.57.2 through v0.57.4: a step that tears something
