@@ -5,6 +5,42 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **Four options accepted a negative value and failed somewhere else entirely.**
+  Each is defaulted by a test for zero, because zero is the unset value — and a
+  test for zero reads as "the caller supplied a number" for every value that is
+  not exactly the zero value. So a negative passed the arm that exists to catch
+  a missing one:
+
+  | option | what it did |
+  | --- | --- |
+  | `CompactMaxGoroutines` | `panic: makechan: size out of range` |
+  | `HWCheckpointInterval` | `panic: non-positive interval for NewTicker` |
+  | `CleanerInterval` | `panic: non-positive interval for NewTicker` |
+  | `MaxSegmentBytes` | no panic — every append rolls, and the probe never returned |
+
+  Not one of them fails at the call that set the option. Two are panics on
+  background tickers, where there is no caller left to hand an error to, and one
+  is a hang. `New` now refuses them, rather than clamping, for the reason the
+  compression-codec check beside it refuses: a clamp keeps the caller's mistake
+  and hides it. Registered as guard 55.
+
+  `CleanRewriteBudget` is defaulted the same way and is deliberately *not*
+  refused — a negative budget there means "no budget at all", which is what
+  every spec-less pass had before budgets existed.
+
+### Changed
+
+- **`CompactMaxGoroutines` no longer means what its name says, and now says so.**
+  Key-digest builds are capped at 2 regardless of this option, because each
+  build holds a transient per-segment key map and ten at once measured over 1GB
+  on a soak. The only value of the field that changes anything is 1, which makes
+  the builds serial; anything above 2 is the same as 2. Documented on the field
+  rather than left in `loadOrBuildDigests` for the next reader to find.
+
 ## v0.58.1 — 2026-08-06
 
 ### Changed
