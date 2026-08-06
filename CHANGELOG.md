@@ -5,6 +5,22 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A failed shrink left the index unmapped, and every later read of that
+  segment called it corrupt** — for the life of the process, because nothing
+  re-opens a segment's index once the log is running. Windows only. `shrink`
+  must unmap before it can truncate there, since an open `MapViewOfFile` makes
+  `SetEndOfFile` fail, so the truncate runs inside a window where the mapping is
+  already gone; failing there returned straight out and left no mapping behind a
+  non-zero position. `seal` discards this error by design, on the premise that a
+  failed shrink costs a rebuilt index tail rather than data — true only while the
+  mapping survived the failure. Both failure paths now restore the mapping before
+  returning. Reported by sqlcdc from production: `position=275700`,
+  `closed=false`, 28 views wedged.
+
 ## v0.57.0 — 2026-08-05
 
 ### Fixed

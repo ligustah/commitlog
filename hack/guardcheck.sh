@@ -611,6 +611,16 @@ run_guard "a rolling tick still cleans" clean.go   '	if _, err := l.checkAndPerf
 	}
 	if err != nil {'   '^TestATickThatRollsASegmentStillCleans$'
 
+# A failed shrink leaves the index READABLE. shrink must unmap before it can
+# truncate on Windows, so the truncate fails inside a window where the mapping is
+# already gone; returning straight out left no mapping behind a non-zero
+# position. Nothing re-opens a segment's index, so that is permanent -- every
+# read of the segment answers "corrupt index file" for the life of the process,
+# and seal discards this error by design. The neutralization is that early
+# return put back.
+run_guard "a failed shrink leaves the index readable" index_mmap_windows.go   '		return errors.Wrap(stderrors.Join(err, idx.restoreMapping(remap)),
+			"truncate failed during shrink")' '		return errors.Wrap(err, "truncate failed during shrink")'   '^TestAFailedShrinkLeavesTheIndexReadable$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

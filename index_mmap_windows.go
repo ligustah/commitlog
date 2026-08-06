@@ -3,6 +3,7 @@
 package commitlog
 
 import (
+	stderrors "errors"
 	"os"
 	"syscall"
 	"unsafe"
@@ -55,7 +56,20 @@ func (idx *index) shrink() error {
 		}
 	}
 	if err := idx.file.Truncate(idx.position); err != nil {
-		return errors.Wrap(err, "truncate failed during shrink")
+		// The unmap above already happened, so returning straight out here left
+		// the index with no mapping and a non-zero position. Nothing re-opens a
+		// segment's index on the read path, so every later read of that segment
+		// reported a corrupt index for the LIFE OF THE PROCESS — and seal
+		// discards this error by design, on the premise that a failed shrink
+		// costs a rebuilt index tail rather than data. That premise was only
+		// true while the mapping survived the failure.
+		//
+		// So put it back. The truncate failed, which means the file is still the
+		// size idx.size already claims, and mapping it again restores exactly
+		// the state shrink was called in. A failed shrink then costs an
+		// un-shrunk file, which is what the caller was told it costs.
+		return errors.Wrap(stderrors.Join(err, idx.restoreMapping(remap)),
+			"truncate failed during shrink")
 	}
 	// size tracks the FILE, so it must follow the truncate whether or not a
 	// remap happens. Updating it only in the remap branch left an index shrunk
@@ -73,11 +87,49 @@ func (idx *index) shrink() error {
 		idx.mmap = mmap
 		idx.mapMu.Unlock()
 		if err != nil {
-			return errors.Wrap(err, "remap failed after shrink")
+			// Same wedge as the truncate path, reached the other way: the file
+			// is shrunk and coherent, but with no mapping and a non-zero
+			// position every read calls it corrupt. One more attempt is worth
+			// making before giving up, because what fails here is transient —
+			// the file is intact and the size is already right.
+			return errors.Wrap(stderrors.Join(err, idx.restoreMapping(remap)),
+				"remap failed after shrink")
 		}
 	}
 	// A zero-length file cannot be mapped, so an empty index legitimately has
 	// no mapping. That is now COHERENT rather than merely survivable: size is 0
 	// too, so the next write expands the file and maps it before touching it.
+	return nil
+}
+
+// restoreMapping puts a mapping back after a step of shrink has failed, so that
+// a failed shrink leaves the index usable rather than dead.
+//
+// It exists because of the one state this file must never end in: no mapping
+// with a non-zero position. Nothing re-opens a segment's index once the log is
+// running, so that state is permanent for the process, and every read of the
+// segment answers "corrupt index file" from then on. sqlcdc hit it on a
+// segment with position=275700 and closed=false, and it took out 28 views.
+//
+// It maps whatever the file currently IS. Both callers have already made
+// idx.size agree with that — the truncate path because the truncate did not
+// happen, the remap path because the truncate did — so there is no size to
+// pass in and no way for the two to disagree.
+//
+// remap is false when shrink was called with no mapping to begin with (from
+// Close, after UnsafeUnmap). There was nothing to restore and mapping the file
+// again would be a leak, so this does nothing. A zero-length file cannot be
+// mapped at all, and needs no mapping: size 0 with no mapping is coherent.
+func (idx *index) restoreMapping(remap bool) error {
+	if !remap || idx.size == 0 {
+		return nil
+	}
+	idx.mapMu.Lock()
+	mmap, err := mmapFile(idx.file)
+	idx.mmap = mmap
+	idx.mapMu.Unlock()
+	if err != nil {
+		return errors.Wrap(err, "restoring the mapping after a failed shrink")
+	}
 	return nil
 }
