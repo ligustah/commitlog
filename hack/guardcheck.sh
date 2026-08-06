@@ -769,6 +769,16 @@ run_guard "a negative option is refused" commitlog.go   '		if c.bad {' '		if fal
 # data loss, just every log in the process silently offloading itself.
 run_guard "zero local retention never offloads" clean.go   '	if l.Options.LocalRetentionAge <= 0 || l.SegmentStore == nil {' '	if l.SegmentStore == nil {'   '^TestAZeroLocalRetentionAgeNeverOffloads$'
 
+# Removing this returns the walk to adding cLen to pos unchecked, which is what
+# let a block overrunning the file be listed as healthy while Records refused the
+# same bytes.
+run_guard "a block payload must be in the file" inspect.go   '		if end := start + int64(cLen); end > int64(len(s.raw)) {' '		if false {'   '^TestBlocksAndRecordsAgreeOnATruncatedPayload$'
+
+# Neutralized to the laundering answer the check exists to refuse — reporting a
+# version the file does not contain — rather than to a no-op, so the guard fails
+# for the reason it is about.
+run_guard "a magic with no version is refused" inspect.go   '		if hdr[0] == blockMagic {' '		if false {'   '^TestClassifySegmentRefusesAMagicWithNoVersion$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

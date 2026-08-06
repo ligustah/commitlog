@@ -5,6 +5,47 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Added
+
+- **`ClassifySegment` — read a segment's framing from its header, not its body.**
+  Returns a `SegmentFormat` (`Blocked`, `Version`, and a `Readable` method) after
+  reading two bytes, for a process deciding at startup whether it understands a
+  data directory.
+
+  `InspectSegment` already knew the answer, but only as a side effect of
+  `os.ReadFile` on the whole segment — so a boot probe had the choice between
+  reading gigabytes it did not want and hard-coding `0xC1` into its own code.
+  Both consumers chose the copy, which is the failure the note at the top of
+  `inspect.go` was written about. The note diagnosed it and the package still
+  offered no cheap correct answer; this is that answer. Both paths now decide
+  "blocked" through one internal helper, so they cannot drift.
+
+  An unrecognised version is **reported, not refused** — a caller probing a
+  foreign directory needs to learn which format it is looking at, and `Readable`
+  is what judges it. A file that starts with the magic but is too short to hold a
+  version byte *is* refused, deliberately rather than reported as version 0: that
+  zero is indistinguishable from a real version byte, and would answer a question
+  the bytes never settled. Registered as guard 58.
+
+### Fixed
+
+- **`Blocks` called a truncated segment healthy while `Records` refused it.** A
+  block header claiming more payload than the file holds was added to the walk's
+  cursor unchecked; the cursor stepped past the end, the loop condition ended the
+  walk, and the overrunning block came back listed as fine with a `nil` error.
+  `Records` had the bound check all along and errored on the same bytes.
+
+  So the package shipped two readers of one format that gave opposite verdicts —
+  the exact failure `inspect.go`'s own header comment describes between repos,
+  reproduced between two functions in it. Truncation is the likeliest damage an
+  inspector gets pointed at (a short write, a partial upload, a download cut off
+  mid-object), and "this file is sound" is the one answer that sends the
+  investigation somewhere else. Same bound and same wording as `recordsBlocked`
+  now, and the test asserts the two *agree* rather than asserting either one in
+  isolation. Registered as guard 57.
+
 ## v0.59.0 — 2026-08-06
 
 ### Added

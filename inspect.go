@@ -2,6 +2,7 @@ package commitlog
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/ligustah/commitlog/compress"
@@ -72,6 +73,91 @@ type RecordInfo struct {
 	CRCValid bool
 }
 
+// SegmentFormat is how a segment file is framed, as told by its first two
+// bytes.
+//
+// This exists so that "which format is this directory in" can be answered
+// without reading the segment. InspectSegment answers it too, but only as a
+// side effect of loading the whole file — so a caller probing a data dir at
+// boot had the choice between reading gigabytes it does not want and copying
+// the magic byte into its own code. Both consumers chose the copy, which is the
+// failure the doc at the top of this file describes. A cheap correct answer is
+// what removes the incentive.
+type SegmentFormat struct {
+	// Blocked reports whether the file is block-framed rather than a flat
+	// sequence of record frames. Decided by the magic byte, not by any naming
+	// convention.
+	Blocked bool
+	// Version is the block format version claimed by the header, and is
+	// meaningful only when Blocked. It is reported rather than judged: an
+	// unrecognised version is exactly what a caller probing a foreign
+	// directory needs to SEE, and refusing to hand it back would leave it
+	// asking the question this type exists to answer. Use Readable to judge.
+	Version byte
+}
+
+// Readable reports whether this build can decode the file's blocks.
+//
+// A flat segment is always readable here — this concerns block framing only,
+// and says nothing about whether the records inside are intact.
+func (f SegmentFormat) Readable() bool {
+	return !f.Blocked || f.Version == BlockFormatVersion
+}
+
+// ClassifySegment reports how a segment .log file is framed, reading only its
+// header and never its body.
+//
+// Two bytes off the front, which is the entire point: this is for a process
+// deciding at startup whether it understands a data directory, where
+// InspectSegment's whole-file read is the cost that drove callers to hard-code
+// 0xC1 instead.
+//
+// An empty file is reported as flat and not an error. A zero-length segment is
+// a legitimate segment with no records in it, and a probe that treats it as
+// damage would fail on a log that has just been created.
+//
+// A file that starts with the block magic but is too short to carry a version
+// byte IS an error, and deliberately not a SegmentFormat with Version 0. There
+// is no version in that file to report, and answering with a zero would be
+// answering a question the bytes did not settle — the caller cannot tell that
+// apart from a real version byte that happened to be 0.
+func ClassifySegment(path string) (SegmentFormat, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return SegmentFormat{}, errors.Wrap(err, "open segment file")
+	}
+	defer f.Close()
+
+	var hdr [2]byte
+	n, err := io.ReadFull(f, hdr[:])
+	switch {
+	case errors.Is(err, io.EOF):
+		// Empty file: no magic, so flat. n is 0 here by ReadFull's contract.
+		return SegmentFormat{}, nil
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		// Exactly one byte. Only interesting if it is the magic; a one-byte
+		// flat segment is malformed for other reasons that are not this
+		// function's to diagnose.
+		if hdr[0] == blockMagic {
+			return SegmentFormat{}, errors.Errorf(
+				"commitlog: %s begins with the block magic but is %d byte; "+
+					"there is no version byte to read", path, n)
+		}
+		return SegmentFormat{}, nil
+	case err != nil:
+		return SegmentFormat{}, errors.Wrap(err, "read segment header")
+	}
+	if !isBlockFramed(hdr[:]) {
+		return SegmentFormat{}, nil
+	}
+	return SegmentFormat{Blocked: true, Version: hdr[1]}, nil
+}
+
+// isBlockFramed is the one place the magic byte decides anything. Both the
+// header-only classifier and the whole-file inspector route through it so they
+// cannot drift into disagreeing about what a segment is.
+func isBlockFramed(b []byte) bool { return len(b) > 0 && b[0] == blockMagic }
+
 // SegmentFile is an open, read-only view of one segment's .log file.
 type SegmentFile struct {
 	path string
@@ -90,11 +176,30 @@ func InspectSegment(path string) (*SegmentFile, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "read segment file")
 	}
-	s := &SegmentFile{path: path, raw: raw}
-	if len(raw) > 0 && raw[0] == blockMagic {
-		s.blocked = true
-	}
+	s := &SegmentFile{path: path, raw: raw, blocked: isBlockFramed(raw)}
 	return s, nil
+}
+
+// Format reports how this file is framed, from the header already in memory.
+//
+// Same answer ClassifySegment gives for the same file, and by construction:
+// both decide "blocked" through isBlockFramed. The difference is only what it
+// cost to get here.
+//
+// A block-framed file too short to carry a version byte reports Version 0 here,
+// where ClassifySegment refuses. That is not an inconsistency: this call has
+// already read the whole file, so the caller can see the truncation directly
+// and Blocks names it precisely — an inspector's job is to show what is there,
+// the same reason a bad checksum is a RecordInfo field and not an error.
+func (s *SegmentFile) Format() SegmentFormat {
+	if !s.blocked {
+		return SegmentFormat{}
+	}
+	var v byte
+	if len(s.raw) > 1 {
+		v = s.raw[1]
+	}
+	return SegmentFormat{Blocked: true, Version: v}
 }
 
 // Blocked reports whether the file is block-framed (compressed or stored
@@ -132,6 +237,28 @@ func (s *SegmentFile) Blocks() ([]BlockInfo, error) {
 		out = append(out, BlockInfo{
 			FileOffset: pos, Codec: codec, UncompressedLen: uLen, CompressedLen: cLen,
 		})
+		// The payload has to BE there. Without this the walk simply added cLen to
+		// pos, and a header claiming more bytes than the file holds stepped clean
+		// over the end — the loop condition then ended the walk and reported
+		// success, listing the overrunning block as though it were fine.
+		//
+		// Truncation is the corruption this is most likely to be pointed at: a
+		// short write, a partial upload, a download cut off mid-object. Reporting
+		// the file as sound is the one answer that sends the investigation
+		// somewhere else entirely.
+		//
+		// Records already refused it, which is what makes this worth stating: the
+		// two walks gave OPPOSITE answers about the same bytes, one describing the
+		// layout as intact while the other could not read it. That is the failure
+		// the note at the top of this file is about, reproduced between two
+		// functions in the same package rather than between two repos. Same bound
+		// and same wording as recordsBlocked, so they cannot drift apart again.
+		start := pos + blockHeaderLen
+		if end := start + int64(cLen); end > int64(len(s.raw)) {
+			return out, errors.Errorf(
+				"commitlog: %s: block at %d claims %d payload bytes, file holds %d",
+				s.path, pos, cLen, int64(len(s.raw))-start)
+		}
 		pos += blockHeaderLen + int64(cLen)
 	}
 	return out, nil
