@@ -367,6 +367,11 @@ type CommitLog interface {
 	// read-only reclaims nothing, since deleting is a store write like any
 	// other, and one interrupted by a crash leaves an orphan — costing storage,
 	// not correctness, and reported by UnreferencedObjects.
+	//
+	// It returns an ERROR, without cleaning anything, if the spec carries a
+	// Ceiling while the log's own cleaner is still running: the automatic pass
+	// is spec-less, bounds itself at the high watermark, and would compact the
+	// records the ceiling exists to protect. Set Options.DisableAutoClean.
 	CleanWithSpec(spec CleanSpec) (verified int64, err error)
 
 	// NotifyLEO registers and returns a channel which is closed when messages
