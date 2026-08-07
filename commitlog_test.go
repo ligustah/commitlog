@@ -986,6 +986,20 @@ func setup(t testing.TB) (*commitLog, func()) {
 		Path:            tempDir(t),
 		MaxSegmentBytes: 6,
 		MaxLogBytes:     30,
+		// No background cleaner, so a test that appends past MaxLogBytes above
+		// observes what IT did rather than racing a pass.
+		//
+		// This asserts a property these tests always had rather than changing
+		// one. The loop's first tick was a whole CleanerInterval away — five
+		// minutes, by default — so no test built on this fixture had ever seen an
+		// automatic pass; they were deterministic by accident of the timer. Once
+		// the log began cleaning at open, TestTruncateBeforeNoOp started reading
+		// OldestOffset 3 where it wrote 0, because 5 messages are past
+		// MaxLogBytes and a pass that actually runs is right to trim them.
+		//
+		// Tests that mean to observe cleaning drive it: Clean(), or cleanerTick()
+		// for the loop's own behaviour. None of them get it from here.
+		DisableAutoClean: true,
 	}
 	return setupWithOptions(t, opts)
 }
