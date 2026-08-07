@@ -281,23 +281,8 @@ func openWithRetry(path string) (*os.File, error) {
 	}
 }
 
-// statWithRetry is the same window on the metadata call. A caller that sizes an
-// object and then reads it makes two syscalls against a path a publish can be
-// renaming over, and retrying only the second leaves the first as the one that
-// fails.
-func statWithRetry(path string) (os.FileInfo, error) {
-	deadline := time.Now().Add(readRetryBudget)
-	for {
-		fi, err := os.Stat(path)
-		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
-			return fi, err
-		}
-		time.Sleep(atomicWriteRetryDelay)
-	}
-}
-
 // renameWithRetry is the commit-point half of the same window, and it is a
-// SEPARATE failure from the two above rather than the same one seen from the
+// SEPARATE failure from the open above rather than the same one seen from the
 // other side. A reader holding the destination open makes the rename itself
 // fail — "Access is denied" on Windows — so retrying only the readers moves the
 // error from the reader to the publisher instead of removing it.
@@ -309,6 +294,12 @@ func statWithRetry(path string) (os.FileInfo, error) {
 //
 // A missing source is permanent and returns immediately, matching the rule the
 // read side uses for a missing target.
+//
+// There is deliberately no statWithRetry twin. os.Stat goes through
+// GetFileAttributesEx, which does not open a handle and so is not refused by
+// one — neither the racing test nor a deny-all handle could make Size fail, and
+// guardcheck reported the retry as uncovered because nothing can falsify it. An
+// untestable retry on a call that does not fail is complexity, not safety.
 func renameWithRetry(oldpath, newpath string) error {
 	deadline := time.Now().Add(atomicWriteRetryBudget)
 	for {

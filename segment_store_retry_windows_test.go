@@ -20,9 +20,13 @@ import (
 // open for as long as the test says and removing either retry fails it every
 // time.
 //
-// Both calls are covered because readTierManifest makes both: it sizes the
-// manifest and then reads it, against a path a publish renames over. Retrying
-// only the read leaves Size as the call that fails, one line earlier.
+// Size is asserted here but is NOT retried, and that asymmetry is the finding
+// rather than an oversight. readTierManifest sizes the manifest and then reads
+// it, so symmetry argued for retrying both — but os.Stat goes through
+// GetFileAttributesEx, which does not open a handle and is not refused by one.
+// Neither this deny-all handle nor the racing test could make Size fail, and
+// guardcheck duly reported the statWithRetry it had as uncovered. It was
+// removed. The assertion stays as the record of what does not need it.
 func TestAStoreReadRetriesThroughAHeldObject(t *testing.T) {
 	store, err := NewFileSegmentStore(tempDir(t))
 	require.NoError(t, err)

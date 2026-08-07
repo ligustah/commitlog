@@ -318,7 +318,7 @@ func (s *FileSegmentStore) Size(key string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	fi, err := statWithRetry(path)
+	fi, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return 0, ErrObjectNotFound
 	}

@@ -826,5 +826,4 @@ fi
 # byte-identical to Stream's, and apply_edit refuses an ambiguous match rather
 # than neutralizing whichever it finds first.
 run_guard_windows "store read retries a held object" segment_store.go   $'\tf, err := openWithRetry(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound' $'\tf, err := os.Open(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound'   '^TestAStoreReadRetriesThroughAHeldObject$'
-run_guard_windows "store size retries a held object" segment_store.go   '	fi, err := statWithRetry(path)' '	fi, err := os.Stat(path)'   '^TestAStoreReadRetriesThroughAHeldObject$'
 run_guard_windows "store publish retries a held dest" segment_store.go   '	return renameWithRetry(tmp, path)' '	return os.Rename(tmp, path)'   '^TestAStorePublishRetriesThroughAHeldDestination$'
