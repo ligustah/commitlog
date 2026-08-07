@@ -349,10 +349,16 @@ type Options struct {
 	// process passes the settings it believes the log has and is checked against
 	// what the log says; AdoptOptions would skip exactly that check.
 	AdoptOptions bool
-	// DisableAutoClean stops the internal cleaner loop from running Clean.
-	// Segment splitting (MaxSegmentAge rolls) keeps running. For logs whose
-	// owner drives cleaning explicitly (CleanWithSpec) — an automatic clean
-	// has no transaction awareness and must not race the owner's policy.
+	// DisableAutoClean stops the internal cleaner loop from running Clean. For
+	// logs whose owner drives cleaning explicitly (CleanWithSpec) — an automatic
+	// clean has no transaction awareness and must not race the owner's policy.
+	// Any caller setting CleanSpec.Ceiling must set this; see that field.
+	//
+	// It suppresses cleaning only. Segment splitting (MaxSegmentAge rolls) still
+	// happens on every cleaner tick, because a roll is a size decision and owes
+	// nothing to a transaction. The pass at open is the one exception, and by
+	// construction: it cleans without rolling, so that opening a log cannot move
+	// the active segment under a log that asked for no automatic cleaning.
 	DisableAutoClean bool
 	// CleanRewriteBudget bounds how long ONE automatic pass may spend rewriting
 	// segments. It is what the cleaner loop puts into CleanSpec.RewriteBudget,

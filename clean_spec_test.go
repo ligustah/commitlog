@@ -27,7 +27,10 @@ func specLog(t *testing.T) (*commitLog, func(m *Message) int64) {
 		// The same is true of a real caller: anything supplying a Ceiling is doing
 		// so because the high watermark is the WRONG bound for it — an undecided
 		// record sits above the LSO and below the HW — so it must not also be
-		// running the pass that uses the high watermark.
+		// running the pass that uses the high watermark. CleanWithSpec now refuses
+		// that combination outright, so this is no longer only hygiene: without it
+		// every test here fails at the first clean. See
+		// TestACeilingOnAnAutoCleaningLogIsRefused.
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)
@@ -209,7 +212,9 @@ func TestCleanSpecDecideAndStrip(t *testing.T) {
 // rewritten segments are read back from disk.
 func TestCleanSpecStripSurvivesReopen(t *testing.T) {
 	path := tempDir(t)
-	l, err := New(Options{Path: path, MaxSegmentBytes: 64, Compact: true})
+	l, err := New(Options{
+		Path: path, MaxSegmentBytes: 64, Compact: true, DisableAutoClean: true,
+	})
 	require.NoError(t, err)
 	cl := l.(*commitLog)
 	var offs []int64

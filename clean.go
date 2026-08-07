@@ -194,6 +194,15 @@ type CleanSpec struct {
 	// got the high watermark instead: the one spec that asked for maximum
 	// protection was the one that compacted undecided records, and
 	// TestCleanSpecCeilingAboveUndecidedLosesKey is what that costs.
+	//
+	// Supplying a Ceiling at all obliges the caller to set
+	// Options.DisableAutoClean. The reason is in the sentence above: a ceiling is
+	// worth supplying only when the high watermark is the WRONG bound, and the
+	// high watermark is exactly the bound the automatic pass uses. Leave the
+	// automatic pass on and it compacts, on its own timer and with no knowledge
+	// of any transaction, the very records this ceiling was set to protect. The
+	// spec would be honoured on every pass the caller drives and ignored on every
+	// pass it does not.
 	Ceiling Bound
 	// ceiling is Ceiling resolved against the log's high watermark. clean() sets
 	// it and the compaction pass reads only it, so no code below this line has
@@ -320,6 +329,21 @@ func (l *commitLog) Clean() error {
 // offloads whatever LocalRetentionAge now puts past the local horizon. See the
 // interface doc for the returned verified floor.
 func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
+	// A Ceiling on a log that still cleans automatically is refused rather than
+	// documented, because the two settings do not merely disagree — the second
+	// silently undoes the first. The pass this call drives protects everything at
+	// or above the ceiling; the automatic pass has no spec, bounds itself at the
+	// high watermark, and compacts exactly those records on its own timer. The
+	// caller would see its ceiling honoured on every pass it drives and ignored
+	// on every pass it does not, which is indistinguishable from working until an
+	// undecided record goes missing.
+	if _, ok := spec.Ceiling.Get(); ok && !l.DisableAutoClean {
+		return 0, errors.New(
+			"commitlog: CleanWithSpec was given a CleanSpec.Ceiling on a log whose " +
+				"automatic cleaner is running, and the automatic pass would compact " +
+				"the records the ceiling protects; set Options.DisableAutoClean")
+	}
+
 	verified, err := l.cleanPass(spec)
 	// AFTER the pass, and outside it, for a reason that is not stylistic:
 	// cleanPass holds cleanMu for its whole body and OffloadBefore takes cleanMu

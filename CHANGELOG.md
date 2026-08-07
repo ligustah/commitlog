@@ -5,6 +5,37 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed
+
+- **`CleanWithSpec` now refuses a `CleanSpec.Ceiling` on a log whose automatic
+  cleaner is still running.** The two settings do not merely disagree — the
+  second silently undoes the first. A ceiling protects the records at or above
+  it because they may be undecided; the automatic pass is spec-less, bounds
+  itself at the high watermark, and compacts exactly those records on its own
+  timer. The ceiling was honoured on every pass the caller drove and ignored on
+  every pass it did not, which is indistinguishable from working until an
+  undecided record goes missing. Callers supplying a `Ceiling` must set
+  `Options.DisableAutoClean`; the error says so by name.
+
+  This was previously only documented, on `DisableAutoClean` — the field you
+  read if you already know to look, rather than `Ceiling`, the field such a
+  caller is actually setting. `Ceiling` now cross-references it too.
+
+  The hazard is not hypothetical. It is what v0.60.1's clean-at-open change
+  surfaced: two tests in this package drove `CleanWithSpec` with a ceiling over
+  a spec-less pass and had been passing only because the automatic pass never
+  once fired before their assertions. Every caller outside the repo had the
+  same latent misconfiguration available. A `Ceiling` of `At(0)` is refused
+  along with the rest — it is the narrowest bound there is, not an absent one.
+
+- **`DisableAutoClean`'s doc no longer claims segment splitting is unaffected
+  without qualification.** Splitting does still happen on every cleaner tick,
+  but the pass at open added in v0.60.1 deliberately cleans without rolling, so
+  that opening a log cannot move the active segment under a log that asked for
+  no automatic cleaning.
+
 ## v0.60.1 — 2026-08-07
 
 ### Fixed
