@@ -231,7 +231,14 @@ func TestCleanSpecStripSurvivesReopen(t *testing.T) {
 	}))
 	require.NoError(t, cl.Close())
 
-	l2, err := New(Options{Path: path, MaxSegmentBytes: 64, Compact: true})
+	// No automatic cleaner on the reopen either. The claim is that the STRIP
+	// survives being reopened, so the reopened log must not be running a
+	// spec-less pass of its own while readAllMsgs walks it — that would be a
+	// second compactor deciding what this test sees, bounded by the high
+	// watermark rather than by the spec above.
+	l2, err := New(Options{
+		Path: path, MaxSegmentBytes: 64, Compact: true, DisableAutoClean: true,
+	})
 	require.NoError(t, err)
 	defer l2.Close()
 	got := readAllMsgs(t, l2.(*commitLog))
