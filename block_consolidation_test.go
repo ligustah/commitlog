@@ -100,9 +100,10 @@ func TestCleanConsolidatesTinyBlocks(t *testing.T) {
 // soak runs 23/24 lost their abort watermark and diverged).
 func TestCleanVerifiedFloor(t *testing.T) {
 	opts := Options{
-		Path:            tempDir(t),
-		MaxSegmentBytes: 4 << 10,
-		Compact:         true,
+		Path:             tempDir(t),
+		MaxSegmentBytes:  4 << 10,
+		Compact:          true,
+		DisableAutoClean: true, // drives a Ceiling: no spec-less pass underneath
 	}
 	l, cleanup := setupWithOptions(t, opts)
 	defer cleanup()
@@ -223,10 +224,11 @@ func TestConsolidationVetoOnBatchShape(t *testing.T) {
 // short-lived process pay down a large debt.
 func TestIncrementalCleanBudget(t *testing.T) {
 	opts := Options{
-		Path:            tempDir(t),
-		MaxSegmentBytes: 256 << 10,
-		Compact:         true,
-		Compression:     compress.Zstd,
+		Path:             tempDir(t),
+		MaxSegmentBytes:  256 << 10,
+		Compact:          true,
+		Compression:      compress.Zstd,
+		DisableAutoClean: true, // drives a Ceiling: no spec-less pass underneath
 	}
 	l, cleanup := setupWithOptions(t, opts)
 	defer cleanup()
@@ -343,10 +345,11 @@ func TestConsolidationOnlyPassForNonCompactedLog(t *testing.T) {
 // their own cache; the segments' stay cold until a real reader arrives.
 func TestCleanScansLeaveSegmentCachesCold(t *testing.T) {
 	opts := Options{
-		Path:            tempDir(t),
-		MaxSegmentBytes: 64 << 10,
-		Compact:         true,
-		Compression:     compress.Zstd,
+		Path:             tempDir(t),
+		MaxSegmentBytes:  64 << 10,
+		Compact:          true,
+		Compression:      compress.Zstd,
+		DisableAutoClean: true, // drives a Ceiling: no spec-less pass underneath
 	}
 	l, cleanup := setupWithOptions(t, opts)
 	defer cleanup()
