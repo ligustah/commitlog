@@ -4,6 +4,13 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Lets a run be aimed at any ref, which on 2026-08-06 there was no way to do.
+  # Actions was down for the whole afternoon and came back without ever creating
+  # a run for the release commit; tags do not match the branches filter above, so
+  # the tagged tree could not be tested at all except by pushing a LATER commit
+  # and arguing that a superset passing covers it. This makes "run CI on
+  # v0.59.0" a thing that can simply be done.
+  workflow_dispatch:
 
 permissions:
   contents: read
