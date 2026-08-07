@@ -23,12 +23,22 @@ library from that fork onward.
   read if you already know to look, rather than `Ceiling`, the field such a
   caller is actually setting. `Ceiling` now cross-references it too.
 
-  The hazard is not hypothetical. It is what v0.60.1's clean-at-open change
-  surfaced: two tests in this package drove `CleanWithSpec` with a ceiling over
-  a spec-less pass and had been passing only because the automatic pass never
-  once fired before their assertions. Every caller outside the repo had the
-  same latent misconfiguration available. A `Ceiling` of `At(0)` is refused
-  along with the rest — it is the narrowest bound there is, not an absent one.
+  The hazard is not hypothetical, and this repo was one of the callers. Two
+  such fixtures surfaced when v0.60.1 made the log clean at open; turning the
+  rule into a refusal immediately found four more — `TestCleanVerifiedFloor`,
+  `TestIncrementalCleanBudget`, `TestCleanScansLeaveSegmentCachesCold`, and the
+  original open of `TestCleanSpecStripSurvivesReopen`, whose reopen had been
+  fixed the day before and whose open had not. All six drove a ceiling over a
+  live spec-less pass and asserted on exactly which records survived; all six
+  were green, because the automatic pass had never once fired before their
+  assertions. Nothing was red about any of it. Every caller outside the repo
+  had the same latent misconfiguration available.
+
+  A `Ceiling` of `At(0)` is refused along with the rest. It is the narrowest
+  bound there is and precisely what a caller whose oldest open transaction
+  begins at offset 0 must pass, so the check tests whether a bound was
+  *supplied*, not whether its offset is nonzero — guarding on the value would
+  wave through the one caller that needs the ceiling most.
 
 - **`DisableAutoClean`'s doc no longer claims segment splitting is unaffected
   without qualification.** Splitting does still happen on every cleaner tick,
