@@ -564,7 +564,9 @@ run_guard "a copied manifest is published last" copy_tier.go   '	if err := copyT
 # "the read retry spends its whole budget" below -- a deny-all handle is Windows
 # only and this check runs on Linux, so that guard uses a directory instead,
 # which is unreadable everywhere.
-run_guard "a missing file is not retried" util.go   '		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {'   '		if err == nil || time.Now().After(deadline) {'   '^TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound$'
+run_guard "a missing file is not retried" util.go   $'		b, err := os.ReadFile(path)
+		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {'   $'		b, err := os.ReadFile(path)
+		if err == nil || time.Now().After(deadline) {'   '^TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound$'
 
 # The three timestamp-lookup guards below all need a clock COARSER than the
 # append rate, so that a run of records shares one instant. Every test that
@@ -616,7 +618,9 @@ run_guard "a ceiling of zero is not unset" clean.go   '	if !b.set {
 # not on how many times it is asked. The neutralization shortens the budget
 # without changing its shape, which is the bug it had: a 500ms ceiling nothing
 # named, that lost 2 of 86 daemon restarts on a loaded box.
-run_guard "the read retry spends its whole budget" util.go   '	deadline := time.Now().Add(readRetryBudget)'   '	deadline := time.Now().Add(readRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
+run_guard "the read retry spends its whole budget" util.go   $'func ReadFileWithRetry(path string) ([]byte, error) {
+	deadline := time.Now().Add(readRetryBudget)'   $'func ReadFileWithRetry(path string) ([]byte, error) {
+	deadline := time.Now().Add(readRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
 
 # Opening an offloaded tier reads NOTHING the manifest names -- not the log
 # objects, not the block tables. The manifest entry carries blockMode, position
