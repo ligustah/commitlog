@@ -779,6 +779,11 @@ run_guard "a block payload must be in the file" inspect.go   '		if end := start 
 # for the reason it is about.
 run_guard "a magic with no version is refused" inspect.go   '		if hdr[0] == blockMagic {' '		if false {'   '^TestClassifySegmentRefusesAMagicWithNoVersion$'
 
+# Neutralized to a reference rather than a deletion so the method stays used and
+# the package still builds: what must fail is the ASSERTION that a reopened log
+# reclaims bytes, not the compile.
+run_guard "a log cleans at open" clean.go   '	l.cleanAtOpen()' '	_ = l.cleanAtOpen'   '^TestALogCleansAtOpenWithoutWaitingForATick$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
