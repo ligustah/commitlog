@@ -16,6 +16,19 @@ func specLog(t *testing.T) (*commitLog, func(m *Message) int64) {
 		Path:            tempDir(t),
 		MaxSegmentBytes: 64, // roll constantly: every message a sealed segment
 		Compact:         true,
+		// Every test here drives CleanWithSpec and asserts exactly which records
+		// survive. The automatic pass is SPEC-LESS — it takes its ceiling from the
+		// high watermark — so leaving it on means a second, differently-bounded
+		// compactor operating on the same log between the assertions, which is the
+		// one thing these tests cannot tolerate. It compacted the record
+		// TestACeilingBelowEveryOffsetIsLegitimate had just required to survive a
+		// ceiling below every offset.
+		//
+		// The same is true of a real caller: anything supplying a Ceiling is doing
+		// so because the high watermark is the WRONG bound for it — an undecided
+		// record sits above the LSO and below the HW — so it must not also be
+		// running the pass that uses the high watermark.
+		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)
 	app := func(m *Message) int64 {

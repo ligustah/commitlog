@@ -69,6 +69,13 @@ func (l *commitLog) cleanerLoop() {
 // publishes the log descriptor to the store on its own, so a process that does
 // not own its tier has to say so through Options.TierReadOnly rather than
 // afterwards. This widens an existing requirement, it does not add one.
+// It runs the CLEAN only, and deliberately not a tick. cleanerTick rolls the
+// active segment before it cleans, and it does that ahead of the
+// DisableAutoClean check — so calling a whole tick here rolled a segment at
+// open, on a schedule nobody asked for and even on logs that had switched the
+// automatic cleaner off. TestCleaner read two segments where it had written one.
+// Rolling is the periodic tick's business; the bug being fixed here is that the
+// log never CLEANED, so that is all this does.
 func (l *commitLog) cleanAtOpen() {
 	// A log closed before this goroutine was scheduled has nothing to clean, and
 	// Close is already waiting on bgWG for it.
@@ -77,7 +84,7 @@ func (l *commitLog) cleanAtOpen() {
 		return
 	default:
 	}
-	l.cleanerTick()
+	l.cleanOnce()
 }
 
 // cleanerTick is one pass of the cleaner loop: roll the active segment if it is
@@ -115,6 +122,13 @@ func (l *commitLog) cleanerTick() {
 	// tick and never cleaned at all. Reported by durable_streams from a 5.5h
 	// soak — a 4.5GB compacted log, 336 segments, 239 live keys, zero rewrites,
 	// ~66 consecutive ticks that each rolled and went home.
+	l.cleanOnce()
+}
+
+// cleanOnce is the cleaning half of a tick, without the roll. Shared with
+// cleanAtOpen so that the two cannot disagree about what DisableAutoClean
+// suppresses.
+func (l *commitLog) cleanOnce() {
 	if l.DisableAutoClean {
 		return
 	}
