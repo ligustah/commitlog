@@ -81,23 +81,31 @@ func TestATickThatRollsASegmentStillCleans(t *testing.T) {
 			"on a log whose every record but the newest is superseded", before)
 }
 
-// The automatic pass is bounded, and a caller can turn that off.
-//
-// The budget existed and the spec-less path could not reach it: CleanSpec has
-// RewriteBudget, Clean() built an empty spec, and the cleaner goroutine is the
-// only caller of Clean(). So the one pass nobody drives by hand was the one pass
-// that could run for as long as it liked — 6m42s against a 5m interval, on the
-// log this came from.
 // segmentBytes is what the log currently occupies on disk, which is the only
 // thing a caller who wanted compaction actually cares about.
-func segmentBytes(t *testing.T, dir string) int64 {
-	t.Helper()
-	logs, err := filepath.Glob(filepath.Join(dir, "*"+logFileSuffix))
-	require.NoError(t, err)
+//
+// It takes no *testing.T and tolerates a segment vanishing between the glob and
+// the stat, because its second caller polls it inside require.Eventually WHILE
+// the cleaner is unlinking the segments it supersedes. A require in here runs on
+// Eventually's condition goroutine: the vanished file calls FailNow, that
+// goroutine exits without ever returning true, and the test then fails thirty
+// seconds later as "condition never satisfied" — an error message accusing the
+// cleaner of not cleaning, produced by the cleaner cleaning.
+//
+// That is what Windows CI reported for v0.60.1 while the same test passed on
+// every local Windows and Linux run: the race needs the stat to land in the
+// window between the directory read and the unlink, and a loaded runner widens
+// it. Skipping the missing file is also the honest measurement — a segment that
+// has been unlinked occupies nothing.
+func segmentBytes(dir string) int64 {
+	// The only error Glob returns is ErrBadPattern, and the pattern is a literal.
+	logs, _ := filepath.Glob(filepath.Join(dir, "*"+logFileSuffix))
 	var total int64
 	for _, p := range logs {
 		fi, serr := os.Stat(p)
-		require.NoError(t, serr)
+		if serr != nil {
+			continue
+		}
 		total += fi.Size()
 	}
 	return total
@@ -151,7 +159,7 @@ func TestALogCleansAtOpenWithoutWaitingForATick(t *testing.T) {
 	cl.SetHighWatermark(cl.NewestOffset())
 	require.NoError(t, cl.Close())
 
-	before := segmentBytes(t, dir)
+	before := segmentBytes(dir)
 	require.Positive(t, before, "the fixture wrote nothing, so nothing could be reclaimed")
 
 	// Reopen with the cleaner live. Its first tick is an hour away.
@@ -162,13 +170,20 @@ func TestALogCleansAtOpenWithoutWaitingForATick(t *testing.T) {
 	t.Cleanup(func() { l2.Close() })
 
 	require.Eventually(t, func() bool {
-		return segmentBytes(t, dir) < before
+		return segmentBytes(dir) < before
 	}, 30*time.Second, 50*time.Millisecond,
 		"the log still occupies %d bytes after reopening; the cleaner is waiting "+
 			"out a %s interval and a process that restarts sooner than that will "+
 			"never clean at all", before, reopen.CleanerInterval)
 }
 
+// The automatic pass is bounded, and a caller can turn that off.
+//
+// The budget existed and the spec-less path could not reach it: CleanSpec has
+// RewriteBudget, Clean() built an empty spec, and the cleaner goroutine is the
+// only caller of Clean(). So the one pass nobody drives by hand was the one pass
+// that could run for as long as it liked — 6m42s against a 5m interval, on the
+// log this came from.
 func TestTheAutomaticCleanIsBounded(t *testing.T) {
 	open := func(o Options) *commitLog {
 		o.Name, o.Path = "budget", tempDir(t)
