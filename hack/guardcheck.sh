@@ -783,6 +783,7 @@ run_guard "a magic with no version is refused" inspect.go   '		if hdr[0] == bloc
 # the package still builds: what must fail is the ASSERTION that a reopened log
 # reclaims bytes, not the compile.
 run_guard "a log cleans at open" clean.go   '	l.cleanAtOpen()' '	_ = l.cleanAtOpen'   '^TestALogCleansAtOpenWithoutWaitingForATick$'
+run_guard "a ceiling needs the auto cleaner off" clean.go   '	if _, ok := spec.Ceiling.Get(); ok && !l.DisableAutoClean {' '	if false {'   '^TestACeilingOnAnAutoCleaningLogIsRefused$'
 
 echo
 if [ "$failures" -ne 0 ]; then
