@@ -17,6 +17,8 @@ import (
 )
 
 func (l *commitLog) cleanerLoop() {
+	l.cleanAtOpen()
+
 	ticker := time.NewTicker(l.CleanerInterval)
 	defer ticker.Stop()
 	for {
@@ -27,6 +29,55 @@ func (l *commitLog) cleanerLoop() {
 		}
 		l.cleanerTick()
 	}
+}
+
+// cleanAtOpen runs one cleaner pass before the loop ever waits on its ticker.
+//
+// NewTicker does not fire until t+interval, and nothing on disk records when
+// the last pass ran — so the loop above waited a whole CleanerInterval before
+// its first pass, and the clock started over on every process start. A process
+// that lives less than the interval therefore never cleaned at all. Not rarely,
+// not late: never, for the life of the deployment, however much there was to
+// reclaim. sqlcdc measured it — 149 restarts averaging 95.9s against a 5m
+// interval, zero passes in four hours, and the single pass that did once fire
+// reclaimed 69%.
+//
+// This is the same defect as the rolling tick below, one level out: there the
+// pass worked and the loop skipped it, here the pass works and the loop never
+// reaches it. Both hid because every compaction test called Clean() directly,
+// which is the one path production does not take.
+//
+// Cleaning at open rather than persisting a last-clean timestamp, on purpose. A
+// timestamp is a new durable file, a new parse, and a new way to be wrong about
+// time — and the epoch checkpoint already shows what an unchecksummed sidecar
+// costs. The price of the simpler answer is that a restart storm runs a pass per
+// start rather than one per interval, and that is already bounded:
+// CleanRewriteBudget exists precisely so a pass fits inside a short-lived
+// process's kill window. The design anticipated short-lived processes; it just
+// never started a pass in one.
+//
+// Nothing about startup latency changes. This runs on the background goroutine
+// New has already returned from, so a caller is not made to wait for a
+// compaction pass in order to open a log.
+//
+// The open pass reads a HIGH WATERMARK that open() has already restored (see the
+// hwFileName branch there) — without that this would be a pass that cannot
+// compact anything, and the fix would be decorative.
+//
+// It does narrow the gap between New returning and a caller calling
+// SetTierReadOnly. That gap is not new and is already closed the right way: New
+// publishes the log descriptor to the store on its own, so a process that does
+// not own its tier has to say so through Options.TierReadOnly rather than
+// afterwards. This widens an existing requirement, it does not add one.
+func (l *commitLog) cleanAtOpen() {
+	// A log closed before this goroutine was scheduled has nothing to clean, and
+	// Close is already waiting on bgWG for it.
+	select {
+	case <-l.closed:
+		return
+	default:
+	}
+	l.cleanerTick()
 }
 
 // cleanerTick is one pass of the cleaner loop: roll the active segment if it is

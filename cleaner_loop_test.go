@@ -2,6 +2,8 @@ package commitlog
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -86,6 +88,87 @@ func TestATickThatRollsASegmentStillCleans(t *testing.T) {
 // only caller of Clean(). So the one pass nobody drives by hand was the one pass
 // that could run for as long as it liked — 6m42s against a 5m interval, on the
 // log this came from.
+// segmentBytes is what the log currently occupies on disk, which is the only
+// thing a caller who wanted compaction actually cares about.
+func segmentBytes(t *testing.T, dir string) int64 {
+	t.Helper()
+	logs, err := filepath.Glob(filepath.Join(dir, "*"+logFileSuffix))
+	require.NoError(t, err)
+	var total int64
+	for _, p := range logs {
+		fi, serr := os.Stat(p)
+		require.NoError(t, serr)
+		total += fi.Size()
+	}
+	return total
+}
+
+// A log cleans at OPEN, without waiting out an interval first.
+//
+// NewTicker does not fire until t+interval and nothing on disk records when the
+// last pass ran, so the loop waited a full CleanerInterval before its first pass
+// and the clock restarted on every process start. A process that lives less than
+// the interval never cleaned AT ALL — not rarely, never, however much there was
+// to reclaim. sqlcdc measured it: 149 restarts averaging 95.9s against a 5m
+// interval, zero passes in four hours, and the one pass that did fire reclaimed
+// 69%.
+//
+// Written as a REOPEN because that is the shape of the bug. The data is already
+// on disk from a previous run and the question is whether the process that
+// inherits it ever acts on it; a test that opened an empty log and appended
+// would be asking something else. CleanerInterval is an hour, so the open pass
+// is the only thing that can possibly be what cleaned.
+//
+// Note the fixture is built with DisableAutoClean and the assertion made after
+// reopening WITHOUT it. That is deliberate: it means the "before" measurement is
+// of a log nothing has cleaned, so the drop cannot be work that had already
+// happened.
+func TestALogCleansAtOpenWithoutWaitingForATick(t *testing.T) {
+	dir := tempDir(t)
+	build := Options{
+		Name: "reopen", Path: dir, Compact: true,
+		MaxSegmentBytes:  4 << 10,
+		CleanerInterval:  time.Hour,
+		DisableAutoClean: true,
+	}
+
+	l, err := New(build)
+	require.NoError(t, err)
+	cl := l.(*commitLog)
+	// One key, rewritten: everything but the newest record is superseded, so a
+	// pass that runs has a great deal to reclaim and a pass that never runs
+	// leaves every byte where it is.
+	for i := 0; i < 40; i++ {
+		batch := make([]*Message, 0, 50)
+		for j := 0; j < 50; j++ {
+			batch = append(batch, &Message{
+				Key: []byte("k"), Value: []byte(fmt.Sprintf("v:%08d", i*50+j)),
+			})
+		}
+		_, aerr := cl.Append(batch)
+		require.NoError(t, aerr)
+	}
+	cl.SetHighWatermark(cl.NewestOffset())
+	require.NoError(t, cl.Close())
+
+	before := segmentBytes(t, dir)
+	require.Positive(t, before, "the fixture wrote nothing, so nothing could be reclaimed")
+
+	// Reopen with the cleaner live. Its first tick is an hour away.
+	reopen := build
+	reopen.DisableAutoClean = false
+	l2, err := New(reopen)
+	require.NoError(t, err)
+	t.Cleanup(func() { l2.Close() })
+
+	require.Eventually(t, func() bool {
+		return segmentBytes(t, dir) < before
+	}, 30*time.Second, 50*time.Millisecond,
+		"the log still occupies %d bytes after reopening; the cleaner is waiting "+
+			"out a %s interval and a process that restarts sooner than that will "+
+			"never clean at all", before, reopen.CleanerInterval)
+}
+
 func TestTheAutomaticCleanIsBounded(t *testing.T) {
 	open := func(o Options) *commitLog {
 		o.Name, o.Path = "budget", tempDir(t)

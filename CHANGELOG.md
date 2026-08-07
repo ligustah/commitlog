@@ -5,6 +5,36 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A log whose process restarts more often than `CleanerInterval` never cleaned
+  at all.** `time.NewTicker` does not fire until `t+interval`, and nothing on
+  disk records when the last pass ran — so `cleanerLoop` waited a full interval
+  before its first pass and the clock started over on every process start. A
+  process that lives less than the interval never reached a tick. Not rarely, not
+  late: never, for the life of the deployment, however much there was to reclaim.
+
+  Reported by sqlcdc from a soak — 149 restarts averaging 95.9s against a 5m
+  interval, zero passes in four hours, and the one pass that did once fire
+  reclaimed 69%.
+
+  This is the rolling-tick bug of v0.51.0 one level out: there the pass worked
+  and the loop skipped it, here the pass works and the loop never reaches it.
+  Both survived for the reason `cleanerTick`'s comment already gave — every
+  compaction test called `Clean()` directly, which is the one path production
+  does not take. The new test drives neither `Clean` nor a tick: it reopens a log
+  with an hour-long interval and requires the bytes on disk to drop.
+
+  Fixed by cleaning once at open rather than by persisting a last-clean
+  timestamp. A timestamp is a new durable file, a new parse and a new way to be
+  wrong about time; the price of the simpler answer is that a restart storm runs
+  a pass per start, which `CleanRewriteBudget` already bounds — it exists so a
+  pass fits inside a short-lived process's kill window. Startup latency is
+  unchanged: the pass runs on the background goroutine `New` has already returned
+  from. Registered as guard 59.
+
 ## v0.60.0 — 2026-08-07
 
 ### Added
