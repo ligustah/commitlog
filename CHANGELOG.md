@@ -5,6 +5,21 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.61.2 — 2026-08-07
+
+### Fixed
+
+- **`hack/guardcheck.sh`: two guard anchors stopped identifying one place.**
+  v0.61.1's `openWithRetry` and `renameWithRetry` copy `ReadFileWithRetry`'s
+  loop shape, so the missing-file early return and the `readRetryBudget`
+  deadline each appeared in more than one function. `apply_edit` refuses an
+  ambiguous match rather than neutralizing whichever it finds first, so both
+  guards reported SKIP and the ubuntu guard-coverage job failed. Both are now
+  narrowed to `ReadFileWithRetry` with multi-line anchors.
+
+  No library code changed between v0.61.1 and this release. Tagged so that a
+  released version exists whose CI is green at its own commit.
+
 ## v0.61.1 — 2026-08-07
 
 ### Fixed
