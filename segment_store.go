@@ -271,8 +271,9 @@ func (s *FileSegmentStore) Put(key string, r io.Reader, size int64) error {
 		return err
 	}
 	// Rename is the commit point: an offloaded object is either fully present or
-	// absent, never half-written.
-	return os.Rename(tmp, path)
+	// absent, never half-written. It retries because on Windows a reader holding
+	// the DESTINATION open makes the rename fail outright; see renameWithRetry.
+	return renameWithRetry(tmp, path)
 }
 
 func (s *FileSegmentStore) ReadAt(key string, p []byte, off int64) (int, error) {
@@ -280,7 +281,7 @@ func (s *FileSegmentStore) ReadAt(key string, p []byte, off int64) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	f, err := os.Open(path)
+	f, err := openWithRetry(path)
 	if os.IsNotExist(err) {
 		return 0, ErrObjectNotFound
 	}
@@ -296,7 +297,7 @@ func (s *FileSegmentStore) Stream(key string, off int64) (io.ReadCloser, error) 
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(path)
+	f, err := openWithRetry(path)
 	if os.IsNotExist(err) {
 		return nil, ErrObjectNotFound
 	}
@@ -317,7 +318,7 @@ func (s *FileSegmentStore) Size(key string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	fi, err := os.Stat(path)
+	fi, err := statWithRetry(path)
 	if os.IsNotExist(err) {
 		return 0, ErrObjectNotFound
 	}

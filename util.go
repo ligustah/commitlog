@@ -255,6 +255,71 @@ var (
 // the write side — the errors that are permanent cost one bounded wait, once, at
 // startup, and the ones that are not are the reason this exists.
 //
+// openWithRetry is to os.Open what ReadFileWithRetry is to os.ReadFile, and
+// exists because a segment store's objects are too large to want in memory: the
+// whole-file helper is the wrong shape for reading one range out of a segment,
+// so the retry has to sit on the open instead.
+//
+// The window it covers is not only the killed-process one described above.
+// FileSegmentStore.writeObject commits by renaming a temp file over the object
+// path, so a reader opening that same path DURING a publish loses the race the
+// same way, on a machine where nothing has crashed. A log opening while its
+// manifest is republished is exactly that, and the read it does is of its own
+// metadata — so losing the race failed the whole open().
+//
+// Same rule as the twin: a MISSING file returns immediately, because absent is a
+// legitimate state a caller distinguishes (ErrObjectNotFound) and locked is a
+// race worth waiting out.
+func openWithRetry(path string) (*os.File, error) {
+	deadline := time.Now().Add(readRetryBudget)
+	for {
+		f, err := os.Open(path)
+		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
+			return f, err
+		}
+		time.Sleep(atomicWriteRetryDelay)
+	}
+}
+
+// statWithRetry is the same window on the metadata call. A caller that sizes an
+// object and then reads it makes two syscalls against a path a publish can be
+// renaming over, and retrying only the second leaves the first as the one that
+// fails.
+func statWithRetry(path string) (os.FileInfo, error) {
+	deadline := time.Now().Add(readRetryBudget)
+	for {
+		fi, err := os.Stat(path)
+		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
+			return fi, err
+		}
+		time.Sleep(atomicWriteRetryDelay)
+	}
+}
+
+// renameWithRetry is the commit-point half of the same window, and it is a
+// SEPARATE failure from the two above rather than the same one seen from the
+// other side. A reader holding the destination open makes the rename itself
+// fail — "Access is denied" on Windows — so retrying only the readers moves the
+// error from the reader to the publisher instead of removing it.
+//
+// AtomicWriteFileWithRetry already covers this for small files, and cannot be
+// used here: it buffers the whole payload to be able to retry the write, and the
+// payloads on this path are segments. Only the commit needs retrying, because
+// the temp file is already complete by the time the rename runs.
+//
+// A missing source is permanent and returns immediately, matching the rule the
+// read side uses for a missing target.
+func renameWithRetry(oldpath, newpath string) error {
+	deadline := time.Now().Add(atomicWriteRetryBudget)
+	for {
+		err := os.Rename(oldpath, newpath)
+		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(atomicWriteRetryDelay)
+	}
+}
+
 // Exported alongside AtomicWriteFileWithRetry for callers that read the same
 // kinds of small files next to a log.
 func ReadFileWithRetry(path string) ([]byte, error) {
