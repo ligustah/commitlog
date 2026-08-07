@@ -5,6 +5,45 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A store object could not be read while it was being republished, on
+  Windows.** `FileSegmentStore.Put` commits by renaming a temp file over the
+  object path, and the read side opened that path with a bare `os.Open`. On
+  Windows an open during that rename fails outright — "The process cannot
+  access the file because it is being used by another process" — rather than
+  succeeding or reporting the file missing. `readTierManifest` runs inside
+  `open()`, so losing the race did not degrade a read: it failed the whole log
+  open. Not a crash-recovery window and not a corrupted store, an ordinary
+  manifest publish on a healthy machine. `ReadFileWithRetry` already existed for
+  the killed-process form of this and is the wrong shape here — it buffers whole
+  files, and these objects are segments — so `ReadAt` and `Stream` now go
+  through an `openWithRetry` twin that retries the open instead.
+
+- **The same window failed the publisher.** A reader holding the destination
+  open makes the rename itself fail with "Access is denied", so retrying only
+  the readers moved the error to the publisher rather than removing it. The
+  commit point now retries. Only the commit needs it: the temp file is already
+  complete by the time the rename runs.
+
+- **`TestALogCleansAtOpenWithoutWaitingForATick` could fail for the opposite of
+  the reason it reported.** Its size probe stat'd files the cleaner was
+  unlinking, using `require` inside a `require.Eventually` condition — so a
+  vanished file called `FailNow` on Eventually's goroutine, the condition could
+  never return true, and thirty seconds later the test blamed the cleaner for
+  not cleaning. Both messages in the CI log were one cause. Test-only.
+
+### Notes
+
+- No `statWithRetry` was added alongside the two above, though symmetry argued
+  for one: `os.Stat` goes through `GetFileAttributesEx`, which does not open a
+  handle and is not refused by one. Neither a racing publisher nor a deliberate
+  deny-all handle could make `Size` fail, and guardcheck reported the retry as
+  uncovered because nothing could falsify it. It was withdrawn rather than kept
+  for tidiness.
+
 ## v0.61.0 — 2026-08-07
 
 ### Changed
