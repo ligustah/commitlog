@@ -805,6 +805,14 @@ run_guard_windows "store publish retries a held dest" segment_store.go   '	retur
 # and the loop variable is still referenced by the body it no longer reaches.
 run_guard "a manifest entry names its tier" manifest.go   '		if o.Tier == "" {' '		if false {'   '^TestAManifestEntryWithNoTierIsRefused$'
 
+# A block-compressed offloaded segment has THREE objects. The orphan sweep
+# builds its live set twice over — from the manifest and from the log's own
+# segments — and both halves named the log and the index only, so neither could
+# cover for the other. Guarded separately for that reason: each half is
+# removable on its own and the other does not notice.
+run_guard "a manifest block table is live" tier_state.go   '			if o.BlocksKey != "" {' '			if false {'   '^TestABlockTableIsNotGarbage$'
+run_guard "a segment block table is live" tier_state.go   '		if s.blocksKey != "" {' '		if false {'   '^TestABlockTableTheLogIsReadingIsNotGarbage$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

@@ -35,6 +35,25 @@ library from that fork onward.
 
 ### Fixed
 
+- **The orphan sweep reported every live block table as garbage.**
+  `UnreferencedObjects` built its live set from the manifest's `LogKey` and
+  `IndexKey` and from each segment's `storeKey` and `indexKey`. A
+  block-compressed offloaded segment has a THIRD object — its block table,
+  under `BlocksKey` — and nothing named it, so the sweep listed it, and the
+  documented use of this call is to hand its result straight to
+  `DeleteStoreObjects`.
+
+  Deleting one corrupts nothing; it removes the only copy of the map from
+  logical offsets to compressed blocks. The local table goes with the local
+  file at offload — deliberately, since it describes bytes that no longer
+  exist — so the segment cannot rebuild it and every read of it fails at "size
+  block table". The bytes stay intact and become unreachable.
+
+  Both halves of the live set had the hole, so neither could cover for the
+  other. Both are fixed and guarded separately. It went unseen because the
+  tiered test fixture writes raw segments, so no test had ever put a block
+  table in a store and asked the sweep about it.
+
 - **`hack/guardcheck.sh`: two guards ran after the summary that reports them.**
   The store read/publish retry guards were appended below the block that prints
   the totals and exits, so on Windows they ran with nothing left to report to —

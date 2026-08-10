@@ -301,6 +301,14 @@ func (l *commitLog) UnreferencedObjects() ([]string, error) {
 			if o.IndexKey != "" {
 				referenced[o.IndexKey] = true
 			}
+			// A block-compressed segment has three objects, not two. Its table is
+			// the map from logical offsets to compressed blocks, and the local one
+			// went with the local file at offload — deliberately, since it
+			// describes bytes that no longer exist. So a table collected here is
+			// not rebuildable: the log bytes stay intact and stop being readable.
+			if o.BlocksKey != "" {
+				referenced[o.BlocksKey] = true
+			}
 		}
 	} else {
 		// Refuse rather than under-report. A manifest that exists but cannot be
@@ -316,6 +324,9 @@ func (l *commitLog) UnreferencedObjects() ([]string, error) {
 		}
 		if s.indexKey != "" {
 			referenced[s.indexKey] = true
+		}
+		if s.blocksKey != "" {
+			referenced[s.blocksKey] = true
 		}
 		s.RUnlock()
 	}
