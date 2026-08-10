@@ -1879,9 +1879,17 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 	return newSegment(path, baseOffset, maxBytes, false, suffix, codec)
 }
 
-// ReplaceOffloaded installs fresh — a fully-written LOCAL working segment — as
+// uploadReplacement installs fresh — a fully-written LOCAL working segment — as
 // the current objects of this offloaded segment, and returns the object keys the
-// rewrite superseded.
+// rewrite superseded. It is the FIRST of two halves; swapReplacement is the
+// second, and step 2 below is what has to happen between them.
+//
+// The pair had a single name, ReplaceOffloaded, before the manifest publish was
+// lifted out into the caller. That name survived in this doc and in two comments
+// elsewhere long after it stopped existing, and it reached a consumer: the
+// multi-store request from durable_streams on 2026-08-10 cited ReplaceOffloaded
+// as the evidence a rewrite of an offloaded segment works. The behaviour it
+// named is real; the symbol was not.
 //
 // This is what lets a tiered segment be compacted at all. A local rewrite gets
 // its atomicity from Replace's rename over the same path; a store has no
@@ -1991,9 +1999,9 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 	return meta, superseded, nil
 }
 
-// swapReplacement is the second half of ReplaceOffloaded: the caller has
-// published a manifest naming meta's objects, so the segment stops serving the
-// object it superseded and starts serving the new one.
+// swapReplacement is the second half of the rewrite uploadReplacement starts:
+// the caller has published a manifest naming meta's objects, so the segment
+// stops serving the object it superseded and starts serving the new one.
 //
 // Everything here is post-commit. Nothing it does can be undone by failing, and
 // nothing before it has changed what a reader sees.

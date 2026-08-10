@@ -207,7 +207,7 @@ func (l *commitLog) drainReclaim() {
 	// it: for a SUPERSEDED backing, refs can only fall.
 	//
 	// A reader takes a backing in exactly one place — acquireBacking, called only
-	// by newSegmentScannerCache, under the segment's READ lock. ReplaceOffloaded
+	// by newSegmentScannerCache, under the segment's READ lock. swapReplacement
 	// swaps s.backing to the new object under the segment's WRITE lock, so no
 	// acquire can interleave with the swap, and afterwards the field names the
 	// new object: nothing can reach the old one to acquire it again. Every entry
