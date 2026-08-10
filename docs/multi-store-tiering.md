@@ -1,13 +1,17 @@
 # Multi-store tiering — design
 
-A log has exactly one store. `Options.SegmentStore` is a single field, so bytes
-descend from local disk into that store and are deleted from it, and there is no
-second hop.
+A log had exactly one store. `Options.SegmentStore` was a single field, so bytes
+descended from local disk into that store and were deleted from it, and there
+was no second hop.
 
 durable_streams asked for the second hop on 2026-08-10. Approved for build the
 same day, against this doc rather than against a size estimate.
 
-Written against v0.61.2.
+Written against v0.61.2. **Steps 1 and 2 have since shipped** (v0.62.0,
+v0.63.0): a log's store is now a named `Tier` in `Options.Tiers`, and every
+offloaded object records which tier holds it. The chain is still enforced at
+length one — step 3 is what lifts that. The present tense below describes the
+design, not the code; see "Staging" at the end for what is done.
 
 ## What the caller actually needs
 
@@ -169,16 +173,31 @@ consistent and is a bigger break.
 
 This can land incrementally, which materially lowers the risk:
 
-1. `TierObject.Tier`, written and read, with exactly one tier configured. No
-   behaviour change; the field is always the same value. Manifest version bump.
-2. `Options.Tiers` replacing `SegmentStore`, still length 1 enforced. Every
-   consumer above moves to "ask which tier" while the answer stays constant.
+1. ~~`TierObject.Tier`, written and read, with exactly one tier configured. No
+   behaviour change; the field is always the same value. Manifest version
+   bump.~~ **Shipped in v0.62.0.**
+2. ~~`Options.Tiers` replacing `SegmentStore`, still length 1 enforced. Every
+   consumer above moves to "ask which tier" while the answer stays
+   constant.~~ **Shipped in v0.63.0.**
 3. Lift the length-1 restriction; add `CleanSpec.TierPlacement` and
    `TierBudgets`. This is the first step where a segment can actually move
    between stores, and the first that needs new guards.
 
-Steps 1 and 2 are mechanical and independently releasable. Step 3 is where the
+Steps 1 and 2 were mechanical and independently released. Step 3 is where the
 real work and the real risk are.
+
+### What step 2 settled that this doc had left open
+
+- **`DeleteStoreObjects`/`UnreferencedObjects` take `StoreObject{Tier, Key}`.**
+  A bare key cannot say which store to look in, and the sweep's subject is
+  objects no manifest names — so nothing else could resolve one afterwards.
+- **An object naming an unconfigured tier is an error, everywhere**: at open
+  (adoption), at delete, and at reclaim. No call falls back to the primary
+  store.
+- **The retention knobs did NOT move onto `Tier`.** `MaxTierBytes/Messages/Age`
+  and `TierReadOnly` are still log-level and still mean "the one tier". Moving
+  them in step 2 would have broken the same fields twice; they move in step 3,
+  where per-tier budgets are the point.
 
 ## What stays out
 
