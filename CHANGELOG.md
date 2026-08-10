@@ -5,6 +5,36 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.65.1 — 2026-08-10
+
+### Fixed
+
+- **A move's release could fail silently and make a double claim permanent.**
+  `writeOneTierManifest` took a tier name and published nothing at all when
+  nothing matched it, returning nil. That call is the RELEASE half of a move:
+  the destination's manifest is already published, both tiers claim the
+  segment, and the whole reason that is survivable is that the source is about
+  to stop naming it. A name matching no tier turned the recoverable window into
+  a permanent one — `TierObject.MovedFrom` exists to make that state readable,
+  not to make it the resting state. Nothing upstream caught it either, because
+  `tierWritable` answers "yes" for a tier it has never heard of.
+
+  The name is now resolved, and an unconfigured one is an error like everywhere
+  else an object names a tier.
+
+### Changed
+
+- **One function publishes tier manifests, not three.** `writeTierManifest` and
+  `writeOneTierManifest` were one-line delegations to `publishTierManifests`,
+  which took an `only string` where `""` meant "every tier". `""` is the one
+  tier name `validateTiers` refuses — it is what an absent field decodes to,
+  which is the whole reason it is refused — so the publish path had given a
+  meaning to the value that exists to have none. `publishTierManifests` now
+  takes the tiers to publish. Internal; no API change.
+
+  `movePlaced` and `storeForTier` also stop carrying their own copies of "find
+  the tier by name"; both go through `tierByName`.
+
 ## v0.65.0 — 2026-08-10
 
 ### Changed
