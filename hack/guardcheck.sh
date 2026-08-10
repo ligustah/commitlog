@@ -843,8 +843,10 @@ run_guard "a read-only tier blocks the newer ones" delete_cleaner.go   $'\t\t\tk
 # answering for any name IS the silent-default fallback the refusal prevents.
 run_guard "a segment's tier must be configured" delete_cleaner.go   '		if t.Name == name {' '		if true {'   '^TestASegmentNamingAnUnconfiguredTierIsRefused$'
 # One floor allowance for the whole tiered half. Renewing it per run lets a
-# two-tier chain delete twice what the caller protected.
-run_guard "the floor is spent across tiers" delete_cleaner.go   '		maxDrop -= before - len(survivors)' ''   '^TestTheFloorIsSpentAcrossTiersNotPerTier$'
+# two-tier chain delete twice what the caller protected. Neutralized to a
+# discard rather than a deletion, which would take `before` with it and fail to
+# build instead of failing the test.
+run_guard "the floor is spent across tiers" delete_cleaner.go   '		maxDrop -= before - len(survivors)' '		_ = before'   '^TestTheFloorIsSpentAcrossTiersNotPerTier$'
 
 echo
 if [ "$failures" -ne 0 ]; then
