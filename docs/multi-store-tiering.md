@@ -4,9 +4,8 @@ A log has exactly one store. `Options.SegmentStore` is a single field, so bytes
 descend from local disk into that store and are deleted from it, and there is no
 second hop.
 
-durable_streams asked for the second hop on 2026-08-10. This is the design, not
-a commitment to build it: it exists so the decision is made against something
-concrete rather than against a size estimate.
+durable_streams asked for the second hop on 2026-08-10. Approved for build the
+same day, against this doc rather than against a size estimate.
 
 Written against v0.61.2.
 
@@ -123,7 +122,7 @@ moment a process picks up someone else's log, and it must be checked.
 Every tier gets a descriptor, for the same reason every tier gets a manifest: a
 store that cannot say which log it belongs to is not self-describing. `logIsNew`
 then asks the tiers in order and takes the first answer, so a node adopting any
-single tier is checked against that tier'''s recorded settings rather than
+single tier is checked against that tier's recorded settings rather than
 skipping the check.
 
 Descriptors disagreeing across tiers is the same class of fault as manifests
@@ -142,7 +141,7 @@ Each of these is `l.SegmentStore` today and becomes "which tier":
 | `segment.go` rewrite | `uploadReplacement`/`swapReplacement` | fresh key in the segment's CURRENT tier |
 | `tier_state.go:224,245` reclaim | `l.SegmentStore.Delete(key)` | delete from the owning tier |
 | `tier_state.go:259` orphan sweep | `l.SegmentStore.List()` | list per store, compare against that tier's slice of the manifest |
-| `descriptor.go:278-374` | descriptor read/write | tier 0 |
+| `descriptor.go:278-374` | descriptor read/write | one per tier; `logIsNew` asks in order |
 | `clean.go:376` retention | `LocalRetentionAge` gate | unchanged: this is the local→tier-0 hop |
 | retention budgets | `MaxTierBytes/Messages/Age` | per tier |
 | `TierReadOnly` | one flag | per tier |
