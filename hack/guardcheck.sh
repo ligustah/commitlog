@@ -800,6 +800,11 @@ run_guard "a ceiling needs the auto cleaner off" clean.go   '	if _, ok := spec.C
 run_guard_windows "store read retries a held object" segment_store.go   $'\tf, err := openWithRetry(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound' $'\tf, err := os.Open(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound'   '^TestAStoreReadRetriesThroughAHeldObject$'
 run_guard_windows "store publish retries a held dest" segment_store.go   '	return renameWithRetry(tmp, path)' '	return os.Rename(tmp, path)'   '^TestAStorePublishRetriesThroughAHeldDestination$'
 
+# A version 3 manifest names the tier of every object. Neutralized to `if false`
+# rather than deleting the loop: what must fail is the refusal, not the compile,
+# and the loop variable is still referenced by the body it no longer reaches.
+run_guard "a manifest entry names its tier" manifest.go   '		if o.Tier == "" {' '		if false {'   '^TestAManifestEntryWithNoTierIsRefused$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

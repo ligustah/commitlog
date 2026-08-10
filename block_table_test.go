@@ -98,7 +98,8 @@ func TestADamagedBlockTableIsRefused(t *testing.T) {
 func TestAManifestEntryPairsBlockModeWithABlockTable(t *testing.T) {
 	entry := func(mode bool, blocks string) TierObject {
 		return TierObject{
-			BaseOffset: 0, LogKey: "00000000000000000000.aa.log",
+			BaseOffset: 0, Tier: defaultTierName,
+			LogKey:    "00000000000000000000.aa.log",
 			BlockMode: mode, BlocksKey: blocks,
 			LastOffset: 5, PhysPosition: 128, Position: 128,
 		}

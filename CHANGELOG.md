@@ -5,6 +5,44 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Added
+
+- **A tier manifest names the tier holding each object.** `TierObject` gains
+  `Tier string`, and the manifest version goes to 3. With one store configured
+  the answer is always `"default"`, so nothing behaves differently — the field
+  exists so that a store already carrying a manifest can describe itself once a
+  second tier exists, rather than needing a second version bump at the moment
+  that starts to matter.
+
+  This is step 1 of `docs/multi-store-tiering.md`, which durable_streams asked
+  for and which was approved for build against that doc.
+
+### Changed
+
+- **BREAKING: a version 2 tier manifest is refused, not converted.** Same call
+  version 1 got when `BlocksKey` landed: nothing is deployed against version 2,
+  so a store written by an older build is re-offloaded. There is no converter.
+
+- **BREAKING: an entry naming no tier is refused, and the whole manifest with
+  it.** `""` is what an absent JSON field decodes to, so letting it mean "the
+  only tier" would make a manifest written by something that never set the
+  field indistinguishable from one that meant the default — the sentinel
+  collision `CleanSpec.Ceiling` was an `int64` bug for. Refusing the file
+  rather than the entry follows the key check beside it: a manifest with one
+  bad entry is not a manifest with one segment missing.
+
+### Fixed
+
+- **`hack/guardcheck.sh`: two guards ran after the summary that reports them.**
+  The store read/publish retry guards were appended below the block that prints
+  the totals and exits, so on Windows they ran with nothing left to report to —
+  `failures` had already been compared and `checked` already printed. The job's
+  "all N guards covered" line was printed before two of its guards had run, and
+  N excluded them. Both were green in fact; nothing would have said so had they
+  not been.
+
 ## v0.61.2 — 2026-08-07
 
 ### Fixed

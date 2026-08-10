@@ -27,6 +27,10 @@ import (
 type TierObject struct {
 	// BaseOffset identifies the segment. It is the key the caller matches on.
 	BaseOffset int64
+	// Tier names the store holding this object. A log with one store writes
+	// defaultTierName here; it is never empty, because an empty name cannot be
+	// told apart from a field that was never written.
+	Tier string
 	// LogKey is the store object holding the segment's log bytes.
 	LogKey string
 	// IndexKey is the store object holding its index, empty when the index is
@@ -57,9 +61,10 @@ type TierObject struct {
 // identifies which segment they describe. offloadMeta is what a segment knows
 // about its own objects and TierObject is what the manifest says about them, so
 // the two carry the same facts and only the direction differs.
-func (m offloadMeta) tierObject(baseOffset int64) TierObject {
+func (m offloadMeta) tierObject(baseOffset int64, tier string) TierObject {
 	return TierObject{
 		BaseOffset:     baseOffset,
+		Tier:           tier,
 		LogKey:         m.LogKey,
 		IndexKey:       m.IndexKey,
 		BlocksKey:      m.BlocksKey,
@@ -103,7 +108,11 @@ func (l *commitLog) tierState() ([]TierObject, error) {
 		s.RLock()
 		if s.store != nil {
 			out = append(out, TierObject{
-				BaseOffset:     s.BaseOffset,
+				BaseOffset: s.BaseOffset,
+				// The segment does not record a tier yet, because there is only
+				// one. Step 2 of docs/multi-store-tiering.md is where this
+				// becomes a question the segment can answer.
+				Tier:           defaultTierName,
 				LogKey:         s.storeKey,
 				IndexKey:       s.indexKey,
 				BlocksKey:      s.blocksKey,

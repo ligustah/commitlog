@@ -48,7 +48,7 @@ func TestATierManifestNamingAKeyOutsideTheStoreIsRefused(t *testing.T) {
 	// A manifest this package could have written round-trips.
 	logKey, indexKey, _ := newStoreKeys(0)
 	put(tierManifest{Version: manifestVersion, Segments: []TierObject{{
-		BaseOffset: 0, LogKey: logKey, IndexKey: indexKey,
+		BaseOffset: 0, Tier: defaultTierName, LogKey: logKey, IndexKey: indexKey,
 	}}})
 	objs, err := readTierManifest(store)
 	require.NoError(t, err)
@@ -63,14 +63,14 @@ func TestATierManifestNamingAKeyOutsideTheStoreIsRefused(t *testing.T) {
 		"",
 	} {
 		put(tierManifest{Version: manifestVersion, Segments: []TierObject{{
-			BaseOffset: 0, LogKey: bad,
+			BaseOffset: 0, Tier: defaultTierName, LogKey: bad,
 		}}})
 		_, err := readTierManifest(store)
 		require.Errorf(t, err, "manifest LogKey %q was accepted", bad)
 
 		// The index key is the same kind of value and reaches the same Delete.
 		put(tierManifest{Version: manifestVersion, Segments: []TierObject{{
-			BaseOffset: 0, LogKey: logKey, IndexKey: bad,
+			BaseOffset: 0, Tier: defaultTierName, LogKey: logKey, IndexKey: bad,
 		}}})
 		_, err = readTierManifest(store)
 		if bad == "" {
@@ -107,7 +107,7 @@ func TestAManifestThatIsNotThisVersionIsRefused(t *testing.T) {
 	}
 
 	logKey, _, _ := newStoreKeys(0)
-	segs := []TierObject{{BaseOffset: 0, LogKey: logKey}}
+	segs := []TierObject{{BaseOffset: 0, Tier: defaultTierName, LogKey: logKey}}
 
 	// The version this build writes is the one it reads.
 	put(tierManifest{Version: manifestVersion, Segments: segs})

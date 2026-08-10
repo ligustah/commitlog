@@ -105,7 +105,7 @@ func TestReplaceOffloadedManifestNamesTheNewGeneration(t *testing.T) {
 	require.NotEqual(t, meta.LogKey, stillOld,
 		"the segment must go on serving the old object until the commit")
 
-	require.NoError(t, l.writeTierManifest(meta.tierObject(seg.BaseOffset)))
+	require.NoError(t, l.writeTierManifest(meta.tierObject(seg.BaseOffset, defaultTierName)))
 	require.NoError(t, seg.swapReplacement(fresh, meta))
 
 	objs, err := readTierManifest(store)

@@ -54,7 +54,8 @@ func TestALogThatFailsToOpenHoldsNothingAfterwards(t *testing.T) {
 	require.NoError(t, err)
 	logKey, indexKey, _ := newStoreKeys(base + 1_000_000)
 	body, err := json.Marshal(tierManifest{Version: manifestVersion, Segments: []TierObject{{
-		BaseOffset: base + 1_000_000, LogKey: logKey, IndexKey: indexKey,
+		BaseOffset: base + 1_000_000, Tier: defaultTierName,
+		LogKey: logKey, IndexKey: indexKey,
 	}}})
 	require.NoError(t, err)
 	require.NoError(t, store.Put(manifestKey, bytes.NewReader(body), int64(len(body))))

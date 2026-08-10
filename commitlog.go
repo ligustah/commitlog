@@ -532,7 +532,7 @@ func New(opts Options) (CommitLog, error) {
 	// Set here rather than passed to newCompactCleaner because it closes over the
 	// log the cleaner belongs to, which does not exist until this line.
 	compactCleaner.commitTier = func(baseOffset int64, meta offloadMeta) error {
-		return l.writeTierManifest(meta.tierObject(baseOffset))
+		return l.writeTierManifest(meta.tierObject(baseOffset, defaultTierName))
 	}
 
 	if err := l.init(); err != nil {
@@ -1694,7 +1694,7 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 		//
 		// Per segment rather than once per pass, because a batch would put every
 		// segment in the pass on the wrong side of that second rule.
-		if err := l.writeTierManifest(meta.tierObject(s.BaseOffset)); err != nil {
+		if err := l.writeTierManifest(meta.tierObject(s.BaseOffset, defaultTierName)); err != nil {
 			return n, err
 		}
 		if err := s.attachOffloaded(l.SegmentStore, meta, l.RemoteIndexCache); err != nil {

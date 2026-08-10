@@ -27,7 +27,25 @@ const manifestKey = "manifest"
 // them would be to rebuild each table by walking its object — the cost the key
 // exists to remove. Nothing is deployed against version 1, so there is nothing
 // to migrate; a store written by an older build is re-offloaded, not converted.
-const manifestVersion = 2
+//
+// Version 3 adds Tier, naming the store an object lives in. It is the first step
+// of multi-store tiering (docs/multi-store-tiering.md) and carries no behaviour
+// yet: one tier is configurable, so every entry names defaultTierName. It goes in
+// ahead of the capability so that the manifest a store is already carrying can
+// describe itself once the second tier exists, rather than needing a second
+// version bump at the moment it matters. Refused rather than adapted, for the
+// same reason as version 1.
+const manifestVersion = 3
+
+// defaultTierName is the tier of a log configured with a single store.
+//
+// A NAME rather than an empty string, and that is not cosmetic. An absent JSON
+// field decodes to "", so an empty Tier would be indistinguishable from a
+// manifest written by something that never set one — the same sentinel collision
+// that made CleanSpec.Ceiling an int64 bug, where the zero value had to mean both
+// "unset" and a real value a caller needs. A version 3 manifest must name its
+// tier, and readTierManifest refuses one that does not.
+const defaultTierName = "default"
 
 // tierManifest is the store's own description of itself: which object holds
 // which segment, and the offset and time ranges each covers.
@@ -138,6 +156,17 @@ func readTierManifest(store SegmentStore) ([]TierObject, error) {
 		return nil, errors.Errorf(
 			"commitlog: tier manifest is version %d, this build understands %d",
 			m.Version, manifestVersion)
+	}
+	// A version 3 manifest names the tier of every object it describes. An entry
+	// without one is not defaulted: see defaultTierName for why "" cannot be
+	// allowed to mean "the only tier", and the key check below for why the whole
+	// manifest is refused rather than the offending entry.
+	for _, o := range m.Segments {
+		if o.Tier == "" {
+			return nil, errors.Errorf(
+				"commitlog: tier manifest entry for base offset %d names no tier",
+				o.BaseOffset)
+		}
 	}
 	// The keys in here are the one part of the manifest that becomes an ACTION
 	// rather than a description: they end up in s.storeKey and s.indexKey, and
