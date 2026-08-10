@@ -328,16 +328,32 @@ func (l *commitLog) DeleteStoreObjects(objs []StoreObject) ([]StoreObject, error
 	if !l.hasTier() || len(objs) == 0 {
 		return nil, nil
 	}
-	deleted := make([]StoreObject, 0, len(objs))
-	for _, o := range objs {
+	// Every tier resolved and checked BEFORE anything is deleted, so a batch
+	// naming one tier this log does not own deletes nothing at all.
+	//
+	// Doing it as it went made what survived depend on the ORDER of the
+	// caller's slice: the same batch, sorted differently, left a different set
+	// of objects standing. For an unfenced operator tool that is the worst
+	// property to have — the caller sees an error, cannot tell from it what was
+	// removed without reading the returned slice, and a retry after fixing the
+	// ownership deletes a different remainder than the first attempt implied.
+	stores := make([]SegmentStore, len(objs))
+	for i, o := range objs {
 		if !l.tierWritable(o.Tier) {
-			return deleted, errors.Wrapf(errTierReadOnly, "tier %s", o.Tier)
+			return nil, errors.Wrapf(errTierReadOnly, "tier %s", o.Tier)
 		}
 		store, err := l.storeForTier(o.Tier)
 		if err != nil {
-			return deleted, err
+			return nil, err
 		}
-		if err := store.Delete(o.Key); err != nil {
+		stores[i] = store
+	}
+	deleted := make([]StoreObject, 0, len(objs))
+	for i, o := range objs {
+		// Past the checks a delete can still fail on the store itself, and that
+		// one is reported with what got through: the objects are gone, and a
+		// caller told otherwise would look for them again.
+		if err := stores[i].Delete(o.Key); err != nil {
 			return deleted, errors.Wrapf(err, "delete %s from tier %s", o.Key, o.Tier)
 		}
 		deleted = append(deleted, o)
@@ -346,7 +362,8 @@ func (l *commitLog) DeleteStoreObjects(objs []StoreObject) ([]StoreObject, error
 }
 
 // UnreferencedObjects lists store objects nothing this log can see names. See
-// the interface doc — in particular, what "unreferenced" is judged from.
+// the CommitLog interface doc — in particular, what "unreferenced" is judged
+// from, and why that is not the same question on a shared store.
 func (l *commitLog) UnreferencedObjects() ([]StoreObject, error) {
 	if !l.hasTier() {
 		return nil, nil

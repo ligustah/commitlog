@@ -2,17 +2,19 @@ package commitlog
 
 // CommitLog is the durable write-ahead log interface used to back each stream.
 //
-// # Single-writer contract for a SegmentStore
+// # Single-writer contract for a tier
 //
-// A log with a SegmentStore assumes it is the ONLY process writing to that
-// store. It does not stamp its identity into object keys, does not fence its
-// deletes against anyone else's, and cannot detect a second writer. This is a
-// deliberate boundary: who owns a store is a question about cluster
+// A log with tiers configured assumes it is the ONLY process writing to each
+// tier's store. It does not stamp its identity into object keys, does not fence
+// its deletes against anyone else's, and cannot detect a second writer. This is
+// a deliberate boundary: who owns a store is a question about cluster
 // membership, and nothing the log can observe answers it.
 //
-// Express ownership with SetTierReadOnly — a process that does not own the tier
-// runs read-only, and ownership moves by the previous owner going read-only
-// before the next one comes out of it.
+// Ownership is per tier, so the contract is too: this log may own writes to one
+// tier and read another that a different process owns. Express it with
+// SetTierReadOnly — a process that does not own a tier runs read-only on that
+// tier, and ownership moves by the previous owner going read-only before the
+// next one comes out of it.
 //
 // # What actually goes wrong if two processes write at once
 //
@@ -55,7 +57,7 @@ package commitlog
 // the deterministic-key overwrite that keys used to permit and no longer do,
 // kept because it is why they are shaped as they are.
 //
-// A log with no SegmentStore is unaffected by any of this.
+// A log with no tiers is unaffected by any of this.
 type CommitLog interface {
 	// Delete closes the log and removes all data associated with it from the
 	// filesystem.
@@ -213,7 +215,13 @@ type CommitLog interface {
 	SetTierReadOnly(tier string, readOnly bool) error
 
 	// DeleteStoreObjects removes objects from the tiers naming them, returning
-	// those it removed. It is refused outright while the tier is read-only.
+	// those it removed.
+	//
+	// Every object's tier is resolved and checked for ownership BEFORE anything
+	// is deleted, so a batch naming one tier this log does not own — or one not
+	// in Options.Tiers — deletes nothing and returns no objects. Only a failure
+	// from the store itself can leave a batch half applied, and that one returns
+	// what did get through.
 	//
 	// An OPERATOR TOOL, not part of the normal path: a log reclaims what its own
 	// rewrites supersede (see CleanWithSpec). What is left for this is garbage
@@ -227,14 +235,45 @@ type CommitLog interface {
 	// apart.
 	DeleteStoreObjects(objs []StoreObject) ([]StoreObject, error)
 
-	// TierManifest returns what the STORE says its tier holds, read from the
-	// store itself rather than from this log's in-memory segments.
+	// UnreferencedObjects lists the objects in every configured tier that
+	// nothing this log can see names. It REPORTS; it never deletes.
 	//
-	// The tier describes itself: a manifest object, written after the segment
+	// "Live" is the union of two sets, because each alone is wrong in a
+	// different way. The tier manifests alone would miss an object this log is
+	// reading but has not republished yet — a rewrite installs objects and then
+	// publishes, and in between the segment is on a key no manifest names. This
+	// log's own segments alone would miss everything another process offloaded
+	// since this one opened. Each tier's listing is compared against the whole
+	// live set, not that tier's slice of it.
+	//
+	// A manifest that exists but cannot be read is an ERROR, not an empty set:
+	// "we do not know what is live" must never read as "nothing is live". The
+	// manifests and the descriptor are themselves never reported — nothing
+	// references what a store says ABOUT itself, so a rule built from
+	// references alone would collect the two objects that make the tier
+	// readable and identifiable.
+	//
+	// The caveat that matters on a SHARED store: this answers "unreferenced by
+	// me", which is not "unreferenced". Every object a live peer has uploaded
+	// since this log last read the manifests is in the list. Feeding it
+	// straight to DeleteStoreObjects there deletes data that peer is serving.
+	UnreferencedObjects() ([]StoreObject, error)
+
+	// TierManifest returns what the STORES say the tiers hold, read from the
+	// stores themselves rather than from this log's in-memory segments.
+	//
+	// Each tier describes itself: a manifest object, written after the segment
 	// objects it names, records which object holds which segment and the offset
 	// and time ranges each covers. So "what is in this tier" is answerable by
 	// anyone holding the store, and a log opening over a store it has never seen
 	// before picks the offloaded segments up automatically.
+	//
+	// Every configured tier is read and the results are merged into one slice
+	// ordered by base offset. A segment two tiers both claim is a move that
+	// committed and did not get to release: it is resolved from the claims
+	// themselves, by TierObject.MovedFrom, so every process resolves it the same
+	// way. A double claim the claims do not explain is an ERROR, not a pick —
+	// one log's segments being in two stores is not a state to paper over.
 	//
 	// Being written last also makes it the tier's commit point: an object no
 	// manifest names was never committed — a crash between an upload and its
@@ -245,7 +284,7 @@ type CommitLog interface {
 	// hold it; the other is the log's descriptor, which says what the log IS.
 	// Neither is named by the manifest, and neither is ever garbage.
 	//
-	// Returns nil for a log with no store, and for a store with nothing
+	// Returns nil for a log with no tiers, and when no tier has anything
 	// offloaded.
 	TierManifest() ([]TierObject, error)
 
@@ -366,14 +405,15 @@ type CommitLog interface {
 	// one, whose records keep their headers and abort markers even below
 	// the LSO.
 	//
-	// A pass that rewrites a segment whose bytes live in a SegmentStore leaves
-	// the objects it stopped referencing behind, and reclaims them ITSELF: the
-	// log tracks the readers still on a superseded object and deletes it on a
-	// later pass, once none remain and a published manifest has stopped naming
-	// it. Nothing about that is the caller's to drive. A pass whose tier is
-	// read-only reclaims nothing, since deleting is a store write like any
-	// other, and one interrupted by a crash leaves an orphan — costing storage,
-	// not correctness, and reported by UnreferencedObjects.
+	// A pass that rewrites a segment whose bytes live in a tier leaves the
+	// objects it stopped referencing behind, and reclaims them ITSELF: the log
+	// tracks the readers still on a superseded object and deletes it on a later
+	// pass, once none remain and a published manifest has stopped naming it.
+	// Nothing about that is the caller's to drive. Read-only is per tier and so
+	// is the reclaim: a read-only tier's objects are left standing while the
+	// rest are collected, since deleting is a store write like any other. A
+	// reclaim interrupted by a crash leaves an orphan — costing storage, not
+	// correctness, and reported by UnreferencedObjects.
 	//
 	// It returns an ERROR, without cleaning anything, if the spec carries a
 	// Ceiling while the log's own cleaner is still running: the automatic pass

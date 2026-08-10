@@ -5,6 +5,44 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A refused `DeleteStoreObjects` batch deleted a prefix of itself.** The
+  documented contract was that the call is refused outright while a tier is
+  read-only; the code checked each object as it reached it, so a batch ran
+  until it hit one it may not touch and returned what it had already removed.
+  What survived therefore depended on the ORDER of the caller's slice — the
+  same batch, sorted differently, left a different set of objects standing.
+  For an unfenced operator tool that is the worst property available: the
+  caller sees an error either way, and a retry after fixing the ownership
+  removes a different remainder than the first attempt implied. Every object's
+  tier is now resolved and checked before anything is deleted. Only a failure
+  from the store itself can still leave a batch half applied, and that one
+  returns what got through, because those objects really are gone.
+
+### Added
+
+- **`UnreferencedObjects` is on the `CommitLog` interface.** It was a method on
+  the concrete log only, while the interface doc directed callers to it three
+  times — the single-writer contract's warning about shared stores, the
+  `DeleteStoreObjects` pairing, and `CleanWithSpec`'s note on crash orphans all
+  named a method no interface consumer could call. It was introduced as a pair
+  with `DeleteStoreObjects` and only one of the two was exported.
+
+### Changed
+
+- **Interface documentation that still described the pre-chain single store.**
+  `Options.SegmentStore` became `Options.Tiers` in v0.63.0 and the contract
+  docs did not follow: the single-writer section spoke of "a log with a
+  SegmentStore" and "a log with no SegmentStore", `TierManifest` described
+  reading one store rather than reading every tier and merging, and
+  `CleanWithSpec` had reclamation stopping wholesale on a read-only tier when
+  read-only is per tier and so is the reclaim. `TierManifest`'s merge rule —
+  a double claim resolved from `TierObject.MovedFrom`, and refused when the
+  claims do not explain it — was not documented anywhere a caller reads.
+
 ## v0.65.1 — 2026-08-10
 
 ### Fixed

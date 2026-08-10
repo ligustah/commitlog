@@ -187,3 +187,47 @@ func TestSetTierReadOnlyRefusesAnUnknownTier(t *testing.T) {
 	// And the tier it does have is untouched by the refusal.
 	require.True(t, l.tierWritable(defaultTierName))
 }
+
+// A batch naming a tier this log may not write to deletes NOTHING, whichever
+// position that object holds in the caller's slice.
+//
+// The refusal is documented as outright, and it has to be: deleting as it went
+// made what survived depend on the ORDER of the slice. An operator sees an
+// error either way, but a retry after fixing the ownership then removes a
+// different remainder than the first attempt implied — the worst property
+// available to an unfenced tool whose whole job is destroying data.
+func TestDeleteStoreObjectsRefusesTheWholeBatchWhateverItsOrder(t *testing.T) {
+	l, hot, _, _ := chainLog(t)
+
+	manifest, err := l.TierManifest()
+	require.NoError(t, err)
+	require.NotEmpty(t, manifest, "the fixture needs an offloaded object to spare")
+	live := StoreObject{Tier: "hot", Key: manifest[0].LogKey}
+
+	require.NoError(t, l.SetTierReadOnly("cold", true))
+	stillThere := func() {
+		t.Helper()
+		_, err := hot.Size(live.Key)
+		require.NoError(t, err, "the whole batch is refused, so %s is untouched", live.Key)
+	}
+
+	// Read-only tier, then a tier that is not configured at all: both are
+	// answers this log gives BEFORE it deletes anything.
+	for _, bad := range []StoreObject{
+		{Tier: "cold", Key: "some-cold-object"},
+		{Tier: "archive", Key: "some-object"},
+		{Tier: "", Key: "some-object"},
+	} {
+		for _, batch := range [][]StoreObject{{live, bad}, {bad, live}} {
+			deleted, err := l.DeleteStoreObjects(batch)
+			require.Error(t, err, "tier %q", bad.Tier)
+			require.Empty(t, deleted, "a refused batch reports nothing deleted")
+			stillThere()
+		}
+	}
+
+	// The same object in the tier this log does own still goes.
+	deleted, err := l.DeleteStoreObjects([]StoreObject{live})
+	require.NoError(t, err)
+	require.Equal(t, []StoreObject{live}, deleted)
+}

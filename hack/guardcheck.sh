@@ -888,6 +888,34 @@ run_guard "a one-tier publish names a real tier" manifest.go   '	t, err := l.tie
 run_guard "a placement's tier must be configured" tier_move.go   '		t, err := l.tierByName(name)
 		if err != nil {'   '		t, _ := l.tierByName(name)
 		if false {'   '^TestAPlacementNamingAnUnconfiguredTierIsRefused$'
+# DeleteStoreObjects checks every object's tier before deleting any of them.
+# Neutralized by folding the check back into the delete loop, which is the
+# order-dependent version this replaced: the batch runs until it REACHES an
+# object it may not touch, so what survives depends on the caller's sort.
+run_guard "a refused delete batch deletes nothing" tier_state.go   '	stores := make([]SegmentStore, len(objs))
+	for i, o := range objs {
+		if !l.tierWritable(o.Tier) {
+			return nil, errors.Wrapf(errTierReadOnly, "tier %s", o.Tier)
+		}
+		store, err := l.storeForTier(o.Tier)
+		if err != nil {
+			return nil, err
+		}
+		stores[i] = store
+	}
+	deleted := make([]StoreObject, 0, len(objs))
+	for i, o := range objs {'   '	stores := make([]SegmentStore, len(objs))
+	deleted := make([]StoreObject, 0, len(objs))
+	for i, o := range objs {
+		if !l.tierWritable(o.Tier) {
+			return deleted, errors.Wrapf(errTierReadOnly, "tier %s", o.Tier)
+		}
+		store, err := l.storeForTier(o.Tier)
+		if err != nil {
+			return deleted, err
+		}
+		stores[i] = store'   '^TestDeleteStoreObjectsRefusesTheWholeBatchWhateverItsOrder$'
+
 # Each tier draws on its own rewrite budget. Neutralized by keying every tier's
 # budget the same, which is exactly the single shared budget this replaced.
 run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFor(segments[i].tier)' '			b = budgetFor("")'   '^TestOneTiersBudgetDoesNotShrinkAnothers$'
