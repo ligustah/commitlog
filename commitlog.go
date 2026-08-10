@@ -4,6 +4,7 @@ package commitlog
 import (
 	"bytes"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1373,13 +1374,27 @@ func (l *commitLog) closeSegments() error {
 	if err := l.checkpointHW(waitedOnRetryBudget); err != nil {
 		return err
 	}
+	// Close EVERY segment before reporting any failure — the same rule
+	// closeSegment holds over its two halves, one level up and for the same
+	// reason. Returning at the first error left every LATER segment open, and
+	// this is the last walk of the set: segmentsClosed is about to stop
+	// anything installing into it, and no caller retries a Close it was already
+	// told failed. So a single failing segment took the rest with it, holding
+	// file handles and index mmaps for the life of the process — and on Windows
+	// a mapped index cannot be unlinked, so the directory could not be removed
+	// either.
+	var errs []error
 	for _, segment := range l.segments {
 		if err := segment.Close(); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
+	// Set regardless: the set HAS been walked, which is the whole claim this
+	// flag makes. Leaving it false to permit a retry would reopen the window a
+	// concurrent rewrite installs into, trading a leak nobody retries for one
+	// that happens on its own.
 	l.segmentsClosed = true
-	return nil
+	return stderrors.Join(errs...)
 }
 
 // Close stops the background goroutines (checkpoint + cleaner), then checkpoints

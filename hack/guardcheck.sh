@@ -631,6 +631,17 @@ run_guard "the read retry spends its whole budget" util.go   $'func ReadFileWith
 	deadline := time.Now().Add(waitedOnRetryBudget)'   $'func ReadFileWithRetry(path string) ([]byte, error) {
 	deadline := time.Now().Add(waitedOnRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
 
+# Close walks the WHOLE segment set even when one segment refuses. Neutralized
+# by returning at the first error, which is the version that left every later
+# segment holding its handle and its index mmap for the life of the process --
+# and on Windows a mapped index cannot be unlinked, so the directory could not
+# be removed either.
+run_guard "a refusing segment does not close the rest" commitlog.go   '		if err := segment.Close(); err != nil {
+			errs = append(errs, err)
+		}' '		if err := segment.Close(); err != nil {
+			return err
+		}'   '^TestCloseWalksEverySegmentEvenWhenOneRefuses$'
+
 # A durability BARRIER waits longer than a tick. Same checkpoint write, two
 # callers with opposite failure economics: the tick has the next tick behind it,
 # SyncAll has a caller waiting and nothing. The neutralization hands SyncAll the

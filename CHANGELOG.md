@@ -9,6 +9,19 @@ library from that fork onward.
 
 ### Fixed
 
+- **One segment refusing to close left every later segment open.** `Close`
+  returned at the first error, and that walk of `l.segments` is the last one
+  there will ever be: `segmentsClosed` is set right after it, and no caller
+  retries a `Close` it was already told failed. So a single failing segment
+  took the whole tail of the set with it, holding file handles and index mmaps
+  for the life of the process — and on Windows a mapped index cannot be
+  unlinked, so the log's own directory could not be removed either. It now
+  closes every segment and joins the errors, which is the rule `closeSegment`
+  already held over its own two halves, one level up and for the same reason.
+  Found while looking into a durable_streams report of a partition `.index`
+  still open after every `Close` had returned; that report is an unreproduced
+  observation and this is not confirmed to be its cause.
+
 - **One retry budget served two callers with opposite failure economics.**
   `atomicWriteRetryBudget` was 500ms, and its comment gave the reason: a
   checkpoint write runs on a tick, a genuinely conflicted destination never
