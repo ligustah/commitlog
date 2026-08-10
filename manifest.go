@@ -119,14 +119,82 @@ func (l *commitLog) writeTierManifest(pending ...TierObject) error {
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].BaseOffset < objs[j].BaseOffset })
 	}
-	body, err := json.Marshal(tierManifest{Version: manifestVersion, Segments: objs})
-	if err != nil {
-		return errors.Wrap(err, "encode tier manifest")
+	// One manifest PER TIER, each naming only that tier's objects, because a
+	// tier that holds bytes it cannot describe is not self-contained — which is
+	// the principle ExportTierState/ImportTierState were removed to establish
+	// (docs/tier-layering.md). A single manifest in the nearest tier would mean
+	// a node adopting the archive alone found nothing to adopt, and losing the
+	// nearest tier would lose the map to objects that are perfectly intact.
+	//
+	// The price is that two manifests can disagree about who owns an object.
+	// That is representable, so the merge at open refuses it; see
+	// mergeTierManifests.
+	byTier := make(map[string][]TierObject, len(l.Tiers))
+	for _, o := range objs {
+		byTier[o.Tier] = append(byTier[o.Tier], o)
 	}
-	if err := store.Put(manifestKey, bytes.NewReader(body), int64(len(body))); err != nil {
-		return errors.Wrap(err, "put tier manifest")
+	for _, t := range l.Tiers {
+		body, err := json.Marshal(tierManifest{Version: manifestVersion, Segments: byTier[t.Name]})
+		if err != nil {
+			return errors.Wrapf(err, "encode tier manifest for tier %s", t.Name)
+		}
+		if err := t.Store.Put(manifestKey, bytes.NewReader(body), int64(len(body))); err != nil {
+			return errors.Wrapf(err, "put tier manifest for tier %s", t.Name)
+		}
 	}
 	return nil
+}
+
+// mergeTierManifests unions what each tier says it holds.
+//
+// A segment lives in exactly ONE tier, so two manifests naming the same base
+// offset is not a state to resolve by picking one: it means two stores were
+// attached to the same log, or a move was interrupted somewhere no crash should
+// be able to leave it. Picking either would serve one tier's bytes and
+// silently orphan the other's, and picking by order would make the answer
+// depend on the caller's configuration rather than on the stores. So it is
+// refused, and the refusal names both tiers.
+//
+// This is the cost of per-tier manifests, paid deliberately: option (a) in
+// docs/multi-store-tiering.md made the disagreement unrepresentable, at the
+// price of a tier that cannot describe itself.
+func mergeTierManifests(perTier map[string][]TierObject) ([]TierObject, error) {
+	owner := make(map[int64]string)
+	var out []TierObject
+	for tier, objs := range perTier {
+		for _, o := range objs {
+			if prev, ok := owner[o.BaseOffset]; ok {
+				a, b := prev, tier
+				if a > b {
+					a, b = b, a
+				}
+				return nil, errors.Errorf(
+					"commitlog: tiers %s and %s both claim segment %d; "+
+						"one log's segments are in two stores",
+					a, b, o.BaseOffset)
+			}
+			owner[o.BaseOffset] = tier
+			out = append(out, o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].BaseOffset < out[j].BaseOffset })
+	return out, nil
+}
+
+// readMergedTierManifest reads every tier's manifest and merges them.
+func (l *commitLog) readMergedTierManifest() ([]TierObject, error) {
+	if !l.hasTier() {
+		return nil, nil
+	}
+	perTier := make(map[string][]TierObject, len(l.Tiers))
+	for _, t := range l.Tiers {
+		objs, err := readTierManifest(t.Store)
+		if err != nil {
+			return nil, err
+		}
+		perTier[t.Name] = objs
+	}
+	return mergeTierManifests(perTier)
 }
 
 // readTierManifest returns what the store says it holds, or nil when the store
@@ -228,11 +296,7 @@ func readTierManifest(store SegmentStore) ([]TierObject, error) {
 // TierManifest returns what the STORE says its tier holds, read from the store
 // rather than from this log's local bookkeeping. See the interface doc.
 func (l *commitLog) TierManifest() ([]TierObject, error) {
-	store := l.primaryStore()
-	if store == nil {
-		return nil, nil
-	}
-	return readTierManifest(store)
+	return l.readMergedTierManifest()
 }
 
 // adoptTierManifest materialises segments this log does not have but the store's

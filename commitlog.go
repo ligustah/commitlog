@@ -634,13 +634,9 @@ func (l *commitLog) open() error {
 	// option 1, still has a local .index — so an index with no log beside it is
 	// either an offloaded segment's index or a genuine orphan, and only the
 	// manifest can tell those apart.
-	var tier []TierObject
-	if store := l.primaryStore(); store != nil {
-		var err error
-		tier, err = readTierManifest(store)
-		if err != nil {
-			return err
-		}
+	tier, err := l.readMergedTierManifest()
+	if err != nil {
+		return err
 	}
 	offloaded := make(map[int64]bool, len(tier))
 	for _, o := range tier {

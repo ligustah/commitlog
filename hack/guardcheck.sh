@@ -814,6 +814,12 @@ run_guard "a tier must be named" tier.go   '		if t.Name == "" {' '		if false {' 
 # the return value with it.
 run_guard "an object's tier must be configured" tier.go   '		if t.Name == name {' '		if true {'   '^TestAnObjectNamingAnUnconfiguredTierIsRefused$'
 
+# Two tiers claiming one segment. Neutralized by not RECORDING the owner rather
+# than by removing the check: the check reads a map the loop fills, so an empty
+# map disarms it exactly, and the loop variable stays used so the package still
+# builds.
+run_guard "one segment lives in one tier" manifest.go   '			owner[o.BaseOffset] = tier' '			_ = tier'   '^TestTwoTiersClaimingOneSegmentIsRefused$'
+
 # A block-compressed offloaded segment has THREE objects. The orphan sweep
 # builds its live set twice over — from the manifest and from the log's own
 # segments — and both halves named the log and the index only, so neither could
