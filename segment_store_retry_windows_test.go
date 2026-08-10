@@ -4,6 +4,7 @@ package commitlog
 
 import (
 	"bytes"
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -39,23 +40,42 @@ func TestAStoreReadRetriesThroughAHeldObject(t *testing.T) {
 	require.NoError(t, err)
 
 	h := openDenyAll(t, path)
-	released := make(chan struct{})
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		syscall.CloseHandle(h) // nolint: errcheck
-		close(released)
-	}()
 
+	// Prove the handle denies on THIS machine before anything depends on it. A
+	// runner where it does not would pass every assertion below for the wrong
+	// reason, and pass them just as happily with the retry removed.
+	if f, oerr := os.Open(path); oerr == nil {
+		f.Close()              // nolint: errcheck
+		syscall.CloseHandle(h) // nolint: errcheck
+		t.Fatal("the exclusive handle did not deny an open; this test proves nothing")
+	}
+
+	// Asserted while the handle is held, and deliberately not retried.
 	size, err := store.Size(key)
-	require.NoError(t, err, "Size gave up on a handle that clears in 300ms")
+	require.NoError(t, err, "Size was refused by a handle that does not refuse it")
 	require.EqualValues(t, len(payload), size)
 
+	// The release is timed from the moment the READ starts, not from the moment
+	// the handle was taken. Timed from the handle, everything between the two —
+	// the open probe, Size, two testify assertions — comes out of the window,
+	// and on a slow runner it can consume all of it: the read then begins after
+	// the handle is already gone and succeeds without retrying. That is exactly
+	// how this guard reported NO COVERAGE on CI while passing locally.
 	buf := make([]byte, len(payload))
-	_, err = store.ReadAt(key, buf, 0)
-	require.NoError(t, err, "ReadAt gave up on a handle that clears in 300ms")
-	require.Equal(t, payload, buf)
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		_, rerr := store.ReadAt(key, buf, 0)
+		result <- rerr
+	}()
 
-	<-released
+	<-started
+	time.Sleep(300 * time.Millisecond) // well inside readRetryBudget
+	require.NoError(t, syscall.CloseHandle(h))
+
+	require.NoError(t, <-result, "ReadAt gave up on a handle that cleared 300ms in")
+	require.Equal(t, payload, buf)
 }
 
 // The publish side of the same window. A reader holding the DESTINATION open
@@ -73,17 +93,28 @@ func TestAStorePublishRetriesThroughAHeldDestination(t *testing.T) {
 	require.NoError(t, err)
 
 	h := openDenyAll(t, path)
-	released := make(chan struct{})
-	go func() {
-		time.Sleep(300 * time.Millisecond)
+	if f, oerr := os.Open(path); oerr == nil {
+		f.Close()              // nolint: errcheck
 		syscall.CloseHandle(h) // nolint: errcheck
-		close(released)
+		t.Fatal("the exclusive handle did not deny an open; this test proves nothing")
+	}
+
+	// Timed from the start of the publish, for the reason given on the read
+	// test, and shorter than the read's hold because the write side's budget is
+	// atomicWriteRetryBudget rather than readRetryBudget.
+	second := []byte("second")
+	result := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		result <- store.Put(key, bytes.NewReader(second), int64(len(second)))
 	}()
 
-	second := []byte("second")
-	require.NoError(t, store.Put(key, bytes.NewReader(second), int64(len(second))),
-		"the publish gave up on a handle that clears in 300ms")
-	<-released
+	<-started
+	time.Sleep(150 * time.Millisecond) // well inside atomicWriteRetryBudget
+	require.NoError(t, syscall.CloseHandle(h))
+
+	require.NoError(t, <-result, "the publish gave up on a handle that cleared 150ms in")
 
 	// The retry must have COMMITTED, not merely returned nil.
 	size, err := store.Size(key)

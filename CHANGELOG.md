@@ -5,6 +5,27 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A Windows store-retry guard was covered by a race the runner could lose.**
+  `TestAStoreReadRetriesThroughAHeldObject` released its exclusive handle 300ms
+  after TAKING it, and the read it was protecting came several assertions
+  later. On a slow runner that setup consumed the whole window, so the read
+  began after the handle was already gone and passed without retrying — which
+  is what `guard coverage (windows)` reported at the v0.62.0 tag while the same
+  run was green locally.
+
+  The release is now timed from the moment the read starts. Both Windows retry
+  tests also assert up front that the exclusive handle actually denies an open
+  on the machine running them, so a runner where it does not fails instead of
+  passing every assertion for the wrong reason.
+
+  No library code changed. This is the first thing the v0.62.0 guard-ordering
+  fix caught: the guard had been running below the summary that reports it, so
+  a failure went nowhere.
+
 ## v0.62.0 — 2026-08-10
 
 ### Added
