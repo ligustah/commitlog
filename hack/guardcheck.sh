@@ -865,9 +865,10 @@ run_guard "a move says where it came from" tier_move.go   '	entry.MovedFrom = sr
 run_guard "a move may not write the destination" tier_move.go   '	if !l.tierWritable(dst.Name) {' '	if false {'   '^TestAMoveIntoATierThisLogDoesNotOwnIsRefused$'
 run_guard "a move may not release the source" tier_move.go   '	if !l.tierWritable(src) {' '	if false {'   '^TestAMoveOutOfATierThisLogDoesNotOwnIsRefused$'
 # A placement naming a tier that is not configured stops the pass before
-# anything moves. Neutralized by treating an unknown name as found, which is
-# the silent partial application the refusal exists to prevent.
-run_guard "a placement's tier must be configured" tier_move.go   '		if !found {' '		if false {'   '^TestAPlacementNamingAnUnconfiguredTierIsRefused$'
+# anything moves. Neutralized by making the lookup answer for ANY name, the way
+# the other two tier lookups are: deleting the refusal takes `found` out of use
+# and fails to build instead of failing the test.
+run_guard "a placement's tier must be configured" tier_move.go   '			if t.Name == name {' '			if true {'   '^TestAPlacementNamingAnUnconfiguredTierIsRefused$'
 # Each tier draws on its own rewrite budget. Neutralized by keying every tier's
 # budget the same, which is exactly the single shared budget this replaced.
 run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFor(segments[i].tier)' '			b = budgetFor("")'   '^TestOneTiersBudgetDoesNotShrinkAnothers$'
