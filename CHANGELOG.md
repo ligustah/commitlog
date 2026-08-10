@@ -5,6 +5,16 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.64.1 — 2026-08-10
+
+### Fixed
+
+- **`primaryStore` had no callers left**, and staticcheck's `U1000` refused
+  the v0.64.0 tag over it. Step 3 gave every write site a tier to name, so the
+  "just give me somewhere to write" helper became dead. No library change:
+  v0.64.0 and v0.64.1 behave identically, and every test, race, guard-coverage
+  and fuzz job was green at v0.64.0. Use this tag rather than that one.
+
 ## v0.64.0 — 2026-08-10
 
 ### Added
