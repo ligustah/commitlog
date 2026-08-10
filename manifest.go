@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sort"
+	"strings"
 
 	"github.com/pkg/errors"
 )
@@ -154,36 +155,96 @@ func (l *commitLog) writeTierManifest(pending ...TierObject) error {
 //
 // A segment lives in exactly ONE tier, so two manifests naming the same base
 // offset is not a state to resolve by picking one: it means two stores were
-// attached to the same log, or a move was interrupted somewhere no crash should
-// be able to leave it. Picking either would serve one tier's bytes and
+// attached to the same log. Picking either would serve one tier's bytes and
 // silently orphan the other's, and picking by order would make the answer
 // depend on the caller's configuration rather than on the stores. So it is
 // refused, and the refusal names both tiers.
+//
+// The ONE exception is an interrupted move, and it is not an exception to the
+// principle: the destination's entry says which tier it was moved out of, so
+// the answer still comes from what the stores say rather than from how the
+// caller listed them. See TierObject.MovedFrom for why the window exists at
+// all. Anything else — two claims with no marker, a marker naming a tier that
+// is not the other claimant, three tiers claiming one segment — is refused as
+// before.
 //
 // This is the cost of per-tier manifests, paid deliberately: option (a) in
 // docs/multi-store-tiering.md made the disagreement unrepresentable, at the
 // price of a tier that cannot describe itself.
 func mergeTierManifests(perTier map[string][]TierObject) ([]TierObject, error) {
-	owner := make(map[int64]string)
-	var out []TierObject
+	// Every claim first, then resolve: a decision made as the claims arrive
+	// would depend on map iteration order, which is the very thing this
+	// function must not depend on.
+	claims := make(map[int64][]tierClaim)
 	for tier, objs := range perTier {
 		for _, o := range objs {
-			if prev, ok := owner[o.BaseOffset]; ok {
-				a, b := prev, tier
-				if a > b {
-					a, b = b, a
-				}
-				return nil, errors.Errorf(
-					"commitlog: tiers %s and %s both claim segment %d; "+
-						"one log's segments are in two stores",
-					a, b, o.BaseOffset)
-			}
-			owner[o.BaseOffset] = tier
-			out = append(out, o)
+			claims[o.BaseOffset] = append(claims[o.BaseOffset], tierClaim{tier: tier, obj: o})
 		}
+	}
+	out := make([]TierObject, 0, len(claims))
+	for base, cs := range claims {
+		if len(cs) == 1 {
+			out = append(out, cs[0].obj)
+			continue
+		}
+		won, err := resolveInterruptedMove(base, cs)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, won)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].BaseOffset < out[j].BaseOffset })
 	return out, nil
+}
+
+// resolveInterruptedMove picks the winner among two tiers claiming one segment,
+// and only when the claims themselves explain the disagreement.
+//
+// The destination of a move carries MovedFrom naming the source, so a pair
+// where exactly one claim names the other tier is a move that committed and did
+// not get to release. Both stores hold complete objects at that moment, so
+// either would serve the records — what matters is that every process picks the
+// SAME one, and that the choice comes from the stores.
+//
+// Deliberately narrow. Two claims with no marker is the fault this refusal was
+// written for. Both claiming to have moved from the other is not a state a move
+// can produce, so it is a fault too. More than two claims likewise: a move has
+// one source and one destination.
+func resolveInterruptedMove(base int64, claims []tierClaim) (TierObject, error) {
+	refuse := func() (TierObject, error) {
+		names := make([]string, 0, len(claims))
+		for _, c := range claims {
+			names = append(names, c.tier)
+		}
+		// Sorted, because map iteration decides which claim was seen first and
+		// an error message that changes between runs is one nobody can match on.
+		sort.Strings(names)
+		return TierObject{}, errors.Errorf(
+			"commitlog: tiers %s both claim segment %d; "+
+				"one log's segments are in two stores",
+			strings.Join(names, " and "), base)
+	}
+	if len(claims) != 2 {
+		return refuse()
+	}
+	a, b := claims[0], claims[1]
+	switch {
+	case a.obj.MovedFrom == b.tier && b.obj.MovedFrom != a.tier:
+		return a.obj, nil
+	case b.obj.MovedFrom == a.tier && a.obj.MovedFrom != b.tier:
+		return b.obj, nil
+	default:
+		return refuse()
+	}
+}
+
+// tierClaim is one tier's manifest saying it holds a segment. The tier is the
+// store the entry was READ from rather than the Tier the entry records: a
+// manifest copied between stores (CopyTier) names the tier it was written in,
+// and where an object actually is has to come from where it was found.
+type tierClaim struct {
+	tier string
+	obj  TierObject
 }
 
 // readMergedTierManifest reads every tier's manifest and merges them.

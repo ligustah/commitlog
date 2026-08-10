@@ -71,3 +71,62 @@ func TestOneTierMergesToItself(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, state, merged)
 }
+
+// A move that committed and did not get to release is resolved, not refused.
+//
+// The publish order is destination-then-source, because the reverse leaves a
+// segment named by nothing on a crash. That order means both tiers claim the
+// segment between the two Puts — the exact state above — and a crash there
+// would otherwise produce a log that will not open, from a routine background
+// move. The destination says which tier it came out of, so the source's claim
+// is known to be the stale one.
+func TestAnInterruptedMoveResolvesToTheDestination(t *testing.T) {
+	merged, err := mergeTierManifests(map[string][]TierObject{
+		"hot":  {{BaseOffset: 100, Tier: "hot", LogKey: "old"}},
+		"cold": {{BaseOffset: 100, Tier: "cold", LogKey: "new", MovedFrom: "hot"}},
+	})
+	require.NoError(t, err, "a move that crashed after its commit must still open")
+	require.Len(t, merged, 1)
+	require.Equal(t, "cold", merged[0].Tier)
+	require.Equal(t, "new", merged[0].LogKey,
+		"the destination's objects are the committed ones")
+}
+
+// The resolution is narrow on purpose: it reads what the stores say about a
+// move, and says nothing about any other disagreement.
+func TestOnlyAMoveResolvesADoubleClaim(t *testing.T) {
+	t.Run("a marker naming a tier that is not the other claimant", func(t *testing.T) {
+		_, err := mergeTierManifests(map[string][]TierObject{
+			"hot":  {{BaseOffset: 100, Tier: "hot", LogKey: "a"}},
+			"cold": {{BaseOffset: 100, Tier: "cold", LogKey: "b", MovedFrom: "archive"}},
+		})
+		require.Error(t, err, "a move out of a third tier does not explain these two claims")
+		require.Contains(t, err.Error(), "cold and hot")
+	})
+
+	t.Run("both claiming to have moved from the other", func(t *testing.T) {
+		_, err := mergeTierManifests(map[string][]TierObject{
+			"hot":  {{BaseOffset: 100, Tier: "hot", LogKey: "a", MovedFrom: "cold"}},
+			"cold": {{BaseOffset: 100, Tier: "cold", LogKey: "b", MovedFrom: "hot"}},
+		})
+		require.Error(t, err, "no move produces two destinations")
+	})
+
+	t.Run("three tiers claiming one segment", func(t *testing.T) {
+		_, err := mergeTierManifests(map[string][]TierObject{
+			"hot":     {{BaseOffset: 100, Tier: "hot", LogKey: "a"}},
+			"cold":    {{BaseOffset: 100, Tier: "cold", LogKey: "b", MovedFrom: "hot"}},
+			"archive": {{BaseOffset: 100, Tier: "archive", LogKey: "c"}},
+		})
+		require.Error(t, err, "a move has one source and one destination")
+		require.Contains(t, err.Error(), "archive and cold and hot")
+	})
+
+	t.Run("a marker naming the tier it is already in", func(t *testing.T) {
+		_, err := mergeTierManifests(map[string][]TierObject{
+			"hot":  {{BaseOffset: 100, Tier: "hot", LogKey: "a", MovedFrom: "hot"}},
+			"cold": {{BaseOffset: 100, Tier: "cold", LogKey: "b"}},
+		})
+		require.Error(t, err, "a tier cannot be the source of a move into itself")
+	})
+}

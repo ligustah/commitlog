@@ -818,7 +818,13 @@ run_guard "an object's tier must be configured" tier.go   '		if t.Name == name {
 # than by removing the check: the check reads a map the loop fills, so an empty
 # map disarms it exactly, and the loop variable stays used so the package still
 # builds.
-run_guard "one segment lives in one tier" manifest.go   '			owner[o.BaseOffset] = tier' '			_ = tier'   '^TestTwoTiersClaimingOneSegmentIsRefused$'
+run_guard "one segment lives in one tier" manifest.go   '			claims[o.BaseOffset] = append(claims[o.BaseOffset], tierClaim{tier: tier, obj: o})' '			claims[o.BaseOffset] = []tierClaim{{tier: tier, obj: o}}'   '^TestTwoTiersClaimingOneSegmentIsRefused$'
+
+# An interrupted move is the one double claim that resolves, and it must both
+# resolve and stay narrow. Two guards, from opposite directions: refusing
+# everything loses the recovery, and resolving everything loses the refusal.
+run_guard "an interrupted move resolves" manifest.go   '	if len(claims) != 2 {' '	if true {'   '^TestAnInterruptedMoveResolvesToTheDestination$'
+run_guard "only a move resolves a double claim" manifest.go   '	case a.obj.MovedFrom == b.tier && b.obj.MovedFrom != a.tier:' '	case true:'   '^TestOnlyAMoveResolvesADoubleClaim$'
 
 # A block-compressed offloaded segment has THREE objects. The orphan sweep
 # builds its live set twice over — from the manifest and from the log's own

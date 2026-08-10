@@ -64,6 +64,26 @@ type TierObject struct {
 	// BlockMode records whether the object is block-compressed, since it
 	// cannot be read correctly without knowing.
 	BlockMode bool
+	// MovedFrom names the tier this segment was moved OUT of, and is set only
+	// while that tier may still claim it. It is the one thing that makes an
+	// interrupted move recoverable.
+	//
+	// A move commits by publishing the destination's manifest and releases by
+	// publishing the source's, in that order — the same rule offload follows,
+	// because the reverse loses a segment entirely on a crash. Between the two
+	// Puts both tiers claim the segment, which is exactly the state
+	// mergeTierManifests refuses. Without this field a crash in that window
+	// leaves a log that will not open, produced by a routine background move.
+	//
+	// So the destination says where it came from, and the merge drops the
+	// source's stale claim. The refusal survives for what it was written for:
+	// two tiers claiming a segment with nothing to say why is still two stores
+	// attached to one log, and is still refused. The marker is cleared by
+	// republishing the destination once the source has let go, so it exists
+	// only across the window it describes.
+	//
+	// Omitted when empty so an ordinary manifest is unchanged by its existence.
+	MovedFrom string `json:",omitempty"`
 }
 
 // tierObject is meta's inverse: the same ten fields, plus the base offset that
