@@ -107,15 +107,6 @@ func (l *commitLog) primaryTier() (Tier, bool) {
 	return l.Tiers[0], true
 }
 
-// primaryStore is primaryTier's store, or nil. For the call sites that only
-// ever wanted somewhere to write.
-func (l *commitLog) primaryStore() SegmentStore {
-	if t, ok := l.primaryTier(); ok {
-		return t.Store
-	}
-	return nil
-}
-
 // storeForTier resolves the tier an object names to the store holding it.
 //
 // An unknown name is an ERROR, not a fallback to the primary tier. A manifest
