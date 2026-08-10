@@ -1369,7 +1369,8 @@ func (l *commitLog) closeSegments() error {
 	if l.segmentsClosed {
 		return nil
 	}
-	if err := l.checkpointHW(); err != nil {
+	// The last checkpoint this log will write, with a Close() waiting on it.
+	if err := l.checkpointHW(waitedOnRetryBudget); err != nil {
 		return err
 	}
 	for _, segment := range l.segments {
@@ -2087,7 +2088,7 @@ func (l *commitLog) checkpointHWLoop() {
 			l.mu.RUnlock()
 			return
 		}
-		if err := l.checkpointHW(); err != nil {
+		if err := l.checkpointHW(tickWriteRetryBudget); err != nil {
 			// Transient on Windows: the atomic rename can hit a sharing
 			// violation while a scanner holds the file. The checkpoint is
 			// only an optimization (RecoverTail rides out staleness), so a
@@ -2228,7 +2229,10 @@ func (l *commitLog) SyncAll() error {
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return l.checkpointHW()
+	// A durability BARRIER: the caller invoked this to make the log durable now
+	// and is waiting on the answer. Nothing retries it, so it waits the handle
+	// out rather than handing back a failure the tick would have shrugged off.
+	return l.checkpointHW(waitedOnRetryBudget)
 }
 
 // syncSegmentData fsyncs the LOG BYTES of every segment written since its last
@@ -2274,7 +2278,11 @@ func (l *commitLog) forEachSegment(sync func(*segment) error) error {
 	return nil
 }
 
-func (l *commitLog) checkpointHW() error {
+// checkpointHW writes the high watermark to disk. The budget is the CALLER's
+// property, not the file's: the same write is free to fail on the tick, which
+// has the next tick behind it, and must not fail for SyncAll or Close, which
+// have a caller waiting and nothing behind them. See tickWriteRetryBudget.
+func (l *commitLog) checkpointHW(budget time.Duration) error {
 	var (
 		hw   = l.hw
 		r    = strings.NewReader(strconv.FormatInt(hw, 10))
@@ -2287,7 +2295,7 @@ func (l *commitLog) checkpointHW() error {
 		return errors.Wrap(err, "failed to sync log file")
 	}
 
-	return AtomicWriteFileWithRetry(file, r)
+	return atomicWriteFileWithin(file, r, budget)
 }
 
 // Sidecars are small named metadata files owned by the log's CLIENT, stored

@@ -9,6 +9,35 @@ library from that fork onward.
 
 ### Fixed
 
+- **One retry budget served two callers with opposite failure economics.**
+  `atomicWriteRetryBudget` was 500ms, and its comment gave the reason: a
+  checkpoint write runs on a tick, a genuinely conflicted destination never
+  clears, and stalling every tick for seconds to discover that is worse than
+  letting the next tick try — *"a lost checkpoint write is retried by
+  definition"*. True for the tick. The same write is also reached by `SyncAll`
+  and by `Close`, which are durability BARRIERS: a caller invoked them to make
+  the log durable now and is waiting on the answer, and nothing retries them.
+  There the 500ms turned a transient Windows handle — precisely what
+  `AtomicWriteFileWithRetry` exists to ride out — into a hard failure out of a
+  user-facing operation. Reported from durable_streams as a failed stream
+  creation: `cannot replace ...replication-offset-checkpoint...: Access is
+  denied`.
+
+  The budgets now split on whether anything will retry the operation, which is
+  what actually differed, rather than on read versus write, which did not.
+  `waitedOnRetryBudget` (5s) covers every retry a caller waits on — the boot
+  read, `SyncAll`, `Close`, `PutSidecar`, and any caller outside this package
+  reaching the exported helpers, which cannot have a tick of ours behind it.
+  `tickWriteRetryBudget` (500ms) is the checkpoint tick alone, an order of
+  magnitude under the default `HWCheckpointInterval` so a stalling tick cannot
+  back the loop up. `readRetryBudget` and `atomicWriteRetryBudget` are gone;
+  the read side's bound is unchanged in value.
+
+  The suite could not see this: every Windows retry test released its handle at
+  120–300ms, comfortably inside even the short budget. The new one holds past
+  `tickWriteRetryBudget` and well inside `waitedOnRetryBudget`, so it fails on
+  exactly the bound that was wrong.
+
 - **A refused `DeleteStoreObjects` batch deleted a prefix of itself.** The
   documented contract was that the call is refused outright while a tier is
   read-only; the code checked each object as it reached it, so a batch ran

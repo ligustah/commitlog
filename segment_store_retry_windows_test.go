@@ -71,7 +71,7 @@ func TestAStoreReadRetriesThroughAHeldObject(t *testing.T) {
 	}()
 
 	<-started
-	time.Sleep(300 * time.Millisecond) // well inside readRetryBudget
+	time.Sleep(300 * time.Millisecond) // well inside waitedOnRetryBudget
 	require.NoError(t, syscall.CloseHandle(h))
 
 	require.NoError(t, <-result, "ReadAt gave up on a handle that cleared 300ms in")
@@ -100,8 +100,8 @@ func TestAStorePublishRetriesThroughAHeldDestination(t *testing.T) {
 	}
 
 	// Timed from the start of the publish, for the reason given on the read
-	// test, and shorter than the read's hold because the write side's budget is
-	// atomicWriteRetryBudget rather than readRetryBudget.
+	// test. The hold only has to be long enough to prove the retry happened at
+	// all; both sides now wait waitedOnRetryBudget.
 	second := []byte("second")
 	result := make(chan error, 1)
 	started := make(chan struct{})
@@ -111,7 +111,7 @@ func TestAStorePublishRetriesThroughAHeldDestination(t *testing.T) {
 	}()
 
 	<-started
-	time.Sleep(150 * time.Millisecond) // well inside atomicWriteRetryBudget
+	time.Sleep(150 * time.Millisecond) // well inside waitedOnRetryBudget
 	require.NoError(t, syscall.CloseHandle(h))
 
 	require.NoError(t, <-result, "the publish gave up on a handle that cleared 150ms in")
@@ -146,6 +146,6 @@ func TestAStoreReadOfAPermanentlyHeldObjectStillFails(t *testing.T) {
 	require.NoError(t, syscall.CloseHandle(h))
 
 	require.Error(t, rerr, "a permanently held object must fail, not be hidden")
-	require.Less(t, elapsed, 2*readRetryBudget,
-		"the retry must terminate on its budget (%s), took %s", readRetryBudget, elapsed)
+	require.Less(t, elapsed, 2*waitedOnRetryBudget,
+		"the retry must terminate on its budget (%s), took %s", waitedOnRetryBudget, elapsed)
 }

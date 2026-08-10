@@ -2220,7 +2220,7 @@ func (s *segment) Replace(old *segment) error {
 // reason: what is being waited out is a handle release, not a rename retry.
 // On unix the first attempt always succeeds and nothing is added.
 func openBackingWithRetry(path string) (*localBacking, error) {
-	deadline := time.Now().Add(readRetryBudget)
+	deadline := time.Now().Add(waitedOnRetryBudget)
 	for {
 		backing, err := openLocalBacking(path)
 		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {

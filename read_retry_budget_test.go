@@ -23,9 +23,9 @@ import (
 // the retry keeps trying. So the read waits out the whole budget, and the elapsed
 // time is the bound, observable without a platform-specific handle.
 func TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount(t *testing.T) {
-	restore := readRetryBudget
-	readRetryBudget = 1500 * time.Millisecond
-	t.Cleanup(func() { readRetryBudget = restore })
+	restore := waitedOnRetryBudget
+	waitedOnRetryBudget = 1500 * time.Millisecond
+	t.Cleanup(func() { waitedOnRetryBudget = restore })
 
 	dir := tempDir(t)
 	defer remove(t, dir)
@@ -40,9 +40,9 @@ func TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount(t *testing.T) {
 
 	// An attempt count of 25 at 20ms would have given up after ~500ms, whatever
 	// the budget said.
-	require.GreaterOrEqual(t, elapsed, readRetryBudget-100*time.Millisecond,
+	require.GreaterOrEqual(t, elapsed, waitedOnRetryBudget-100*time.Millisecond,
 		"the read gave up after %s; the budget is %s, so the bound is still "+
-			"counting attempts rather than spending time", elapsed, readRetryBudget)
-	require.Less(t, elapsed, 2*readRetryBudget,
+			"counting attempts rather than spending time", elapsed, waitedOnRetryBudget)
+	require.Less(t, elapsed, 2*waitedOnRetryBudget,
 		"the read overran its budget by more than double (%s)", elapsed)
 }

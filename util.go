@@ -174,23 +174,33 @@ func removeAllWithRetry(path string) error {
 // this is the same split as RewriteBudget/TierBudgets: one number for two
 // operations means the cheaper one sets the price for both.
 //
+// What splits them is NOT read versus write. It is whether anything will retry
+// the operation if it fails. A caller waiting on the result has nothing behind
+// it, so giving up hands it a failure it did not have to have; a tick has the
+// next tick behind it, so waiting only stalls the loop to learn what the next
+// one would learn for free.
+//
 // Vars rather than consts so a test can shrink them; nothing mutates them at
 // runtime.
 var (
 	atomicWriteRetryDelay = 20 * time.Millisecond
-	// readRetryBudget bounds ReadFileWithRetry. Generous: this read happens
-	// once, on the boot path, and the file it reads is the log's own metadata.
-	// Waiting costs milliseconds on a path that runs at startup; giving up costs
-	// a node that does not come back from a crash until something restarts the
-	// process for it. There is no tick to stall.
-	readRetryBudget = 5 * time.Second
-	// atomicWriteRetryBudget bounds AtomicWriteFileWithRetry, and stays short
-	// for the reason it always was: a checkpoint write runs on a tick, a
-	// genuinely conflicted one (a second live writer, a read-only file) never
-	// clears, and stalling every tick for seconds to discover that is worse than
-	// failing and letting the next tick try. A lost checkpoint write is retried
-	// by definition; a lost boot read is not.
-	atomicWriteRetryBudget = 500 * time.Millisecond
+	// waitedOnRetryBudget bounds every retry a CALLER is waiting on: the boot
+	// read of the log's own metadata, and the writes a caller invoked to make
+	// something durable now (SyncAll, Close, PutSidecar) — including anything
+	// outside this package reaching the exported functions, which by definition
+	// has no tick behind it either. Generous, because the sides are not close:
+	// waiting costs milliseconds on a condition that clears in milliseconds,
+	// and giving up costs a node that does not come back from a crash, or a
+	// user-facing operation that fails with "Access is denied".
+	waitedOnRetryBudget = 5 * time.Second
+	// tickWriteRetryBudget bounds the checkpoint write that runs on the HW
+	// checkpoint TICK, and stays short for the reason the single budget always
+	// was: a genuinely conflicted destination (a second live writer, a read-only
+	// file) never clears, and stalling every tick for seconds to discover that
+	// is worse than failing and letting the next tick try. A lost checkpoint
+	// tick is retried by definition. Shorter than HWCheckpointInterval's default
+	// by an order of magnitude, so a stalling tick cannot back the loop up.
+	tickWriteRetryBudget = 500 * time.Millisecond
 )
 
 // AtomicWriteFileWithRetry writes a file atomically, retrying briefly. The retry
@@ -202,7 +212,7 @@ var (
 // been reaped.
 //
 // The condition clears in milliseconds, while a real conflict (a second live
-// writer, a read-only file) never does, so the bound — atomicWriteRetryBudget —
+// writer, a read-only file) never does, so the bound — waitedOnRetryBudget —
 // keeps that case failing instead of hiding it behind a stall. On Unix rename is
 // atomic and the first attempt always succeeds, so nothing is added there.
 //
@@ -213,9 +223,9 @@ var (
 // is silently wrong on exactly the path this exists for.
 //
 // ReadFileWithRetry reads a file, retrying, and is the read-side twin of
-// AtomicWriteFileWithRetry — same platform reason, a longer bound. It waits
-// readRetryBudget rather than atomicWriteRetryBudget because the two sides fail
-// differently: see those two.
+// AtomicWriteFileWithRetry — same platform reason, same bound. Read and write
+// wait the same because the discriminator is not the direction: it is that
+// both of these have a caller waiting on them and nothing behind them.
 //
 // On Windows a handle held by a process that has just been killed is not closed
 // when TerminateProcess returns; the OS reclaims it asynchronously. An open in
@@ -249,7 +259,7 @@ var (
 // legitimate state a caller distinguishes (ErrObjectNotFound) and locked is a
 // race worth waiting out.
 func openWithRetry(path string) (*os.File, error) {
-	deadline := time.Now().Add(readRetryBudget)
+	deadline := time.Now().Add(waitedOnRetryBudget)
 	for {
 		f, err := os.Open(path)
 		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
@@ -279,7 +289,7 @@ func openWithRetry(path string) (*os.File, error) {
 // guardcheck reported the retry as uncovered because nothing can falsify it. An
 // untestable retry on a call that does not fail is complexity, not safety.
 func renameWithRetry(oldpath, newpath string) error {
-	deadline := time.Now().Add(atomicWriteRetryBudget)
+	deadline := time.Now().Add(waitedOnRetryBudget)
 	for {
 		err := os.Rename(oldpath, newpath)
 		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
@@ -292,7 +302,7 @@ func renameWithRetry(oldpath, newpath string) error {
 // Exported alongside AtomicWriteFileWithRetry for callers that read the same
 // kinds of small files next to a log.
 func ReadFileWithRetry(path string) ([]byte, error) {
-	deadline := time.Now().Add(readRetryBudget)
+	deadline := time.Now().Add(waitedOnRetryBudget)
 	for {
 		b, err := os.ReadFile(path)
 		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
@@ -303,13 +313,22 @@ func ReadFileWithRetry(path string) ([]byte, error) {
 }
 
 // Exported for callers outside this package that write small config or
-// checkpoint files next to a log and hit the same Windows failure.
+// checkpoint files next to a log and hit the same Windows failure. Such a
+// caller is waiting on the result by construction — there is no way for it to
+// have a tick of ours behind it — so it gets waitedOnRetryBudget.
 func AtomicWriteFileWithRetry(path string, r io.Reader) error {
+	return atomicWriteFileWithin(path, r, waitedOnRetryBudget)
+}
+
+// atomicWriteFileWithin is AtomicWriteFileWithRetry with the budget named by
+// the caller, for the one caller whose failure is free: see
+// tickWriteRetryBudget.
+func atomicWriteFileWithin(path string, r io.Reader, budget time.Duration) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return pkgErrors.Wrap(err, "failed to buffer atomic write payload")
 	}
-	deadline := time.Now().Add(atomicWriteRetryBudget)
+	deadline := time.Now().Add(budget)
 	for {
 		err = atomic_file.WriteFile(path, bytes.NewReader(data))
 		if err == nil || time.Now().After(deadline) {

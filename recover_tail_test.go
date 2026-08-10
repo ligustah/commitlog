@@ -50,7 +50,7 @@ func TestRecoverTailTruncatesTornSuffix(t *testing.T) {
 		require.NoError(t, err)
 	}
 	l.SetHighWatermark(2)
-	require.NoError(t, l.(*commitLog).checkpointHW())
+	require.NoError(t, l.(*commitLog).checkpointHW(waitedOnRetryBudget))
 	require.NoError(t, l.Close())
 
 	// Tear the tail: append garbage bytes to the segment file.

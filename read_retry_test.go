@@ -31,8 +31,8 @@ func TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound(t *testing.T) {
 
 	// Anything near the full bound means the absence was retried rather than
 	// returned.
-	require.Less(t, elapsed, readRetryBudget/10,
-		"a missing file was retried for %s; the retry bound is %s", elapsed, readRetryBudget)
+	require.Less(t, elapsed, waitedOnRetryBudget/10,
+		"a missing file was retried for %s; the retry bound is %s", elapsed, waitedOnRetryBudget)
 }
 
 // The ordinary path still works: a readable file comes back on the first try,

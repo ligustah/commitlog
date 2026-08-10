@@ -628,8 +628,15 @@ run_guard "a ceiling of zero is not unset" clean.go   '	if !b.set {
 # without changing its shape, which is the bug it had: a 500ms ceiling nothing
 # named, that lost 2 of 86 daemon restarts on a loaded box.
 run_guard "the read retry spends its whole budget" util.go   $'func ReadFileWithRetry(path string) ([]byte, error) {
-	deadline := time.Now().Add(readRetryBudget)'   $'func ReadFileWithRetry(path string) ([]byte, error) {
-	deadline := time.Now().Add(readRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
+	deadline := time.Now().Add(waitedOnRetryBudget)'   $'func ReadFileWithRetry(path string) ([]byte, error) {
+	deadline := time.Now().Add(waitedOnRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
+
+# A durability BARRIER waits longer than a tick. Same checkpoint write, two
+# callers with opposite failure economics: the tick has the next tick behind it,
+# SyncAll has a caller waiting and nothing. The neutralization hands SyncAll the
+# tick's budget, which is the single-budget version that failed a stream
+# creation in durable_streams on a handle that cleared moments later.
+run_guard_windows "a barrier waits longer than a tick" commitlog.go   '	return l.checkpointHW(waitedOnRetryBudget)' '	return l.checkpointHW(tickWriteRetryBudget)'   '^TestSyncAllRidesOutAHandleTheTickWouldGiveUpOn$'
 
 # Opening an offloaded tier reads NOTHING the manifest names -- not the log
 # objects, not the block tables. The manifest entry carries blockMode, position

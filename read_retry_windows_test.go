@@ -82,6 +82,6 @@ func TestARecoveryReadOfAPermanentlyHeldFileStillFails(t *testing.T) {
 	require.NoError(t, syscall.CloseHandle(h))
 
 	require.Error(t, err, "a permanently held file must fail, not be hidden")
-	require.Less(t, elapsed, 2*readRetryBudget,
-		"the retry must terminate on its budget (%s), took %s", readRetryBudget, elapsed)
+	require.Less(t, elapsed, 2*waitedOnRetryBudget,
+		"the retry must terminate on its budget (%s), took %s", waitedOnRetryBudget, elapsed)
 }

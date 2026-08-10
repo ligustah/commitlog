@@ -80,3 +80,47 @@ func TestAtomicWritePermanentHandleStillFails(t *testing.T) {
 	require.NoError(t, rerr)
 	require.Equal(t, "first", string(got), "a failed write must leave the old contents")
 }
+
+// SyncAll rides out a handle that outlives the TICK's budget.
+//
+// This is the case a single budget could not express. The checkpoint write is
+// shared between the HW checkpoint tick and SyncAll, and only one of them has
+// anything behind it: a lost tick is retried by the next tick, while SyncAll is
+// a durability barrier a caller invoked and is waiting on. Bounding both at the
+// tick's 500ms turned a transient Windows handle — exactly what the retry
+// exists to ride out — into a failed stream creation in durable_streams,
+// surfacing as "cannot replace ...replication-offset-checkpoint...: Access is
+// denied" out of a user-facing operation.
+//
+// The hold is deliberately longer than tickWriteRetryBudget and well inside
+// waitedOnRetryBudget: a suite whose only handle clears in 120ms cannot see a
+// budget that is too short for the caller holding it.
+func TestSyncAllRidesOutAHandleTheTickWouldGiveUpOn(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path:                 tempDir(t),
+		MaxSegmentBytes:      1 << 20,
+		HWCheckpointInterval: time.Hour, // no background tick racing this
+		CleanerInterval:      time.Hour,
+	})
+	defer cleanup()
+
+	_, err := l.Append([]*Message{{Key: []byte("k"), Value: []byte("v")}})
+	require.NoError(t, err)
+	l.SetHighWatermark(0)
+	require.NoError(t, l.SyncAll(), "the checkpoint file must exist before it can be held")
+
+	hold := tickWriteRetryBudget + 250*time.Millisecond
+	require.Less(t, hold, waitedOnRetryBudget, "the fixture must sit BETWEEN the two budgets")
+
+	h := openDenyAll(t, filepath.Join(l.Path, hwFileName))
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(hold)
+		syscall.CloseHandle(h) // nolint: errcheck
+		close(released)
+	}()
+
+	require.NoError(t, l.SyncAll(),
+		"a barrier with nothing behind it must wait the handle out, not fail the caller")
+	<-released
+}
