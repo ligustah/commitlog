@@ -252,21 +252,47 @@ type CleanSpec struct {
 	// spent in drop-density order. 0 = unbounded. At least one rewrite
 	// always proceeds.
 	RewriteBudget time.Duration
-	// TierRewriteBudget bounds, separately, how long one pass may spend
-	// rewriting segments whose bytes live in a SegmentStore. Zero falls back to
-	// RewriteBudget, so a caller that sets nothing sees no change.
+	// TierBudgets bounds, per tier, how long one pass may spend rewriting
+	// segments whose bytes live in that tier's store. A tier with no entry
+	// falls back to RewriteBudget, so a caller that sets nothing sees no
+	// change.
 	//
-	// It is separate because the two rewrites cost wildly different things. A
-	// local rewrite reads and writes local disk; a tiered one downloads the
-	// object, rewrites, and uploads the result — orders of magnitude slower
-	// against remote storage, and metered. Sharing one wall-clock budget lets a
-	// single slow tiered rewrite consume the whole pass and starve local
-	// compaction indefinitely, which is the case this exists to prevent: local
-	// debt would grow while the pass spends its seconds on one remote object.
+	// Separate from RewriteBudget because the two rewrites cost wildly
+	// different things. A local rewrite reads and writes local disk; a tiered
+	// one downloads the object, rewrites, and uploads the result — orders of
+	// magnitude slower against remote storage, and metered. Sharing one
+	// wall-clock budget lets a single slow tiered rewrite consume the whole
+	// pass and starve local compaction indefinitely, which is the case this
+	// exists to prevent: local debt would grow while the pass spends its
+	// seconds on one remote object.
 	//
-	// Both budgets still guarantee at least one rewrite, so debt in either tier
-	// always drains rather than deadlocking under a small budget.
-	TierRewriteBudget time.Duration
+	// Separate PER TIER for the same reason one step down: a rewrite in a fast
+	// nearby store and one in a cold archive differ by as much as local and
+	// remote do, and a caller that gives its archive a small budget must not
+	// thereby shrink its hot tier's.
+	//
+	// Every budget still guarantees at least one rewrite, so debt anywhere
+	// drains rather than deadlocking under a small budget.
+	TierBudgets map[string]time.Duration
+	// TierPlacement names, per segment base offset, the tier that segment
+	// should live in after this pass. A segment absent from the map does not
+	// move, and a segment already in the tier named does not move either.
+	//
+	// This is the second hop, and it is expressed rather than scheduled.
+	// commitlog moves the bytes; the caller decides when, because descent
+	// between stores is a policy question about cost and durability that only
+	// the caller has the context for. The FIRST hop — local disk into the
+	// nearest tier — is scheduled here, by LocalRetentionAge, because it is
+	// about local disk pressure, which the log can see and the caller cannot.
+	//
+	// Keyed by base offset because that is how TierObject identifies a segment,
+	// and by tier NAME rather than index because indices renumber when a caller
+	// edits its chain and a renumber must not silently redirect bytes.
+	//
+	// A tier that is not in Options.Tiers is an error and nothing moves. A base
+	// offset with no offloaded segment behind it is skipped — see movePlaced
+	// for why those two differ.
+	TierPlacement map[int64]string
 	// skipTiers names the tiers this log may not write to. Segments in one are
 	// left entirely alone: no rewrite, and no tier retention. Local segments,
 	// and segments in the tiers not named, compact and retain as usual.
@@ -472,6 +498,17 @@ func (l *commitLog) cleanPass(spec CleanSpec) (int64, error) {
 	err := l.leaderEpochCache.ClearEarliest(l.segments[0].BaseOffset)
 	l.mu.Unlock()
 
+	// Placement, once the pass's own segment list is installed: a move repoints
+	// a segment the log is serving, so it has to be the segment the log will
+	// still be serving afterwards, not one this pass replaced.
+	//
+	// Its error is held rather than returned, exactly like cleanErr below. A
+	// move that stopped partway has already published a manifest or two, and
+	// the republish underneath is what puts every tier back into agreement —
+	// including clearing the MovedFrom marker of any move that did complete.
+	placed, moveErr := l.movePlaced(spec.TierPlacement)
+	superseded = append(superseded, placed...)
+
 	// Republish what the tier now holds. A pass can rewrite a segment onto new
 	// objects and retention can drop others, so the manifest is stale the
 	// moment either happens — and a stale manifest is worse than none, since it
@@ -501,6 +538,12 @@ func (l *commitLog) cleanPass(spec CleanSpec) (int64, error) {
 	// segments above; report it once the read path is consistent.
 	if cleanErr != nil {
 		return -1, cleanErr
+	}
+	// Reported after the republish for the same reason: a move that stopped
+	// partway leaves the log serving whichever tier it got as far as, and the
+	// caller sees the failure once every manifest agrees with that.
+	if moveErr != nil {
+		return -1, moveErr
 	}
 	return verified, err
 }

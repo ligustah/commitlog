@@ -93,6 +93,24 @@ type tierManifest struct {
 // Caller must not hold l.mu, and must not hold the segment lock of any segment a
 // pending entry describes: tierState reads every segment under its read lock.
 func (l *commitLog) writeTierManifest(pending ...TierObject) error {
+	return l.publishTierManifests("", pending...)
+}
+
+// writeOneTierManifest publishes ONE tier's manifest and leaves every other
+// tier's alone.
+//
+// The mover needs it and nothing else does. A move commits by publishing the
+// destination's manifest and releases by publishing the source's, in that
+// order — and writing both at once would make that order an accident of how
+// the caller listed Options.Tiers, which is exactly the kind of dependence the
+// merge at open refuses to have.
+func (l *commitLog) writeOneTierManifest(tier string, pending ...TierObject) error {
+	return l.publishTierManifests(tier, pending...)
+}
+
+// publishTierManifests rebuilds and publishes the manifests of every writable
+// tier, or of just `only` when it is named.
+func (l *commitLog) publishTierManifests(only string, pending ...TierObject) error {
 	if !l.hasTier() {
 		return nil
 	}
@@ -134,6 +152,9 @@ func (l *commitLog) writeTierManifest(pending ...TierObject) error {
 		byTier[o.Tier] = append(byTier[o.Tier], o)
 	}
 	for _, t := range l.Tiers {
+		if only != "" && t.Name != only {
+			continue
+		}
 		// A tier this log does not own is not written to, manifest included: the
 		// manifest is a claim about the store, and a process that does not own
 		// the store has no business republishing what it holds.

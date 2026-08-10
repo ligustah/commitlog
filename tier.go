@@ -50,22 +50,29 @@ type Tier struct {
 	ReadOnly bool
 }
 
-// validateTiers refuses a chain this build cannot honour.
+// validateTiers checks a chain.
 //
-// More than one tier is refused rather than truncated: a caller who configures
-// an archive below its hot tier and gets one that silently never receives
-// anything has been told its data is somewhere it is not. Step 3 of
-// docs/multi-store-tiering.md lifts this.
+// It used to refuse more than one tier outright, because until a segment could
+// be PLACED, a caller who configured an archive below its hot tier got one that
+// silently never received anything — told its data was somewhere it is not.
+// CleanSpec.TierPlacement is what removed that, so the refusal went with it.
 func validateTiers(tiers []Tier) error {
-	if len(tiers) > 1 {
-		return errors.Errorf(
-			"commitlog: Options.Tiers has %d tiers; this build supports one, and "+
-				"a second store would silently never be written to", len(tiers))
-	}
+	seen := make(map[string]bool, len(tiers))
 	for _, t := range tiers {
 		if t.Name == "" {
 			return errors.New("commitlog: a tier in Options.Tiers has no Name")
 		}
+		// Names are how everything resolves a tier — a manifest entry, a
+		// placement, a reclaim, a handover. Two tiers sharing one would make
+		// every one of those answer for whichever was listed first, so the
+		// caller's second store would be unreachable in exactly the way the
+		// old length-1 refusal existed to prevent.
+		if seen[t.Name] {
+			return errors.Errorf(
+				"commitlog: Options.Tiers names tier %q twice; a tier's name is how "+
+					"an object, a placement and a handover find its store", t.Name)
+		}
+		seen[t.Name] = true
 		if t.Store == nil {
 			return errors.Errorf("commitlog: tier %q in Options.Tiers has no Store", t.Name)
 		}

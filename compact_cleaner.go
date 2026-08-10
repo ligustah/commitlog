@@ -272,18 +272,32 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// Rewrite phase, density order, one shared budget and block accumulator.
 	// Epoch assignments are only COLLECTED here (the cache requires
 	// ascending-offset feeding, which the offset-order assembly below does).
-	// Two budgets, drawn on by tier. A tiered rewrite downloads the object,
-	// rewrites it and uploads the result, where a local one touches local disk
-	// only — so a single shared wall-clock budget lets one slow remote rewrite
-	// consume the pass and starve local compaction while local debt grows.
-	// TierRewriteBudget defaults to RewriteBudget, so a caller that sets
-	// nothing sees exactly the previous behaviour.
-	tierDur := spec.TierRewriteBudget
-	if tierDur == 0 {
-		tierDur = spec.RewriteBudget
-	}
+	// One budget for local disk and ONE PER TIER, drawn on by where the
+	// segment's bytes are. A tiered rewrite downloads the object, rewrites it
+	// and uploads the result, where a local one touches local disk only — so a
+	// single shared wall-clock budget lets one slow remote rewrite consume the
+	// pass and starve local compaction while local debt grows.
+	//
+	// Per tier rather than one for all of them because the tiers in a chain are
+	// not alike either: a rewrite in a fast nearby store and one in a cold
+	// archive differ by as much as local and remote do, and a caller that gives
+	// the archive a small budget should not thereby shrink the hot tier's.
+	// A tier with no entry in TierBudgets falls back to RewriteBudget, so a
+	// caller that sets nothing sees exactly the previous behaviour.
 	budget := newRewriteBudget(spec.maxRewrites, spec.RewriteBudget)
-	tierBudget := newRewriteBudget(spec.maxRewrites, tierDur)
+	tierBudgets := make(map[string]*rewriteBudget)
+	budgetFor := func(tier string) *rewriteBudget {
+		if b, ok := tierBudgets[tier]; ok {
+			return b
+		}
+		d, ok := spec.TierBudgets[tier]
+		if !ok || d == 0 {
+			d = spec.RewriteBudget
+		}
+		b := newRewriteBudget(spec.maxRewrites, d)
+		tierBudgets[tier] = b
+		return b
+	}
 	bw := &blockWriter{}
 	sc := newBlockCache() // one decode-buffer pair for the whole pass
 	rewritten := make([]*segment, n)
@@ -301,7 +315,7 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		b := budget
 		tiered := segments[i].isOffloaded()
 		if tiered {
-			b = tierBudget
+			b = budgetFor(segments[i].tier)
 		}
 		// A read-only tier is not a budget: no rewrite of a tiered segment happens at
 		// all, because for a caller that does not own tier writes a single one

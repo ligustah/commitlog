@@ -144,17 +144,28 @@ func requireAbsent(dst SegmentStore, key, what string) error {
 // SegmentStore.Stream exists to express: against an object store the bill is per
 // request, and a windowed copy of a 1 GiB segment is a thousand of them.
 func copyObject(src, dst SegmentStore, key string) error {
-	size, err := src.Size(key)
+	return copyObjectAs(src, dst, key, key)
+}
+
+// copyObjectAs streams one object across under a different name.
+//
+// A move between tiers takes fresh keys rather than the source's, so the two
+// stores never hold an object of the same name for the same segment. That
+// costs nothing and removes a whole failure mode: if a caller ever configures
+// one store as two tiers, reclaiming the source would otherwise delete the
+// destination's object out from under the log.
+func copyObjectAs(src, dst SegmentStore, srcKey, dstKey string) error {
+	size, err := src.Size(srcKey)
 	if err != nil {
-		return errors.Wrapf(err, "stat %s", key)
+		return errors.Wrapf(err, "stat %s", srcKey)
 	}
-	r, err := src.Stream(key, 0)
+	r, err := src.Stream(srcKey, 0)
 	if err != nil {
-		return errors.Wrapf(err, "open %s", key)
+		return errors.Wrapf(err, "open %s", srcKey)
 	}
 	defer r.Close()
-	if err := dst.Put(key, r, size); err != nil {
-		return errors.Wrapf(err, "put %s", key)
+	if err := dst.Put(dstKey, r, size); err != nil {
+		return errors.Wrapf(err, "put %s", dstKey)
 	}
 	return nil
 }

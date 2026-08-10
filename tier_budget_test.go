@@ -1,6 +1,7 @@
 package commitlog
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -74,10 +75,10 @@ func TestTierBudgetDoesNotStarveLocalCompaction(t *testing.T) {
 	// A tier budget already spent, with local rewrites still affordable.
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
-		Ceiling:           At(hw + 1),
-		TombstoneGCBelow:  hw + 1,
-		RewriteBudget:     time.Hour,
-		TierRewriteBudget: time.Nanosecond,
+		Ceiling:          At(hw + 1),
+		TombstoneGCBelow: hw + 1,
+		RewriteBudget:    time.Hour,
+		TierBudgets:      map[string]time.Duration{defaultTierName: time.Nanosecond},
 	})
 	require.NoError(t, err)
 
@@ -104,8 +105,8 @@ func TestTierBudgetDoesNotStarveLocalCompaction(t *testing.T) {
 	require.NotEmpty(t, readFrom(t, l))
 }
 
-// An unset TierRewriteBudget falls back to RewriteBudget, so a caller that sets
-// nothing sees exactly the previous behaviour.
+// A tier with no entry in TierBudgets falls back to RewriteBudget, so a caller
+// that sets nothing sees exactly the previous behaviour.
 func TestTierBudgetDefaultsToTheRewriteBudget(t *testing.T) {
 	dir := tempDir(t)
 	store, err := NewFileSegmentStore(filepath.Join(dir, "store"))
@@ -169,4 +170,106 @@ func TestTierBudgetDefaultsToTheRewriteBudget(t *testing.T) {
 	l.mu.RUnlock()
 	require.Positive(t, advanced,
 		"with no tier budget set, the shared budget must still fund tiered rewrites")
+}
+
+// One tier's budget is one tier's. Two tiers each get their own allowance, so a
+// caller that gives its cold archive a small budget does not thereby shrink
+// what its hot tier may spend.
+//
+// The discriminator is the "at least one rewrite" floor every budget carries:
+// under a single shared tier budget an exhausted allowance permits ONE tiered
+// rewrite in the whole pass, and under per-tier budgets it permits one in each.
+func TestOneTiersBudgetDoesNotShrinkAnothers(t *testing.T) {
+	dir := tempDir(t)
+	hot, err := NewFileSegmentStore(filepath.Join(dir, "hot"))
+	require.NoError(t, err)
+	cold, err := NewFileSegmentStore(filepath.Join(dir, "cold"))
+	require.NoError(t, err)
+
+	l, cleanup := setupWithOptions(t, Options{
+		Path:            dir,
+		MaxSegmentBytes: 64,
+		Compact:         true,
+		Tiers: []Tier{
+			{Name: "hot", Store: hot},
+			{Name: "cold", Store: cold},
+		},
+		DisableAutoClean: true,
+	})
+	defer cleanup()
+
+	// Alternating keys, so every segment holds both a record compaction drops
+	// and one it keeps. A segment whose records are ALL superseded is deleted
+	// rather than rewritten, and a deletion costs no budget — the fixture has
+	// to produce rewrites for a rewrite budget to be observable at all.
+	var last int64
+	for i := 0; i < 40; i++ {
+		key := "k"
+		if i%2 == 1 {
+			key = fmt.Sprintf("u%d", i)
+		}
+		offs, err := l.Append([]*Message{{Key: []byte(key), Value: []byte("padding value")}})
+		require.NoError(t, err)
+		last = offs[0]
+	}
+	l.SetHighWatermark(last)
+	n, err := l.OffloadBefore(last)
+	require.NoError(t, err)
+	require.Positive(t, n)
+
+	// Half into the archive, with a ceiling of zero so this pass compacts
+	// nothing: the rewrite work has to survive to the pass under test.
+	objs, err := l.TierManifest()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(objs), 4, "the fixture needs segments to split between tiers")
+	placement := map[int64]string{}
+	for _, o := range objs[len(objs)/2:] {
+		placement[o.BaseOffset] = "cold"
+	}
+	_, err = l.CleanWithSpec(CleanSpec{TierPlacement: placement, Ceiling: At(0)})
+	require.NoError(t, err)
+
+	keysBefore, tierOfSeg := map[int64]string{}, map[int64]string{}
+	l.mu.RLock()
+	for _, s := range l.segments {
+		s.RLock()
+		if s.store != nil {
+			keysBefore[s.BaseOffset] = s.storeKey
+			tierOfSeg[s.BaseOffset] = s.tier
+		}
+		s.RUnlock()
+	}
+	l.mu.RUnlock()
+	inTier := map[string]int{}
+	for _, tier := range tierOfSeg {
+		inTier[tier]++
+	}
+	require.Positive(t, inTier["hot"], "the fixture needs segments in both tiers")
+	require.Positive(t, inTier["cold"])
+
+	// Both tiers exhausted. Each must still get its own single rewrite.
+	hw := l.HighWatermark()
+	_, err = l.CleanWithSpec(CleanSpec{
+		Ceiling:          At(hw + 1),
+		TombstoneGCBelow: hw + 1,
+		RewriteBudget:    time.Hour,
+		TierBudgets:      map[string]time.Duration{"hot": time.Nanosecond, "cold": time.Nanosecond},
+	})
+	require.NoError(t, err)
+
+	advanced := map[string]int{}
+	l.mu.RLock()
+	for _, s := range l.segments {
+		s.RLock()
+		if before, ok := keysBefore[s.BaseOffset]; ok && s.store != nil && s.storeKey != before {
+			advanced[tierOfSeg[s.BaseOffset]]++
+		}
+		s.RUnlock()
+	}
+	l.mu.RUnlock()
+
+	require.Equal(t, 1, advanced["hot"],
+		"the hot tier's floor is the hot tier's, whatever the archive's budget is")
+	require.Equal(t, 1, advanced["cold"],
+		"and the archive's is its own; one shared budget would allow only one rewrite in total")
 }

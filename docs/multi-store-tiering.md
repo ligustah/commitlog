@@ -210,17 +210,33 @@ master one at a time and the restriction lifts LAST, in the same release.
 
   The cleaner takes its tiers as data, so all of this is exercised against a
   two-tier chain today, ahead of the configuration that 3d will allow.
-- **3c — placement.** `CleanSpec.TierPlacement map[int64]string` and
-  `TierBudgets map[string]time.Duration` replacing `TierRewriteBudget`; the
-  mover that copies a segment's objects into the destination tier, publishes
-  the destination manifest, drops the entry from the source manifest, and
-  queues the source objects for reclaim. The publish order is the same rule
-  offload already follows: the destination is committed before the source is
-  released, so a crash leaves a recognisable orphan rather than a segment
-  named by nothing.
-- **3d — lift the refusal.** `validateTiers` stops refusing a chain and starts
-  checking it: duplicate names become an error (they are unreachable today,
-  which is why step 2 does not check them).
+- **3c — placement. Done, unreleased.** `CleanSpec.TierPlacement
+  map[int64]string` and `TierBudgets map[string]time.Duration` replacing
+  `TierRewriteBudget`; the mover that copies a segment's objects into the
+  destination tier, publishes the destination manifest, drops the entry from
+  the source manifest, and queues the source objects for reclaim.
+
+  **The publish order this doc specified contradicts the refusal it also
+  specified**, and that is the one thing step 3 had to solve rather than
+  implement. Committing the destination before releasing the source is right —
+  the reverse leaves a segment named by nothing — but between the two Puts both
+  tiers claim the segment, which is exactly what `mergeTierManifests` refuses.
+  A crash there would have produced a log nobody can open, from a routine
+  background move.
+
+  So `TierObject.MovedFrom` records, on the destination entry, which tier the
+  segment came out of, and the merge drops the source's stale claim. This does
+  not waive 3a's principle, it satisfies it: the answer comes from what the
+  stores say, not from how the caller listed them. Every other double claim is
+  still refused, and the marker is cleared once the source has let go.
+
+  The mover is deliberately NOT budgeted. How many segments move is a decision
+  the caller already makes, one entry at a time, in the map it passes.
+- **3d — lift the refusal. Done, unreleased, in the same release as 3c.**
+  `validateTiers` stopped refusing a chain and started checking it: duplicate
+  names are an error. It lifted with placement rather than before it, because
+  a second tier that nothing can be placed into is the silent archive the
+  refusal existed to prevent.
 
 Steps 1 and 2 were mechanical and independently released. Step 3 is where the
 real work and the real risk are.

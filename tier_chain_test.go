@@ -10,30 +10,41 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A chain this build cannot honour is refused at New, not accepted and half
-// used.
+// A chain New cannot honour is refused at New, not accepted and half used.
 //
-// Step 2 of docs/multi-store-tiering.md carries the plumbing for a chain while
-// still enforcing one tier. A caller who configures an archive below its hot
-// tier and gets one that silently never receives anything has been told its
-// data is somewhere it is not — which is worse than being told the build cannot
-// do it yet, and indistinguishable from working until the first time anyone
-// looks in the archive.
-func TestATierChainThisBuildCannotHonourIsRefused(t *testing.T) {
+// The refusal that used to be here was of a chain longer than one, and it was
+// right for as long as a segment could not be PLACED: a caller who configures
+// an archive below its hot tier and gets one that silently never receives
+// anything has been told its data is somewhere it is not, which is worse than
+// being told the build cannot do it yet and indistinguishable from working
+// until someone looks in the archive. CleanSpec.TierPlacement is what made a
+// second tier reachable, so what remains is the chains that are still
+// unusable — and a duplicate name is one, for exactly the same reason: every
+// lookup answers for whichever store was listed first.
+func TestAChainNewCannotHonourIsRefused(t *testing.T) {
 	dir := tempDir(t)
 	hot, err := NewFileSegmentStore(filepath.Join(dir, "hot"))
 	require.NoError(t, err)
 	cold, err := NewFileSegmentStore(filepath.Join(dir, "cold"))
 	require.NoError(t, err)
 
-	t.Run("more than one tier", func(t *testing.T) {
+	t.Run("two tiers with one name", func(t *testing.T) {
+		l, err := New(Options{Path: tempDir(t), MaxSegmentBytes: 1024, Tiers: []Tier{
+			{Name: "hot", Store: hot},
+			{Name: "hot", Store: cold},
+		}})
+		require.Error(t, err, "a name is how a placement and a manifest entry find a store")
+		require.Nil(t, l)
+		require.Contains(t, err.Error(), "twice")
+	})
+
+	t.Run("a chain of two", func(t *testing.T) {
 		l, err := New(Options{Path: tempDir(t), MaxSegmentBytes: 1024, Tiers: []Tier{
 			{Name: "hot", Store: hot},
 			{Name: "cold", Store: cold},
 		}})
-		require.Error(t, err)
-		require.Nil(t, l)
-		require.Contains(t, err.Error(), "one")
+		require.NoError(t, err, "a segment can be placed in the second tier, so it is not silently unused")
+		require.NoError(t, l.Close())
 	})
 
 	t.Run("a tier with no name", func(t *testing.T) {

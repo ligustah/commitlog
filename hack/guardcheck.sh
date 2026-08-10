@@ -805,10 +805,10 @@ run_guard_windows "store publish retries a held dest" segment_store.go   '	retur
 # and the loop variable is still referenced by the body it no longer reaches.
 run_guard "a manifest entry names its tier" manifest.go   '		if o.Tier == "" {' '		if false {'   '^TestAManifestEntryWithNoTierIsRefused$'
 
-# A tier chain this build cannot honour is refused at New. Both arms neutralize
+# A tier chain New cannot honour is refused at New. Both arms neutralize
 # to `if false` so the package still builds and what fails is the refusal.
-run_guard "more than one tier is refused" tier.go   '	if len(tiers) > 1 {' '	if false {'   '^TestATierChainThisBuildCannotHonourIsRefused$'
-run_guard "a tier must be named" tier.go   '		if t.Name == "" {' '		if false {'   '^TestATierChainThisBuildCannotHonourIsRefused$'
+run_guard "a tier name is unique" tier.go   '		if seen[t.Name] {' '		if false {'   '^TestAChainNewCannotHonourIsRefused$'
+run_guard "a tier must be named" tier.go   '		if t.Name == "" {' '		if false {'   '^TestAChainNewCannotHonourIsRefused$'
 # Neutralized by making the lookup answer for ANY name — which is precisely the
 # fallback the refusal exists to prevent, rather than a deletion that would take
 # the return value with it.
@@ -853,6 +853,24 @@ run_guard "a segment's tier must be configured" delete_cleaner.go   '		if t.Name
 # discard rather than a deletion, which would take `before` with it and fail to
 # build instead of failing the test.
 run_guard "the floor is spent across tiers" delete_cleaner.go   '		maxDrop -= before - len(survivors)' '		_ = before'   '^TestTheFloorIsSpentAcrossTiersNotPerTier$'
+
+# A move commits the destination before releasing the source, and the marker is
+# what makes the window between them survivable. Without it a crash there
+# leaves a log that will not open — so the guard's test is a REOPEN, not an
+# inspection of the manifest.
+run_guard "a move says where it came from" tier_move.go   '	entry.MovedFrom = src' '	entry.MovedFrom = ""'   '^TestAMoveInterruptedAfterItsCommitStillOpens$'
+# Both ends of a move are checked before any bytes are copied. Neutralized one
+# end at a time: the destination check covers for the source's otherwise, since
+# a move a log may not make usually fails at whichever end is asked first.
+run_guard "a move may not write the destination" tier_move.go   '	if !l.tierWritable(dst.Name) {' '	if false {'   '^TestAMoveIntoATierThisLogDoesNotOwnIsRefused$'
+run_guard "a move may not release the source" tier_move.go   '	if !l.tierWritable(src) {' '	if false {'   '^TestAMoveOutOfATierThisLogDoesNotOwnIsRefused$'
+# A placement naming a tier that is not configured stops the pass before
+# anything moves. Neutralized by treating an unknown name as found, which is
+# the silent partial application the refusal exists to prevent.
+run_guard "a placement's tier must be configured" tier_move.go   '		if !found {' '		if false {'   '^TestAPlacementNamingAnUnconfiguredTierIsRefused$'
+# Each tier draws on its own rewrite budget. Neutralized by keying every tier's
+# budget the same, which is exactly the single shared budget this replaced.
+run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFor(segments[i].tier)' '			b = budgetFor("")'   '^TestOneTiersBudgetDoesNotShrinkAnothers$'
 
 echo
 if [ "$failures" -ne 0 ]; then

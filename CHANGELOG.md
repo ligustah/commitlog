@@ -7,7 +7,44 @@ library from that fork onward.
 
 ## Unreleased
 
+### Added
+
+- **A log can have a chain of tiers, and a segment can be placed in one.**
+  `CleanSpec.TierPlacement map[int64]string` names, per segment base offset,
+  the tier that segment should live in after the pass; commitlog copies the
+  objects, repoints the segment and republishes both manifests.
+  `Options.Tiers` no longer refuses a chain longer than one — what it refuses
+  now is a chain it cannot honour, which as of this release means a duplicate
+  tier name.
+
+  The second hop is EXPRESSED, not scheduled. commitlog gains no clock for
+  descent between stores: that is a policy question about cost and durability
+  that only the caller has the context for. The first hop — local disk into the
+  nearest tier — stays scheduled here by `LocalRetentionAge`, because it is
+  about local disk pressure, which the log can see and the caller cannot.
+
+  A placement naming a tier that is not in `Options.Tiers` is an error and
+  nothing moves. A placement naming a base offset with no offloaded segment
+  behind it is skipped — a caller's map is a snapshot, and retention deletes
+  segments between the snapshot and the pass.
+
+- **`TierObject.MovedFrom`, and an interrupted move that reopens.** A move
+  commits by publishing the destination's manifest and releases by publishing
+  the source's, in that order, because the reverse leaves a segment named by
+  nothing. Between the two, both tiers claim the segment — the state
+  `mergeTierManifests` refuses — so the destination's entry records which tier
+  it came out of and the merge drops the source's stale claim. Every other
+  double claim is still refused, and the choice still comes from what the
+  stores say rather than from how the caller listed them.
+
 ### Changed
+
+- **BREAKING: `CleanSpec.TierRewriteBudget` becomes
+  `CleanSpec.TierBudgets map[string]time.Duration`.** One rewrite budget per
+  tier, falling back to `RewriteBudget` for a tier with no entry. A rewrite in
+  a fast nearby store and one in a cold archive differ by as much as local and
+  remote do, so a caller that gives its archive a small budget must not thereby
+  shrink its hot tier's.
 
 - **BREAKING: tier retention and tier ownership move onto `Tier`.**
   `Options.MaxTierBytes`, `MaxTierMessages`, `MaxTierAge` and
