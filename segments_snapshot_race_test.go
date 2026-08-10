@@ -78,7 +78,7 @@ func TestRetentionNeverWritesIntoASliceAReaderIsHolding(t *testing.T) {
 					_ = seg.LastOffset()
 				}
 				if len(snapshot) > 0 {
-					_ = findSegmentByBaseOffset(snapshot, snapshot[0].BaseOffset+1)
+					_ = findSegmentAfter(snapshot, snapshot[0])
 				}
 			}
 		}()

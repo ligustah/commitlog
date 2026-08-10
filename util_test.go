@@ -34,17 +34,3 @@ func TestFindSegment(t *testing.T) {
 	require.Equal(t, 5, idx)
 	require.Nil(t, seg)
 }
-
-func TestFindSegmentByBaseOffset(t *testing.T) {
-	segments := []*segment{
-		{BaseOffset: 0},
-		{BaseOffset: 10},
-		{BaseOffset: 20},
-		{BaseOffset: 30},
-		{BaseOffset: 40},
-	}
-	require.Equal(t, segments[0], findSegmentByBaseOffset(segments, 0))
-	require.Equal(t, segments[1], findSegmentByBaseOffset(segments, 1))
-	require.Equal(t, segments[4], findSegmentByBaseOffset(segments, 39))
-	require.Nil(t, findSegmentByBaseOffset(segments, 41))
-}

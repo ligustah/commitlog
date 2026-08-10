@@ -14,9 +14,9 @@ import (
 // One read must never return the same offset twice, or go backwards, however a
 // truncation moves the segments under it.
 //
-// The reader advanced with findSegmentByBaseOffset(r.seg.BaseOffset+1) — "the
-// next segment whose base is above mine" — and then reset to that segment's
-// position zero. That query is wrong whenever a segment can be replaced by one
+// The reader advanced by asking for the next segment whose base offset is
+// above its own — and then reset to that segment's position zero. That query is
+// wrong whenever a segment can be replaced by one
 // with a HIGHER base offset covering a SUFFIX of the same range, which is
 // exactly what TruncateBefore's boundary trim is: source 0..5 becomes 4..5. A
 // reader that finished the source is handed the trim and replays it from its

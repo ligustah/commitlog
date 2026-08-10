@@ -29,12 +29,12 @@ type Message struct {
 	Value      []byte
 	Headers    map[string][]byte
 
-	// Transient fields
-	Timestamp     int64
-	LeaderEpoch   uint64
-	AckInbox      string
-	CorrelationID string
-	Offset        int64
+	// Transient fields: carried alongside a message in memory, not written by
+	// Encode. Each one is filled in by the log on the way out — the offset and
+	// timestamp the record was stamped with, and the epoch that stamped them.
+	Timestamp   int64
+	LeaderEpoch uint64
+	Offset      int64
 }
 
 // Encode the Message into the packetEncoder.

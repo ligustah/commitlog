@@ -150,17 +150,6 @@ func findSegmentAfter(segments []*segment, seg *segment) *segment {
 	return next
 }
 
-func findSegmentByBaseOffset(segments []*segment, offset int64) *segment {
-	n := len(segments)
-	idx := sort.Search(n, func(i int) bool {
-		return segments[i].BaseOffset >= offset
-	})
-	if idx == n {
-		return nil
-	}
-	return segments[idx]
-}
-
 func roundDown(total, factor int64) int64 {
 	return factor * (total / factor)
 }
