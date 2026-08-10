@@ -5,6 +5,28 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.66.1 — 2026-08-10
+
+### Changed
+
+- **The two lines that make `NotifyLEO` safe are now tested.** `NotifyLEO`
+  reads shared state and mutates based on it across two independent loads of
+  `vActiveSegment` — one to pick the segment to park a waiter on, one inside
+  `NewestOffset` to decide whether parking is still right — with no lock
+  spanning them. The LEO comparison does not catch a roll landing in between: a
+  roll writes no records, so the new active segment's `NextOffset` equals the
+  old LEO and the check agrees. The waiter parks on a segment nothing will ever
+  append to again.
+
+  It is safe, for a reason neither call site shows. A roll seals the segment it
+  rolled off, and `seal` does two things under that segment's own lock: sets
+  `sealed`, and closes every channel already registered. The lock reduces the
+  interleavings to exactly two and one of those lines covers each. Removing
+  either parks a waiter forever, silently, and `-race` finds nothing — every
+  access is correctly locked; the bug would be the gap between two correctly
+  locked operations. Both halves now have a test and a guard, and the argument
+  is recorded on `NotifyLEO`. No behaviour change.
+
 ## v0.66.0 — 2026-08-10
 
 ### Fixed
