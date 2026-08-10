@@ -1952,6 +1952,25 @@ func (l *commitLog) Segments() []*segment {
 // the given log end offset are added to the log. If the given offset is no
 // longer the log end offset, the channel is closed immediately. Waiter is an
 // opaque value that uniquely identifies the entity waiting for data.
+//
+// This is a read-then-act across two INDEPENDENT loads of vActiveSegment — one
+// here to pick the segment, one inside NewestOffset — with no lock spanning
+// them, which is the shape behind this package's worst bugs. It is safe, and
+// the argument is recorded here so the next concurrency sweep does not re-derive
+// it.
+//
+// A roll landing between the two loads is not caught by the LEO comparison: a
+// roll writes no records, so the new segment's NextOffset equals the old LEO
+// and the check agrees. The waiter therefore parks on a segment nothing will
+// ever append to again. What rescues it is that a roll SEALS the segment it
+// rolled off (checkAndPerformSplit, right after the CAS), and seal() does two
+// things under that segment's own lock: sets sealed, and closes every channel
+// already registered. The lock makes those the only two orders available —
+// register first and the seal wakes you, seal first and waitForData hands back
+// an already-closed channel — so neither leaves a waiter stranded.
+//
+// Both halves are load-bearing and neither is obvious from its call site, so
+// both are tested: see TestANotifyLEOWaiterWakesOnTheRollThatSealsItsSegment.
 func (l *commitLog) NotifyLEO(waiter interface{}, expectedLEO int64) <-chan struct{} {
 	return l.activeSegment().WaitForLEO(waiter, expectedLEO, l.NewestOffset())
 }

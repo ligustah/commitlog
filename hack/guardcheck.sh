@@ -631,6 +631,19 @@ run_guard "the read retry spends its whole budget" util.go   $'func ReadFileWith
 	deadline := time.Now().Add(waitedOnRetryBudget)'   $'func ReadFileWithRetry(path string) ([]byte, error) {
 	deadline := time.Now().Add(waitedOnRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
 
+# The two halves that make NotifyLEO's read-then-act safe. It parks a waiter on
+# one load of vActiveSegment while deciding whether to park from another, so a
+# roll in between parks it on a segment nothing will append to again. seal() is
+# what rescues that, and it takes BOTH of these: waking whoever already
+# registered, and telling whoever arrives afterwards not to bother. Each is
+# neutralized on its own, because either one alone parks a waiter forever.
+run_guard "sealing wakes the waiters already parked" segment.go   '	s.sealed = true
+	// Notify any readers waiting for data.
+	s.notifyWaiters()' '	s.sealed = true
+	// Notify any readers waiting for data.'   '^TestANotifyLEOWaiterWakesOnTheRollThatSealsItsSegment$'
+
+run_guard "a sealed segment parks nobody new" segment.go   '	if s.sealed || s.position > pos || s.position >= s.maxBytes {' '	if s.position > pos || s.position >= s.maxBytes {'   '^TestANotifyLEOWaiterWakesOnTheRollThatSealsItsSegment$'
+
 # Close walks the WHOLE segment set even when one segment refuses. Neutralized
 # by returning at the first error, which is the version that left every later
 # segment holding its handle and its index mmap for the life of the process --
