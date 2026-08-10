@@ -459,7 +459,16 @@ run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 # replaced the segment it just read, because a trim has a higher base and covers
 # a suffix of the same range. That served a record twice, downstream, inside one
 # read batch.
-run_guard "reader advances past its segment" util.go   '	next, _ := findSegment(segments, seg.NextOffset())'   '	next := findSegmentByBaseOffset(segments, seg.BaseOffset+1)'   '^TestASegmentAdvanceSkipsTheTrimOfTheSegmentJustRead$'
+#
+# Written out rather than calling the helper it used to call: that helper was
+# DELETED, precisely so nobody reaches for it again, so the neutralization has to
+# carry the wrong query itself. Note what it omits as much as what it does --
+# no current() resolution, which is the other half of what findSegment gives.
+run_guard "reader advances past its segment" util.go   '	next, _ := findSegment(segments, seg.NextOffset())'   '	nextIdx := sort.Search(len(segments), func(i int) bool { return segments[i].BaseOffset >= seg.BaseOffset+1 })
+	var next *segment
+	if nextIdx < len(segments) {
+		next = segments[nextIdx]
+	}'   '^TestASegmentAdvanceSkipsTheTrimOfTheSegmentJustRead$'
 
 # A leader epoch arriving from the checkpoint file must be parsed as UNSIGNED.
 # The neutralization restores the old parse-then-convert, which is the whole bug:

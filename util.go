@@ -114,17 +114,6 @@ func findSegmentIndexByTimestamp(segments []*segment, timestamp int64) int {
 	return idx
 }
 
-// findSegmentByBaseOffset returns the first segment whose base offset is
-// greater than or equal to the given offset. Returns nil if there is no such
-// segment.
-//
-// Deliberately does NOT resolve through current(), unlike findSegment. This is
-// the scan's end-of-segment jump, and a segment a pass has already rewritten or
-// deleted answers it with ErrSegmentReplaced, which readOne recovers from by
-// rebuilding the reader against the current log. Skipping ahead here would
-// short-circuit that at the cost of a new failure the old shape did not have: a
-// tail of gone segments would return nil, and the caller turns nil into a hard
-// "no segment to consume" where the retry would have resolved it.
 // findSegmentAfter returns the segment a reader that has consumed all of seg
 // should continue into, or nil when there is nothing after it yet.
 //
