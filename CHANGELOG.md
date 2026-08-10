@@ -5,6 +5,26 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Added
+
+- **Each tier carries its own manifest, and open merges them.** A manifest now
+  names only the objects of the tier it sits in. With one tier configured — all
+  this build accepts — that is the same single manifest it always was, so
+  nothing changes for a single-tier log.
+
+  This is the fork `docs/multi-store-tiering.md` marked as its only genuine
+  one, decided the way `docs/tier-layering.md` already argued: the store
+  describes itself and a log adopts what it finds. One manifest in the nearest
+  tier would leave the archive holding bytes it cannot describe.
+
+  The price is that two manifests can disagree about who owns an object.
+  `mergeTierManifests` refuses that and names both tiers rather than picking a
+  winner — picking would serve one tier's bytes and silently orphan the
+  other's, and picking by configuration order would make the answer depend on
+  how the caller listed its stores.
+
 ## v0.63.0 — 2026-08-10
 
 ### Changed
