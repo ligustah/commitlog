@@ -183,6 +183,33 @@ This can land incrementally, which materially lowers the risk:
    `TierBudgets`. This is the first step where a segment can actually move
    between stores, and the first that needs new guards.
 
+### Step 3, phase by phase
+
+Everything in step 3 needs more than one tier to be *exercised*, and lifting
+the length-1 refusal before a segment can be placed would ship exactly the
+silent-archive failure that refusal exists to prevent. So the phases land on
+master one at a time and the restriction lifts LAST, in the same release.
+
+- **3a — per-tier manifests. Done (unreleased).** Each tier's manifest names
+  only that tier's objects; open reads every tier and merges. The merge refuses
+  a base offset claimed by two tiers. Testable ahead of a second tier because
+  `mergeTierManifests` is a pure function over what each tier reported.
+- **3b — retention and ownership move onto `Tier`.** `MaxTierBytes`,
+  `MaxTierMessages`, `MaxTierAge` and `TierReadOnly` become `Tier` fields;
+  `SetTierReadOnly` takes a tier name. Breaking. Deliberately NOT done in step
+  2, so those fields break once rather than twice.
+- **3c — placement.** `CleanSpec.TierPlacement map[int64]string` and
+  `TierBudgets map[string]time.Duration` replacing `TierRewriteBudget`; the
+  mover that copies a segment's objects into the destination tier, publishes
+  the destination manifest, drops the entry from the source manifest, and
+  queues the source objects for reclaim. The publish order is the same rule
+  offload already follows: the destination is committed before the source is
+  released, so a crash leaves a recognisable orphan rather than a segment
+  named by nothing.
+- **3d — lift the refusal.** `validateTiers` stops refusing a chain and starts
+  checking it: duplicate names become an error (they are unreachable today,
+  which is why step 2 does not check them).
+
 Steps 1 and 2 were mechanical and independently released. Step 3 is where the
 real work and the real risk are.
 
