@@ -788,6 +788,17 @@ run_guard "a magic with no version is refused" inspect.go   '		if hdr[0] == bloc
 # reclaims bytes, not the compile.
 run_guard "a log cleans at open" clean.go   '	l.cleanAtOpen()' '	_ = l.cleanAtOpen'   '^TestALogCleansAtOpenWithoutWaitingForATick$'
 run_guard "a ceiling needs the auto cleaner off" clean.go   '	if _, ok := spec.Ceiling.Get(); ok && !l.DisableAutoClean {' '	if false {'   '^TestACeilingOnAnAutoCleaningLogIsRefused$'
+# The store's read side and its commit point are ONE window seen from two ends:
+# a publish renames over the object path, and on Windows that fails the reader's
+# open and a reader fails the publisher's rename. Guarded separately because
+# each retry is removable on its own, and removing either moves the error rather
+# than removing it.
+#
+# ReadAt's anchor spans three lines because its `openWithRetry(path)` line is
+# byte-identical to Stream's, and apply_edit refuses an ambiguous match rather
+# than neutralizing whichever it finds first.
+run_guard_windows "store read retries a held object" segment_store.go   $'\tf, err := openWithRetry(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound' $'\tf, err := os.Open(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound'   '^TestAStoreReadRetriesThroughAHeldObject$'
+run_guard_windows "store publish retries a held dest" segment_store.go   '	return renameWithRetry(tmp, path)' '	return os.Rename(tmp, path)'   '^TestAStorePublishRetriesThroughAHeldDestination$'
 
 echo
 if [ "$failures" -ne 0 ]; then
@@ -820,14 +831,3 @@ fi
 if [ "$deferred" -ne 0 ]; then
   echo "guardcheck: $deferred guard(s) NOT covered here — deferred to another platform's run."
 fi
-# The store's read side and its commit point are ONE window seen from two ends:
-# a publish renames over the object path, and on Windows that fails the reader's
-# open and a reader fails the publisher's rename. Guarded separately because
-# each retry is removable on its own, and removing either moves the error rather
-# than removing it.
-#
-# ReadAt's anchor spans three lines because its `openWithRetry(path)` line is
-# byte-identical to Stream's, and apply_edit refuses an ambiguous match rather
-# than neutralizing whichever it finds first.
-run_guard_windows "store read retries a held object" segment_store.go   $'\tf, err := openWithRetry(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound' $'\tf, err := os.Open(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound'   '^TestAStoreReadRetriesThroughAHeldObject$'
-run_guard_windows "store publish retries a held dest" segment_store.go   '	return renameWithRetry(tmp, path)' '	return os.Rename(tmp, path)'   '^TestAStorePublishRetriesThroughAHeldDestination$'
