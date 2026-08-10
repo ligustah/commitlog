@@ -493,9 +493,9 @@ run_guard "the descriptor is never garbage" tier_state.go   '	referenced[descrip
 # directory scan -- which is what shipped, and which calls a node adopting a tier
 # a NEW log, so the one moment a process picks up someone else's log is the one
 # moment its retention settings are never compared.
-run_guard "newness comes from the store" descriptor.go   '	if opts.SegmentStore != nil {
-		_, err := readStoreDescriptor(opts.SegmentStore)'   '	if false {
-		_, err := readStoreDescriptor(opts.SegmentStore)'   '^TestAdoptingATierIsCheckedAgainstTheLogsOwnSettings$'
+run_guard "newness comes from the store" descriptor.go   '	if len(opts.Tiers) > 0 {
+		// Asked of every tier'   '	if false {
+		// Asked of every tier'   '^TestAdoptingATierIsCheckedAgainstTheLogsOwnSettings$'
 
 # Absence is an ANSWER here, so only the store may give it. Neutralizing this
 # restores the inference that shipped -- any Size failure means "no descriptor"
@@ -771,7 +771,7 @@ run_guard "a negative option is refused" commitlog.go   '		if c.bad {' '		if fal
 # nothing", every sealed segment is older than it, and the first clean of every
 # log with a SegmentStore pushes the whole thing to the store -- no error, no
 # data loss, just every log in the process silently offloading itself.
-run_guard "zero local retention never offloads" clean.go   '	if l.Options.LocalRetentionAge <= 0 || l.SegmentStore == nil {' '	if l.SegmentStore == nil {'   '^TestAZeroLocalRetentionAgeNeverOffloads$'
+run_guard "zero local retention never offloads" clean.go   '	if l.Options.LocalRetentionAge <= 0 || !l.hasTier() {' '	if !l.hasTier() {'   '^TestAZeroLocalRetentionAgeNeverOffloads$'
 
 # Removing this returns the walk to adding cLen to pos unchecked, which is what
 # let a block overrunning the file be listed as healthy while Records refused the
