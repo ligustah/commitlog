@@ -58,22 +58,55 @@ func blockTieredLog(t *testing.T) (*commitLog, *FileSegmentStore, int64) {
 // local file at offload (deliberately: it describes bytes that no longer
 // exist), so the segment cannot rebuild it, and every read of that segment
 // fails at "size block table". The bytes are intact and unreachable.
+//
+// Asked of a PEER, which is the only way to isolate this half of the live set:
+// a log that offloaded a segment itself still holds it, so its own segment loop
+// would name the table whether the manifest half did or not, and the two halves
+// would cover for each other in a fixture where they are always the same
+// objects. The peer opened before these offloads, so it has never seen them.
 func TestABlockTableIsNotGarbage(t *testing.T) {
-	l, _, _ := blockTieredLog(t)
+	origin, store, last := blockTieredLog(t)
 
-	manifest, err := l.TierManifest()
+	peer, cleanup := setupWithOptions(t, Options{
+		Path:             tempDir(t),
+		MaxSegmentBytes:  1 << 12,
+		Compression:      compress.Snappy,
+		SegmentStore:     store,
+		DisableAutoClean: true,
+	})
+	defer cleanup()
+
+	for i := 0; i < 400; i++ {
+		offs, err := origin.Append([]*Message{{Value: []byte("padding value for the block")}})
+		require.NoError(t, err)
+		last = offs[0]
+	}
+	origin.SetHighWatermark(last)
+	n, err := origin.OffloadBefore(last)
+	require.NoError(t, err)
+	require.Positive(t, n, "the origin must have offloaded something new")
+
+	live, err := origin.tierState()
 	require.NoError(t, err)
 
+	peerState, err := peer.tierState()
+	require.NoError(t, err)
+	require.Less(t, len(peerState), len(live), "the peer's view must be behind")
+
+	held := make(map[string]bool, len(peerState))
+	for _, o := range peerState {
+		held[o.BlocksKey] = true
+	}
 	var tables []string
-	for _, o := range manifest {
-		if o.BlocksKey != "" {
+	for _, o := range live {
+		if o.BlocksKey != "" && !held[o.BlocksKey] {
 			tables = append(tables, o.BlocksKey)
 		}
 	}
 	require.NotEmpty(t, tables,
-		"the fixture offloaded no block-compressed segment, so this proves nothing")
+		"no block table the peer does not itself hold, so this proves nothing")
 
-	orphans, err := l.UnreferencedObjects()
+	orphans, err := peer.UnreferencedObjects()
 	require.NoError(t, err)
 	for _, key := range tables {
 		require.NotContains(t, orphans, key,
