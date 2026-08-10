@@ -32,11 +32,14 @@ the log removed); substantially extended since — see
   map) with time-budgeted, drop-density-ordered rewrites. Returns a
   verified floor that callers persist to bound reopen scans.
 - **Tiered storage** (`OffloadBefore`): sealed segments — log *and* index —
-  move to a `SegmentStore` (`FileSegmentStore` included) and are served
-  read-through, so an offloaded segment is indistinguishable from a local
-  one at the read API. Offloaded indexes are held in `RemoteIndexCache`, a
-  process-wide LRU with pin counts, so an index cannot be evicted out from
-  under a live seek.
+  move into a chain of `Tier`s (`Options.Tiers`, each a named `SegmentStore`,
+  `FileSegmentStore` included) and are served read-through, so an offloaded
+  segment is indistinguishable from a local one at the read API. Segments
+  descend into the first tier and go further down on the caller's word
+  (`CleanSpec.TierPlacement`); retention, ownership and rewrite budgets are
+  per tier, so a record is gone only when the last tier runs out of room for
+  it. Offloaded indexes are held in `RemoteIndexCache`, a process-wide LRU
+  with pin counts, so an index cannot be evicted out from under a live seek.
 - **Client sidecars**: atomic named metadata files in the log directory
   (`PutSidecar`/`GetSidecar`/`RemoveSidecar`) for checkpoints like
   recovery floors.

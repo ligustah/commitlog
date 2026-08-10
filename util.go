@@ -193,7 +193,7 @@ func removeAllWithRetry(path string) error {
 // cut the same failure down from 1 in 30.
 //
 // The two budgets differ because the two failures cost different things, and
-// this is the same split as RewriteBudget/TierRewriteBudget: one number for two
+// this is the same split as RewriteBudget/TierBudgets: one number for two
 // operations means the cheaper one sets the price for both.
 //
 // Vars rather than consts so a test can shrink them; nothing mutates them at

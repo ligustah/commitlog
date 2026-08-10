@@ -249,10 +249,11 @@ real work and the real risk are.
 - **An object naming an unconfigured tier is an error, everywhere**: at open
   (adoption), at delete, and at reclaim. No call falls back to the primary
   store.
-- **The retention knobs did NOT move onto `Tier`.** `MaxTierBytes/Messages/Age`
-  and `TierReadOnly` are still log-level and still mean "the one tier". Moving
-  them in step 2 would have broken the same fields twice; they move in step 3,
-  where per-tier budgets are the point.
+- **The retention knobs did NOT move onto `Tier` in step 2.**
+  `MaxTierBytes/Messages/Age` and `TierReadOnly` stayed log-level through step
+  2 and still meant "the one tier". Moving them there would have broken the
+  same fields twice, so they moved in step 3b, where per-tier budgets are the
+  point.
 
 ## What stays out
 
