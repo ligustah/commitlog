@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.66.0 — 2026-08-10
 
 ### Fixed
 
@@ -66,7 +66,9 @@ library from that fork onward.
 
 ### Added
 
-- **`UnreferencedObjects` is on the `CommitLog` interface.** It was a method on
+- **BREAKING: `UnreferencedObjects` is on the `CommitLog` interface.** Breaking
+  only for an external implementor of the interface; every caller gains a
+  method. It was a method on
   the concrete log only, while the interface doc directed callers to it three
   times — the single-writer contract's warning about shared stores, the
   `DeleteStoreObjects` pairing, and `CleanWithSpec`'s note on crash orphans all

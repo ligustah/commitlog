@@ -36,11 +36,11 @@ package commitlog
 // The hazard that IS destructive is deletion, and it does not arise from
 // racing: it arrives by permission. DeleteStoreObjects is unfenced — it removes
 // exactly the keys it is given. UnreferencedObjects on a SHARED store lists
-// every object neither this log's manifest nor its own segments name, which
-// includes everything another live process has uploaded since this log last read
-// the manifest. Feeding one to the other on a shared store
-// deletes data that process is serving. See both methods for the detail; the
-// short version is that "unreferenced by me" is not "unreferenced".
+// every object neither the tier manifests nor this log's own segments name,
+// which includes everything another live process has uploaded since this log
+// last read those manifests. Feeding one to the other on a shared store deletes
+// data that process is serving. See both methods for the detail; the short
+// version is that "unreferenced by me" is not "unreferenced".
 //
 // A log DOES delete on its own, in one narrow case: an object its own rewrite
 // superseded, which it uploaded, which it published, and which nothing it
