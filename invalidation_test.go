@@ -33,7 +33,7 @@ func TestStoreBackingInvalidateForcesRefetch(t *testing.T) {
 	payload := []byte("the quick brown fox jumps over the lazy dog")
 	require.NoError(t, store.Put(key, bytes.NewReader(payload), int64(len(payload))))
 
-	b, err := newStoreBacking(store, key)
+	b, err := newStoreBackingSize(store, key, int64(len(payload)))
 	require.NoError(t, err)
 
 	buf := make([]byte, 3)

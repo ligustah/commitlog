@@ -61,7 +61,7 @@ func TestStoreBacking_ReadThroughAcrossPrefetch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b, err := newStoreBacking(store, "seg")
+	b, err := newStoreBackingSize(store, "seg", int64(size))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,10 +120,17 @@ func TestStoreBacking_ReadThroughAcrossPrefetch(t *testing.T) {
 	}
 }
 
-// A restore-required store surfaces ErrRestoreRequired when opening a backing.
+// A restore-required store surfaces ErrRestoreRequired to the READ, not to the
+// open. Opening a backing costs no store call — the size comes from the tier
+// manifest — so a log holding a segment in a restore-required tier opens fine
+// and reports the tier only to a caller that actually reads that segment.
 func TestStoreBacking_RestoreRequired(t *testing.T) {
 	rr := &restoreRequiredStore{}
-	if _, err := newStoreBacking(rr, "seg"); !errors.Is(err, ErrRestoreRequired) {
+	b, err := newStoreBackingSize(rr, "seg", 128)
+	if err != nil {
+		t.Fatalf("opening a backing must not touch the store: %v", err)
+	}
+	if _, err := b.ReadAt(make([]byte, 8), 0); !errors.Is(err, ErrRestoreRequired) {
 		t.Fatalf("got %v want ErrRestoreRequired", err)
 	}
 }

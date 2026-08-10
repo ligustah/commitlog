@@ -418,20 +418,17 @@ func acquireBacking(b segmentBacking) *storeBacking {
 	return sb
 }
 
-// newStoreBacking opens a read-only backing over key in store. It fetches the
-// object size once; a restore-required store surfaces ErrRestoreRequired here.
-func newStoreBacking(store SegmentStore, key string) (*storeBacking, error) {
-	size, err := store.Size(key)
-	if err != nil {
-		return nil, err
-	}
-	return &storeBacking{store: store, key: key, size: size, bufOff: -1}, nil
-}
-
 // newStoreBackingSize opens a read-only backing over key with an already-known
-// object size, skipping the store round-trip newStoreBacking makes. Used on boot
-// from a tier manifest entry (which records the log object's size) so placing a
-// cold segment touches the store zero times.
+// object size. Every caller has one: a tier manifest entry records the log
+// object's size, so placing a cold segment on boot touches the store zero
+// times, and a rewrite knows what it just wrote.
+//
+// There is deliberately no constructor that asks the store for the size. It
+// would put a round-trip on the boot path — the one path whose cost is paid per
+// segment before the log serves anything — to learn a number the manifest
+// already told us. It would also decide WHERE a restore-required tier reports
+// itself: opening would fail instead of reading, and a segment nobody reads
+// would stop the log from opening at all.
 func newStoreBackingSize(store SegmentStore, key string, size int64) (*storeBacking, error) {
 	return &storeBacking{store: store, key: key, size: size, bufOff: -1}, nil
 }

@@ -113,7 +113,7 @@ func TestScanStreamFallsBackForNonSequentialReads(t *testing.T) {
 	const body = "0123456789abcdefghijklmnopqrstuvwxyz"
 	require.NoError(t, store.Put("obj", strings.NewReader(body), int64(len(body))))
 
-	backing, err := newStoreBacking(store, "obj")
+	backing, err := newStoreBackingSize(store, "obj", int64(len(body)))
 	require.NoError(t, err)
 	ss := newScanStream(backing)
 	defer ss.Close()
@@ -154,7 +154,7 @@ func TestScanStreamSurvivesAStoreThatCannotStream(t *testing.T) {
 	const body = "0123456789abcdefghij"
 	require.NoError(t, store.Put("obj", strings.NewReader(body), int64(len(body))))
 
-	backing, err := newStoreBacking(store, "obj")
+	backing, err := newStoreBackingSize(store, "obj", int64(len(body)))
 	require.NoError(t, err)
 	ss := newScanStream(backing)
 	defer ss.Close()
