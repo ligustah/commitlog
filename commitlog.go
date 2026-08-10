@@ -376,8 +376,10 @@ type Options struct {
 	// segment go through its tier transparently. Empty disables tiering (the
 	// default).
 	//
-	// This build accepts at most ONE tier and refuses more, because everything
-	// below the first would silently never be written to. See Tier.
+	// A chain of any length is accepted; what is refused is one it cannot
+	// honour, which means two tiers sharing a name. Sealed segments descend
+	// into the FIRST tier on LocalRetentionAge's clock; every hop below that
+	// is the caller's word, through CleanSpec.TierPlacement. See Tier.
 	Tiers []Tier
 	// RemoteIndexCache, when set (with Tiers), enables tiered-storage
 	// option 2: OffloadBefore also offloads each sealed segment's index object and

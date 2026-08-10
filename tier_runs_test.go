@@ -11,11 +11,10 @@ import (
 // descent is by age, so the coldest store holds the oldest segments and the
 // runs come out of the log in age order.
 //
-// Built as a fixture for the cleaner rather than through a log on purpose:
-// New still refuses a chain of more than one tier (see validateTiers), and
-// the refusal is deliberately the LAST thing step 3 lifts. The cleaner takes
-// its tiers as data, so the behaviour being built here is reachable and
-// testable ahead of the configuration that will drive it.
+// Built as a fixture for the cleaner rather than through a log on purpose: the
+// cleaner takes its tiers as data, so a run's retention can be driven directly
+// at whatever tier shape a case needs, without an offload and a placement pass
+// standing between the fixture and the behaviour under test.
 func twoTierSegs(t *testing.T) []*segment {
 	t.Helper()
 	dir := tempDir(t)

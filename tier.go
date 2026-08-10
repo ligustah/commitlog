@@ -98,8 +98,9 @@ func (l *commitLog) hasTier() bool {
 
 // primaryTier is the tier a segment leaving local disk descends into: the first
 // in the chain. Named rather than indexed at the call sites because with a
-// chain longer than one this is a decision, not a lookup, and step 3 gives it
-// one to make.
+// chain this is a decision, not a lookup — the first hop is the only one
+// commitlog makes on its own clock, and every hop below it comes from
+// CleanSpec.TierPlacement.
 func (l *commitLog) primaryTier() (Tier, bool) {
 	if len(l.Tiers) == 0 {
 		return Tier{}, false
