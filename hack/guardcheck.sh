@@ -877,7 +877,17 @@ run_guard "a move may not release the source" tier_move.go   '	if !l.tierWritabl
 # anything moves. Neutralized by making the lookup answer for ANY name, the way
 # the other two tier lookups are: deleting the refusal takes `found` out of use
 # and fails to build instead of failing the test.
-run_guard "a placement's tier must be configured" tier_move.go   '			if t.Name == name {' '			if true {'   '^TestAPlacementNamingAnUnconfiguredTierIsRefused$'
+# The release half of a move publishes exactly ONE tier's manifest. Neutralizing
+# the lookup makes a name this log has no tier for publish nothing and report
+# success -- and the destination's manifest is already out, so both tiers go on
+# claiming the segment permanently. "" is the case that bites: it is what an
+# absent Tier field decodes to, and it used to be the publish path's word for
+# "every tier".
+run_guard "a one-tier publish names a real tier" manifest.go   '	t, err := l.tierByName(tier)' '	t, err := Tier{Name: tier}, error(nil)'   '^TestAOneTierPublishRefusesATierThisLogDoesNotHave$'
+
+run_guard "a placement's tier must be configured" tier_move.go   '		t, err := l.tierByName(name)
+		if err != nil {'   '		t, _ := l.tierByName(name)
+		if false {'   '^TestAPlacementNamingAnUnconfiguredTierIsRefused$'
 # Each tier draws on its own rewrite budget. Neutralized by keying every tier's
 # budget the same, which is exactly the single shared budget this replaced.
 run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFor(segments[i].tier)' '			b = budgetFor("")'   '^TestOneTiersBudgetDoesNotShrinkAnothers$'

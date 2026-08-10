@@ -93,7 +93,7 @@ type tierManifest struct {
 // Caller must not hold l.mu, and must not hold the segment lock of any segment a
 // pending entry describes: tierState reads every segment under its read lock.
 func (l *commitLog) writeTierManifest(pending ...TierObject) error {
-	return l.publishTierManifests("", pending...)
+	return l.publishTierManifests(l.Tiers, pending...)
 }
 
 // writeOneTierManifest publishes ONE tier's manifest and leaves every other
@@ -104,13 +104,26 @@ func (l *commitLog) writeTierManifest(pending ...TierObject) error {
 // order — and writing both at once would make that order an accident of how
 // the caller listed Options.Tiers, which is exactly the kind of dependence the
 // merge at open refuses to have.
+//
+// A name this log has no tier for is refused. This is the call that RELEASES a
+// source after a move has committed, so a name that quietly matched nothing
+// would publish no manifest, report success, and leave both tiers claiming the
+// segment for good — the state MovedFrom exists to make survivable, made
+// permanent instead.
 func (l *commitLog) writeOneTierManifest(tier string, pending ...TierObject) error {
-	return l.publishTierManifests(tier, pending...)
+	if !l.hasTier() {
+		return nil
+	}
+	t, err := l.tierByName(tier)
+	if err != nil {
+		return err
+	}
+	return l.publishTierManifests([]Tier{t}, pending...)
 }
 
-// publishTierManifests rebuilds and publishes the manifests of every writable
-// tier, or of just `only` when it is named.
-func (l *commitLog) publishTierManifests(only string, pending ...TierObject) error {
+// publishTierManifests rebuilds and publishes the manifests of the given tiers,
+// skipping any this log does not own.
+func (l *commitLog) publishTierManifests(tiers []Tier, pending ...TierObject) error {
 	if !l.hasTier() {
 		return nil
 	}
@@ -151,10 +164,7 @@ func (l *commitLog) publishTierManifests(only string, pending ...TierObject) err
 	for _, o := range objs {
 		byTier[o.Tier] = append(byTier[o.Tier], o)
 	}
-	for _, t := range l.Tiers {
-		if only != "" && t.Name != only {
-			continue
-		}
+	for _, t := range tiers {
 		// A tier this log does not own is not written to, manifest included: the
 		// manifest is a claim about the store, and a process that does not own
 		// the store has no business republishing what it holds.

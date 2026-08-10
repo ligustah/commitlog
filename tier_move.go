@@ -196,18 +196,13 @@ func (l *commitLog) movePlaced(placement map[int64]string) ([]pendingReclaim, er
 	}
 	dests := make(map[int64]Tier, len(placement))
 	for base, name := range placement {
-		var found bool
-		for _, t := range l.Tiers {
-			if t.Name == name {
-				dests[base], found = t, true
-				break
-			}
-		}
-		if !found {
+		t, err := l.tierByName(name)
+		if err != nil {
 			return nil, errors.Errorf(
 				"commitlog: CleanSpec.TierPlacement puts segment %d in tier %q, "+
 					"which is not in Options.Tiers", base, name)
 		}
+		dests[base] = t
 	}
 
 	l.mu.RLock()

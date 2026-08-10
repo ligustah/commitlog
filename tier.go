@@ -108,18 +108,33 @@ func (l *commitLog) primaryTier() (Tier, bool) {
 	return l.Tiers[0], true
 }
 
-// storeForTier resolves the tier an object names to the store holding it.
+// tierByName resolves a tier name to the configured tier.
 //
-// An unknown name is an ERROR, not a fallback to the primary tier. A manifest
-// that names a tier this process has not been given describes objects it cannot
-// reach, and answering with the nearest store would read one tier's bytes under
-// another tier's keys — the failure the name exists to prevent.
-func (l *commitLog) storeForTier(name string) (SegmentStore, error) {
+// An unknown name is an ERROR, not a fallback to the primary tier. A name
+// arrives from a manifest, a placement or a handover, and every one of those is
+// a claim about a store this process was supposed to have been given. Answering
+// with the nearest tier would read one tier's bytes under another tier's keys —
+// the failure the name exists to prevent.
+//
+// The empty string is unknown like any other. It is what an absent field
+// decodes to, so it is the name a garbled entry arrives under, and it is
+// refused by validateTiers for that reason — which also means it is the one
+// value that must never be given a meaning of its own anywhere else.
+func (l *commitLog) tierByName(name string) (Tier, error) {
 	for _, t := range l.Tiers {
 		if t.Name == name {
-			return t.Store, nil
+			return t, nil
 		}
 	}
-	return nil, errors.Errorf(
+	return Tier{}, errors.Errorf(
 		"commitlog: an object names tier %q, which is not in Options.Tiers", name)
+}
+
+// storeForTier is tierByName for the callers that only want somewhere to read.
+func (l *commitLog) storeForTier(name string) (SegmentStore, error) {
+	t, err := l.tierByName(name)
+	if err != nil {
+		return nil, err
+	}
+	return t.Store, nil
 }

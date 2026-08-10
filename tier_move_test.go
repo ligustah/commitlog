@@ -392,3 +392,29 @@ func namesSegment(objs []TierObject, base int64) bool {
 	}
 	return false
 }
+
+// A single-tier publish must refuse a name this log has no tier for.
+//
+// This is the release half of a move: the destination's manifest is already
+// published and both tiers claim the segment, which is survivable only because
+// the source's manifest is about to stop naming it. A name that quietly matched
+// nothing would publish nothing, report success, and leave the double claim
+// standing for good.
+//
+// The empty string is the case that matters. It is what an absent Tier field
+// decodes to, so it is the name a garbled manifest entry arrives under, and it
+// used to mean "every tier" to the publish path — the one call whose whole
+// purpose is to write exactly one.
+func TestAOneTierPublishRefusesATierThisLogDoesNotHave(t *testing.T) {
+	l, _, _, _ := chainLog(t)
+
+	for _, name := range []string{"", "archive", "HOT"} {
+		err := l.writeOneTierManifest(name)
+		require.Error(t, err, "tier %q is not in Options.Tiers", name)
+		require.Contains(t, err.Error(), "not in Options.Tiers")
+	}
+
+	// And the two real ones still work.
+	require.NoError(t, l.writeOneTierManifest("hot"))
+	require.NoError(t, l.writeOneTierManifest("cold"))
+}
