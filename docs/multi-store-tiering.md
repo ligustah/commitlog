@@ -7,11 +7,12 @@ was no second hop.
 durable_streams asked for the second hop on 2026-08-10. Approved for build the
 same day, against this doc rather than against a size estimate.
 
-Written against v0.61.2. **Steps 1 and 2 have since shipped** (v0.62.0,
-v0.63.0): a log's store is now a named `Tier` in `Options.Tiers`, and every
-offloaded object records which tier holds it. The chain is still enforced at
-length one — step 3 is what lifts that. The present tense below describes the
-design, not the code; see "Staging" at the end for what is done.
+Written against v0.61.2. **All three steps have since shipped** (v0.62.0,
+v0.63.0, v0.64.0): a log's store is a named `Tier` in `Options.Tiers`, every
+offloaded object records which tier holds it, a chain of any length is allowed,
+and `CleanSpec.TierPlacement` moves a segment between tiers. The present tense
+below describes the design as it was proposed; see "Staging" at the end for
+where each piece landed and what the build changed about it.
 
 ## What the caller actually needs
 
@@ -190,11 +191,11 @@ the length-1 refusal before a segment can be placed would ship exactly the
 silent-archive failure that refusal exists to prevent. So the phases land on
 master one at a time and the restriction lifts LAST, in the same release.
 
-- **3a — per-tier manifests. Done (unreleased).** Each tier's manifest names
+- **3a — per-tier manifests. Shipped in v0.64.0.** Each tier's manifest names
   only that tier's objects; open reads every tier and merges. The merge refuses
   a base offset claimed by two tiers. Testable ahead of a second tier because
   `mergeTierManifests` is a pure function over what each tier reported.
-- **3b — retention and ownership move onto `Tier`. Done, unreleased.**
+- **3b — retention and ownership move onto `Tier`. Shipped in v0.64.0.**
   `MaxTierBytes`, `MaxTierMessages`, `MaxTierAge` and `TierReadOnly` became
   `Tier.MaxBytes`, `MaxMessages`, `MaxAge` and `ReadOnly`; `SetTierReadOnly`
   takes a tier name and refuses one it has no store for. Breaking. Deliberately
@@ -210,7 +211,7 @@ master one at a time and the restriction lifts LAST, in the same release.
 
   The cleaner takes its tiers as data, so all of this is exercised against a
   two-tier chain today, ahead of the configuration that 3d will allow.
-- **3c — placement. Done, unreleased.** `CleanSpec.TierPlacement
+- **3c — placement. Shipped in v0.64.0.** `CleanSpec.TierPlacement
   map[int64]string` and `TierBudgets map[string]time.Duration` replacing
   `TierRewriteBudget`; the mover that copies a segment's objects into the
   destination tier, publishes the destination manifest, drops the entry from
@@ -232,7 +233,7 @@ master one at a time and the restriction lifts LAST, in the same release.
 
   The mover is deliberately NOT budgeted. How many segments move is a decision
   the caller already makes, one entry at a time, in the map it passes.
-- **3d — lift the refusal. Done, unreleased, in the same release as 3c.**
+- **3d — lift the refusal. Shipped in v0.64.0, the same release as 3c.**
   `validateTiers` stopped refusing a chain and started checking it: duplicate
   names are an error. It lifted with placement rather than before it, because
   a second tier that nothing can be placed into is the silent archive the
