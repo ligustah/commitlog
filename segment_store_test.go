@@ -61,10 +61,7 @@ func TestStoreBacking_ReadThroughAcrossPrefetch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b, err := newStoreBackingSize(store, "seg", int64(size))
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := newStoreBackingSize(store, "seg", int64(size))
 	if sz, _ := b.Size(); sz != int64(size) {
 		t.Fatalf("backing size %d want %d", sz, size)
 	}
@@ -126,10 +123,8 @@ func TestStoreBacking_ReadThroughAcrossPrefetch(t *testing.T) {
 // and reports the tier only to a caller that actually reads that segment.
 func TestStoreBacking_RestoreRequired(t *testing.T) {
 	rr := &restoreRequiredStore{}
-	b, err := newStoreBackingSize(rr, "seg", 128)
-	if err != nil {
-		t.Fatalf("opening a backing must not touch the store: %v", err)
-	}
+	// No error to check: opening cannot fail, which IS the property.
+	b := newStoreBackingSize(rr, "seg", 128)
 	if _, err := b.ReadAt(make([]byte, 8), 0); !errors.Is(err, ErrRestoreRequired) {
 		t.Fatalf("got %v want ErrRestoreRequired", err)
 	}

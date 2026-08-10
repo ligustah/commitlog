@@ -371,10 +371,7 @@ func (s *segment) attachOffloaded(store SegmentStore, tier string, meta offloadM
 func (s *segment) attachOffloadedLocked(store SegmentStore, tier string,
 	meta offloadMeta, cache *RemoteIndexCache) error {
 
-	sb, err := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
-	if err != nil {
-		return err
-	}
+	sb := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
 	// Past this point the swap happens whatever the teardown below reports. The
 	// commit already happened, in the store: the caller published a manifest
 	// naming these objects before calling this, and the replacement backing above
@@ -500,10 +497,7 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 	// offloads in this process it takes exactly these fields from the same meta
 	// and keeps the block table it already has. Only the segment that came back
 	// from a manifest went and re-derived them.
-	sb, err := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
-	if err != nil {
-		return nil, errors.Wrap(err, "open store backing")
-	}
+	sb := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
 	s.backing = sb
 	s.cache = newBlockCache()
 	s.blockMode = meta.BlockMode
@@ -2042,10 +2036,7 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 	// rewrite's index over it, the same way a local Replace does.
 	localIndex := s.indexKey == "" && s.Index != nil && fresh.Index != nil
 
-	sb, err := newStoreBackingSize(s.store, newKey, size)
-	if err != nil {
-		return err
-	}
+	sb := newStoreBackingSize(s.store, newKey, size)
 	s.backing = sb
 	s.storeKey = newKey
 	s.indexKey = newIndexKey

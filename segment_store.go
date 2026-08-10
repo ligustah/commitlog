@@ -429,8 +429,12 @@ func acquireBacking(b segmentBacking) *storeBacking {
 // already told us. It would also decide WHERE a restore-required tier reports
 // itself: opening would fail instead of reading, and a segment nobody reads
 // would stop the log from opening at all.
-func newStoreBackingSize(store SegmentStore, key string, size int64) (*storeBacking, error) {
-	return &storeBacking{store: store, key: key, size: size, bufOff: -1}, nil
+//
+// Which is why this returns no error: with the size already in hand there is
+// nothing here that can fail, and a caller repointing a segment gets to say so
+// without an unreachable branch in front of its commit point.
+func newStoreBackingSize(store SegmentStore, key string, size int64) *storeBacking {
+	return &storeBacking{store: store, key: key, size: size, bufOff: -1}
 }
 
 func (b *storeBacking) ReadAt(p []byte, off int64) (int, error) {

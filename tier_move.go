@@ -157,10 +157,7 @@ func (s *segment) swapTier(store SegmentStore, tier string, meta offloadMeta) ([
 		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.blocksKey})
 	}
 
-	sb, err := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
-	if err != nil {
-		return nil, err
-	}
+	sb := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
 	// Past here the segment IS the destination's objects, so anything still
 	// able to serve the source has to be cleared.
 	if old, ok := s.backing.(*storeBacking); ok {
