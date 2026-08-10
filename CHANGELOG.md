@@ -5,6 +5,53 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed
+
+- **BREAKING: `Message.AckInbox` and `Message.CorrelationID` are gone.** NATS ack
+  routing from liftbridge, dead since the extract: `Encode` never wrote them,
+  nothing in this repo or any consumer read them, and a value round-tripped
+  through the log came back with them empty. A caller that set one was writing
+  to a field the log threw away.
+
+- **The `Options.Tiers` godoc no longer refuses a chain.** It said "This build
+  accepts at most ONE tier and refuses more", which v0.64.0 made false —
+  `validateTiers` refuses a duplicate NAME and nothing else. Reported by
+  durable_streams, who verified a two-tier `New` succeeds. The doc a caller
+  reads before writing its config is the worst place for a stale refusal: it
+  talks them out of the feature and nothing goes red.
+
+### Removed
+
+- **Dead code, found by the recurring sweep.** No behaviour change:
+  - `findSegmentByBaseOffset` — "the next segment whose base is above mine",
+    the query that served a record twice across a `TruncateBefore` trim. Its
+    last production caller went in v0.50.1; since then its own unit test kept
+    it green and reachable. A helper whose semantics are known-wrong for the
+    log's invariant should not be sitting in the package with a passing test
+    next to it.
+  - Seven of `packetEncoder`'s thirteen methods, and both implementations of
+    each: `PutBool`, `PutInt32`, `PutInt64`, `PutArrayLength`, `PutRawBytes`,
+    `PutNullableString`, `PutStringArray`, `PutInt32Array`, `PutInt64Array`.
+    Kafka's wire protocol, of which the record format writes none. staticcheck
+    counts a method as used when it satisfies an interface, so declaring them
+    kept fourteen unreachable bodies green indefinitely.
+  - `newStoreBacking`, which asked the store for an object's size. Every real
+    open knows the size already, so it was a round-trip waiting to be put back
+    on the boot path. `newStoreBackingSize` also stops returning an error it
+    could never produce, removing four dead branches — two of them directly
+    above a comment explaining that the repoint below is unconditional.
+
+### Fixed
+
+- **`TestStoreBacking_RestoreRequired` asserted a path that no longer ships.**
+  It checked that a restore-required tier reports itself when a backing is
+  OPENED; opening stopped touching the store when boot started reading sizes
+  from the tier manifest. It now asserts the contract as it is: opening costs
+  no store call, and the tier reports itself to the caller that READS the
+  segment — so a log holding a cold segment nobody reads opens.
+
 ## v0.64.1 — 2026-08-10
 
 ### Fixed
