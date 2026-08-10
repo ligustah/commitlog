@@ -56,7 +56,7 @@ func TestScanningAnOffloadedSegmentCostsOneRequest(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
 		MaxSegmentBytes:  4096, // several segments, so sealed ones can offload
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -198,7 +198,7 @@ func TestStreamedScanReturnsTheSameRecords(t *testing.T) {
 			opts := Options{
 				Path:             dir,
 				MaxSegmentBytes:  4096,
-				SegmentStore:     store,
+				Tiers:            oneTier(store),
 				DisableAutoClean: true,
 			}
 			tc.opts(&opts)

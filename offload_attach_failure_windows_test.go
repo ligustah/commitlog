@@ -38,7 +38,7 @@ func TestAFailedLocalCleanupStillLeavesTheSegmentOffloaded(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
 		MaxSegmentBytes:  64, // roll, so there is a sealed segment to offload
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)

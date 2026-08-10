@@ -19,7 +19,7 @@ func readOnlyFixture(t *testing.T, readOnly bool) (*commitLog, *FileSegmentStore
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
 		MaxSegmentBytes:  64,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		TierReadOnly:     readOnly,
 		DisableAutoClean: true,
 	})
@@ -73,7 +73,7 @@ func TestReadOnlyTierRefusesDeletes(t *testing.T) {
 	key, _, _ := newStoreKeys(1)
 	require.NoError(t, store.Put(key, strings.NewReader("x"), 1))
 
-	_, err := l.DeleteStoreObjects([]string{key})
+	_, err := l.DeleteStoreObjects([]StoreObject{{Tier: defaultTierName, Key: key}})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "read-only")
 
@@ -101,7 +101,7 @@ func TestReadOnlyTierStillReadsThroughTheStore(t *testing.T) {
 	follower, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
 		MaxSegmentBytes:  64,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		TierReadOnly:     true,
 		DisableAutoClean: true,
 	})
@@ -157,10 +157,14 @@ func TestSetTierReadOnlyTakesEffectBothWays(t *testing.T) {
 	keys, err := store.List()
 	require.NoError(t, err)
 	require.NotEmpty(t, keys)
+	objs := make([]StoreObject, 0, len(keys))
+	for _, k := range keys {
+		objs = append(objs, StoreObject{Tier: defaultTierName, Key: k})
+	}
 
 	// And leaves again.
 	l.SetTierReadOnly(true)
-	_, err = l.DeleteStoreObjects(keys)
+	_, err = l.DeleteStoreObjects(objs)
 	require.Error(t, err, "withdrawing ownership must take effect at once")
 
 	after, err := store.List()

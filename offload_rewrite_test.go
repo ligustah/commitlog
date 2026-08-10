@@ -18,7 +18,7 @@ func offloadedFixture(t *testing.T, cache *RemoteIndexCache) (*commitLog, *FileS
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
 		MaxSegmentBytes:  64, // roll, so there is a sealed segment
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		RemoteIndexCache: cache,
 		DisableAutoClean: true,
 	})

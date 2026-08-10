@@ -569,7 +569,7 @@ func offloadedPrefixLog(t *testing.T) (*commitLog, int64) {
 		// per-tier settings become indistinguishable.
 		MaxSegmentBytes:  512,
 		Compact:          true,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)

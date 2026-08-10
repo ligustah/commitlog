@@ -89,7 +89,7 @@ func hookedTieredLog(t *testing.T, hook *storeHook) (*commitLog, int64) {
 		Path:             filepath.Join(root, "log"),
 		MaxSegmentBytes:  128,
 		DisableAutoClean: true,
-		SegmentStore:     hook,
+		Tiers:            oneTier(hook),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })

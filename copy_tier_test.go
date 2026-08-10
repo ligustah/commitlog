@@ -48,7 +48,7 @@ func copyTierSource(t *testing.T, root string) (*FileSegmentStore, []int64, map[
 
 	l, err := New(Options{
 		Name: "copytier", Path: filepath.Join(root, "log"), MaxSegmentBytes: 1024,
-		SegmentStore: store, RemoteIndexCache: cache,
+		Tiers: oneTier(store), RemoteIndexCache: cache,
 	})
 	require.NoError(t, err)
 
@@ -86,7 +86,7 @@ func TestACopiedTierServesTheSameRecords(t *testing.T) {
 	defer cache.Close()
 	l, err := New(Options{
 		Name: "copytier", Path: filepath.Join(root, "adopted"), MaxSegmentBytes: 1024,
-		SegmentStore: dst, RemoteIndexCache: cache,
+		Tiers: oneTier(dst), RemoteIndexCache: cache,
 	})
 	require.NoError(t, err)
 	defer l.Close()

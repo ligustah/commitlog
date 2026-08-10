@@ -805,6 +805,15 @@ run_guard_windows "store publish retries a held dest" segment_store.go   '	retur
 # and the loop variable is still referenced by the body it no longer reaches.
 run_guard "a manifest entry names its tier" manifest.go   '		if o.Tier == "" {' '		if false {'   '^TestAManifestEntryWithNoTierIsRefused$'
 
+# A tier chain this build cannot honour is refused at New. Both arms neutralize
+# to `if false` so the package still builds and what fails is the refusal.
+run_guard "more than one tier is refused" tier.go   '	if len(tiers) > 1 {' '	if false {'   '^TestATierChainThisBuildCannotHonourIsRefused$'
+run_guard "a tier must be named" tier.go   '		if t.Name == "" {' '		if false {'   '^TestATierChainThisBuildCannotHonourIsRefused$'
+# Neutralized by making the lookup answer for ANY name — which is precisely the
+# fallback the refusal exists to prevent, rather than a deletion that would take
+# the return value with it.
+run_guard "an object's tier must be configured" tier.go   '		if t.Name == name {' '		if true {'   '^TestAnObjectNamingAnUnconfiguredTierIsRefused$'
+
 # A block-compressed offloaded segment has THREE objects. The orphan sweep
 # builds its live set twice over — from the manifest and from the log's own
 # segments — and both halves named the log and the index only, so neither could

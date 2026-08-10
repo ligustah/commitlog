@@ -54,7 +54,7 @@ func TestARecreatedLogDoesNotSeekWithTheDeletedLogsCachedIndex(t *testing.T) {
 			Name:             "events",
 			Path:             logPath,
 			MaxSegmentBytes:  512,
-			SegmentStore:     store,
+			Tiers:            oneTier(store),
 			RemoteIndexCache: cache,
 			DisableAutoClean: true,
 		})

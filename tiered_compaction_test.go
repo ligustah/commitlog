@@ -26,7 +26,7 @@ func TestCompactionRewritesOffloadedSegments(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  128,
 		Compact:          true,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	defer cleanup()

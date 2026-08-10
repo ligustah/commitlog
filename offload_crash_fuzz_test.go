@@ -76,7 +76,7 @@ func fzOffloadSetup(t *testing.T, s *fzStream) (*commitLog, Options, *fzFaultSto
 	opts := Options{
 		Path:                 filepath.Join(base, "log"),
 		MaxSegmentBytes:      64, // roll constantly so there are sealed segments to offload
-		SegmentStore:         store,
+		Tiers:                oneTier(store),
 		DisableAutoClean:     true,
 		HWCheckpointInterval: time.Hour,
 		CleanerInterval:      time.Hour,

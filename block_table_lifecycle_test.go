@@ -38,7 +38,7 @@ func TestOffloadingASegmentRemovesItsLocalBlockTable(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  1 << 14,
 		Compression:      compress.Snappy,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)

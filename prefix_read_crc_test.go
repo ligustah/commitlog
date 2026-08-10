@@ -112,7 +112,7 @@ func TestKeyPrefixRefusesTieredRecordsThatFailCRC(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  256,
 		Compact:          true,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	}
 

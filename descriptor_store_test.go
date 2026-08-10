@@ -24,7 +24,7 @@ func tieredCompactedLog(t *testing.T) (*FileSegmentStore, int64) {
 	opts := Options{
 		Path:                      dir,
 		MaxSegmentBytes:           64,
-		SegmentStore:              store,
+		Tiers:                     oneTier(store),
 		DisableAutoClean:          true,
 		Compact:                   true,
 		CompactMinAge:             time.Hour,
@@ -54,7 +54,7 @@ func adoptingOpts(t *testing.T, store *FileSegmentStore) Options {
 	return Options{
 		Path:                      tempDir(t),
 		MaxSegmentBytes:           64,
-		SegmentStore:              store,
+		Tiers:                     oneTier(store),
 		DisableAutoClean:          true,
 		Compact:                   true,
 		CompactMinAge:             time.Hour,
@@ -200,7 +200,7 @@ func TestTheDescriptorIsNeverGarbage(t *testing.T) {
 	opts := Options{
 		Path:                      dir,
 		MaxSegmentBytes:           64,
-		SegmentStore:              store,
+		Tiers:                     oneTier(store),
 		DisableAutoClean:          true,
 		Compact:                   true,
 		CompactMinAge:             time.Hour,
@@ -222,9 +222,9 @@ func TestTheDescriptorIsNeverGarbage(t *testing.T) {
 
 	garbage, err := l.UnreferencedObjects()
 	require.NoError(t, err)
-	require.NotContains(t, garbage, descriptorKey,
+	require.NotContains(t, orphanKeys(garbage), descriptorKey,
 		"the descriptor was collected as garbage")
-	require.NotContains(t, garbage, manifestKey)
+	require.NotContains(t, orphanKeys(garbage), manifestKey)
 
 	// Run the collection the caller is told to run, then prove the log still
 	// opens — which is the consequence, not the list.

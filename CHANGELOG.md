@@ -5,6 +5,37 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed
+
+- **BREAKING: `Options.SegmentStore` becomes `Options.Tiers []Tier`.** A log's
+  store is now a named entry in a chain — `Tier{Name, Store}` — and every
+  offloaded object records the name of the tier it went into. This build accepts
+  at most ONE tier and refuses more, because everything below the first would
+  silently never be written to; step 3 of `docs/multi-store-tiering.md` lifts
+  that. Nothing else about a single-tier log changes.
+
+  A tier with no `Name` or no `Store` is refused at `New`, where the option
+  arrives, rather than at the first offload.
+
+- **BREAKING: `DeleteStoreObjects` and `UnreferencedObjects` take and return
+  `StoreObject{Tier, Key}`.** A bare key stopped being enough the moment a log
+  could have two stores, and the sweep's whole subject is objects no manifest
+  names — so nothing else could resolve one afterwards. The pair round-trips.
+
+- **An object naming a tier that is not configured is an error.** It is not
+  resolved against the nearest store: keys are allocated per upload, so
+  answering with the primary tier reads one store's bytes under another store's
+  keys and reports a missing object rather than a misconfigured chain.
+
+- **The log descriptor is written to every tier and read from the nearest.**
+  A store that cannot say which log it belongs to is not self-describing, and
+  `logIsNew` now asks every tier — a node adopting ONE tier of a chain has that
+  tier's descriptor and not the others', and treating it as a new log because
+  the first store it looked in was empty is the silent adoption the descriptor
+  exists to prevent.
+
 ## v0.62.1 — 2026-08-10
 
 ### Fixed

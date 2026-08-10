@@ -29,7 +29,7 @@ func TestOffloadIndexCacheConcurrentReaders(t *testing.T) {
 	opts := Options{
 		Path:                 filepath.Join(base, "log"),
 		MaxSegmentBytes:      128, // many sealed segments => many offloaded indexes
-		SegmentStore:         store,
+		Tiers:                oneTier(store),
 		RemoteIndexCache:     cache,
 		DisableAutoClean:     true,
 		HWCheckpointInterval: time.Hour,

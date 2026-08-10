@@ -37,7 +37,10 @@ const manifestKey = "manifest"
 // same reason as version 1.
 const manifestVersion = 3
 
-// defaultTierName is the tier of a log configured with a single store.
+// defaultTierName is the conventional name for the one tier of a single-store
+// log. The library no longer writes it — every object records the name of the
+// Tier it went into (Options.Tiers) — and it survives as the name the tests and
+// simple callers use, and as the place the argument below is written down.
 //
 // A NAME rather than an empty string, and that is not cosmetic. An absent JSON
 // field decodes to "", so an empty Tier would be indistinguishable from a
@@ -89,7 +92,8 @@ type tierManifest struct {
 // Caller must not hold l.mu, and must not hold the segment lock of any segment a
 // pending entry describes: tierState reads every segment under its read lock.
 func (l *commitLog) writeTierManifest(pending ...TierObject) error {
-	if l.SegmentStore == nil || !l.tierWritable() {
+	store := l.primaryStore()
+	if store == nil || !l.tierWritable() {
 		return nil
 	}
 	objs, err := l.tierState()
@@ -119,7 +123,7 @@ func (l *commitLog) writeTierManifest(pending ...TierObject) error {
 	if err != nil {
 		return errors.Wrap(err, "encode tier manifest")
 	}
-	if err := l.SegmentStore.Put(manifestKey, bytes.NewReader(body), int64(len(body))); err != nil {
+	if err := store.Put(manifestKey, bytes.NewReader(body), int64(len(body))); err != nil {
 		return errors.Wrap(err, "put tier manifest")
 	}
 	return nil
@@ -224,10 +228,11 @@ func readTierManifest(store SegmentStore) ([]TierObject, error) {
 // TierManifest returns what the STORE says its tier holds, read from the store
 // rather than from this log's local bookkeeping. See the interface doc.
 func (l *commitLog) TierManifest() ([]TierObject, error) {
-	if l.SegmentStore == nil {
+	store := l.primaryStore()
+	if store == nil {
 		return nil, nil
 	}
-	return readTierManifest(l.SegmentStore)
+	return readTierManifest(store)
 }
 
 // adoptTierManifest materialises segments this log does not have but the store's
@@ -261,9 +266,13 @@ func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (int, error) {
 				"commitlog: tier manifest segment %d has an offloaded index but no "+
 					"RemoteIndexCache is configured", o.BaseOffset)
 		}
+		store, err := l.storeForTier(o.Tier)
+		if err != nil {
+			return adopted, err
+		}
 		meta := o.meta()
 		seg, err := openOffloadedSegment(l.Path, o.BaseOffset, l.MaxSegmentBytes,
-			l.Compression, l.SegmentStore, meta, l.RemoteIndexCache)
+			l.Compression, store, o.Tier, meta, l.RemoteIndexCache)
 		if err != nil {
 			// The object is named but not there. That window is unavoidable —
 			// the caller deletes superseded objects after a pass, and a crash

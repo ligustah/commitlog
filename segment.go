@@ -124,10 +124,15 @@ type segment struct {
 	// so it has to be rederived rather than trusted.
 	droppedTornTail bool
 
-	// Set when the segment's log bytes have been offloaded to a SegmentStore
-	// (backing is a *storeBacking). storeKey is the object key; store is the
-	// tier it lives in — retained so Delete can remove the object.
+	// Set when the segment's log bytes have been offloaded to a tier (backing is
+	// a *storeBacking). storeKey is the object key; store is the store holding
+	// it — retained so Delete can remove the object — and tier is that store's
+	// name, which is what the manifest publishes and what a reclaim resolves
+	// back through. The store is kept alongside the name rather than looked up
+	// from it on every read: a segment serving reads must not depend on the
+	// log's configuration still agreeing with the manifest it was opened from.
 	store    SegmentStore
+	tier     string
 	storeKey string
 
 	// Set additionally when the segment's INDEX has also been offloaded (tiered
@@ -337,7 +342,7 @@ func (s *segment) uploadTo(store SegmentStore, key, idxKey, blkKey string, cache
 // attachOffloaded is the second half of an offload: the objects are uploaded
 // AND the manifest that names them is published, so the local bytes are now
 // redundant and can go.
-func (s *segment) attachOffloaded(store SegmentStore, meta offloadMeta, cache *RemoteIndexCache) error {
+func (s *segment) attachOffloaded(store SegmentStore, tier string, meta offloadMeta, cache *RemoteIndexCache) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.closed {
@@ -346,7 +351,7 @@ func (s *segment) attachOffloaded(store SegmentStore, meta offloadMeta, cache *R
 	if s.store != nil {
 		return nil
 	}
-	return s.attachOffloadedLocked(store, meta, cache)
+	return s.attachOffloadedLocked(store, tier, meta, cache)
 }
 
 // attachOffloadedLocked turns a LOCAL segment into an offloaded one pointing at
@@ -363,8 +368,8 @@ func (s *segment) attachOffloaded(store SegmentStore, meta offloadMeta, cache *R
 // caller has already established that the objects exist; this does not upload.
 //
 // Caller holds the segment lock.
-func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
-	cache *RemoteIndexCache) error {
+func (s *segment) attachOffloadedLocked(store SegmentStore, tier string,
+	meta offloadMeta, cache *RemoteIndexCache) error {
 
 	sb, err := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
 	if err != nil {
@@ -405,6 +410,7 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, meta offloadMeta,
 
 	s.backing = sb
 	s.store = store
+	s.tier = tier
 	s.storeKey = meta.LogKey
 	// The table this segment already has stays; only the key it would be
 	// re-fetched from is new. A rewrite (swapReplacement) or a reopen is what
@@ -463,7 +469,7 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 // reads. Set (option 2) means the index was offloaded too: boundaries come from
 // the manifest, the index stays remote (fetched into cache on first seek), and
 // Index is nil.
-func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compress.Codec, store SegmentStore, meta offloadMeta, cache *RemoteIndexCache) (*segment, error) {
+func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compress.Codec, store SegmentStore, tier string, meta offloadMeta, cache *RemoteIndexCache) (*segment, error) {
 	s := &segment{
 		maxBytes:    maxBytes,
 		BaseOffset:  baseOffset,
@@ -474,6 +480,7 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		waiters:     make(map[interface{}]chan struct{}),
 		sealed:      true,
 		store:       store,
+		tier:        tier,
 		// Taken from the manifest VERBATIM. Nothing recomputes a key from the
 		// base offset — it could not, since each upload allocated its own — so
 		// objects written by any earlier version stay resolvable.
@@ -1943,7 +1950,7 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 	var (
 		newKey, freshIndexKey, freshBlocksKey = newStoreKeys(s.BaseOffset)
 		newIndexKey, newBlocksKey             string
-		superseded                            = []pendingReclaim{{key: s.storeKey, pin: oldBacking}}
+		superseded                            = []pendingReclaim{{tier: s.tier, key: s.storeKey, pin: oldBacking}}
 	)
 
 	size, err := fresh.backing.Size()
@@ -1968,7 +1975,7 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 		// already in flight can still be reading this object, and what covers
 		// that is the deferral — the entry is not considered for deletion until
 		// a later pass, by which time a single in-flight request is long done.
-		superseded = append(superseded, pendingReclaim{key: s.indexKey})
+		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.indexKey})
 	}
 
 	if fresh.blockMode {
@@ -1981,7 +1988,7 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 	if s.blocksKey != "" {
 		// No pin, for the index object's reason: the table is fetched whole and
 		// held by the segment, not streamed from, so nothing is mid-read of it.
-		superseded = append(superseded, pendingReclaim{key: s.blocksKey})
+		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.blocksKey})
 	}
 
 	meta := offloadMeta{

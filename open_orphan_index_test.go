@@ -67,7 +67,7 @@ func TestAnOffloadedSegmentsIndexSurvivesOpen(t *testing.T) {
 	opts := Options{
 		Path:             dir,
 		MaxSegmentBytes:  1 << 12,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	}
 	l, err := New(opts)

@@ -275,15 +275,21 @@ func writeStoreDescriptor(store SegmentStore, d descriptor) error {
 // log is the one moment its retention settings were never compared. Asked of
 // the store, it is an existing log, and it gets checked.
 func logIsNew(opts Options) (bool, error) {
-	if opts.SegmentStore != nil {
-		_, err := readStoreDescriptor(opts.SegmentStore)
-		if os.IsNotExist(err) {
-			return true, nil
+	if len(opts.Tiers) > 0 {
+		// Asked of every tier, and any answer settles it. A node adopting ONE
+		// tier of a chain has that tier's descriptor and not the others', and
+		// treating it as a new log because the first store it looked in was
+		// empty is the silent adoption this mechanism exists to prevent.
+		for _, t := range opts.Tiers {
+			_, err := readStoreDescriptor(t.Store)
+			if os.IsNotExist(err) {
+				continue
+			}
+			// An unreadable descriptor is not an absent one. Reporting "new"
+			// here would overwrite it with the caller's options.
+			return false, nil
 		}
-		// An unreadable descriptor is not an absent one. Reporting "new" here
-		// would overwrite it with the caller's options, which is the silent
-		// adoption this whole mechanism exists to prevent.
-		return false, nil
+		return true, nil
 	}
 	entries, err := os.ReadDir(opts.Path)
 	if err != nil {
@@ -341,7 +347,7 @@ func reconcileDescriptor(opts Options, isNew bool) error {
 // process picked — "log at C:\tmp\x9f31" reads as a fault in a directory nobody
 // cares about, when the disagreement is with the tier the whole cluster shares.
 func descriptorHome(opts Options) string {
-	if opts.SegmentStore != nil {
+	if len(opts.Tiers) > 0 {
 		return fmt.Sprintf("the tier behind the log at %s", opts.Path)
 	}
 	return fmt.Sprintf("log at %s", opts.Path)
@@ -349,8 +355,13 @@ func descriptorHome(opts Options) string {
 
 // loadDescriptor reads the log's identity from wherever this log keeps it.
 func loadDescriptor(opts Options) (descriptor, error) {
-	if opts.SegmentStore != nil {
-		return readStoreDescriptor(opts.SegmentStore)
+	// The nearest tier holds the identity the caller is checked against. The
+	// others are checked by carrying the same descriptor, not by being asked
+	// separately: two tiers of one log disagreeing about what the log IS means
+	// one store was attached to the wrong log, and that is a refusal rather
+	// than something to reconcile — see reconcileDescriptor.
+	for _, t := range opts.Tiers {
+		return readStoreDescriptor(t.Store)
 	}
 	return readDescriptor(opts.Path)
 }
@@ -365,11 +376,19 @@ func loadDescriptor(opts Options) (descriptor, error) {
 // be for segment data, because the descriptor is a claim about the log rather
 // than part of it.
 func publishDescriptor(opts Options, d descriptor) error {
-	if opts.SegmentStore == nil {
+	if len(opts.Tiers) == 0 {
 		return writeDescriptor(opts.Path, d)
 	}
 	if opts.TierReadOnly {
 		return nil
 	}
-	return writeStoreDescriptor(opts.SegmentStore, d)
+	// Every tier, because every tier must be able to say which log it belongs
+	// to. A store that cannot is not self-describing, and a node adopting it
+	// alone would have nothing to be checked against.
+	for _, t := range opts.Tiers {
+		if err := writeStoreDescriptor(t.Store, d); err != nil {
+			return err
+		}
+	}
+	return nil
 }

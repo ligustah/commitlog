@@ -87,7 +87,7 @@ func TestOpeningAnOffloadedTierReadsNoLogObjects(t *testing.T) {
 			opts := func(path string, adopt bool) Options {
 				return Options{
 					Name: "cost", Path: path, MaxSegmentBytes: 1 << 20,
-					Compression: tc.codec, SegmentStore: store,
+					Compression: tc.codec, Tiers: oneTier(store),
 					RemoteIndexCache: cache, AdoptOptions: adopt,
 				}
 			}

@@ -29,7 +29,7 @@ func localRetentionLog(t *testing.T, age time.Duration) (*commitLog, func(time.D
 	l, err := New(Options{
 		Path:              dir,
 		MaxSegmentBytes:   1 << 12,
-		SegmentStore:      store,
+		Tiers:             oneTier(store),
 		LocalRetentionAge: age,
 		DisableAutoClean:  true,
 	})

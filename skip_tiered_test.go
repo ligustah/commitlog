@@ -41,7 +41,7 @@ func TestReadOnlyTierMakesNoTierWrites(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  128,
 		Compact:          true,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 		// Tier retention that would otherwise reclaim aggressively: a delete is
 		// a tier write too, so read-only has to suppress it as well.
@@ -133,7 +133,7 @@ func TestReadOnlyTierStillCompactsLocalSegments(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  128,
 		Compact:          true,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	defer cleanup()

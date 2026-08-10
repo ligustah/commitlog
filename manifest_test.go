@@ -62,7 +62,7 @@ func TestALogOpensATierItHasNoLocalStateFor(t *testing.T) {
 	fresh, cleanup := setupWithOptions(t, Options{
 		Path:             tempDir(t),
 		MaxSegmentBytes:  64,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -97,7 +97,7 @@ func TestTierManifestFollowsTheTier(t *testing.T) {
 		Path:             dir,
 		MaxSegmentBytes:  128,
 		Compact:          true,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -174,7 +174,7 @@ func TestObjectsOutsideTheManifestAreGarbage(t *testing.T) {
 
 	orphans, err := l.UnreferencedObjects()
 	require.NoError(t, err)
-	require.Contains(t, orphans, orphan,
+	require.Contains(t, orphanKeys(orphans), orphan,
 		"an object no manifest names must be reclaimable")
 }
 
@@ -209,7 +209,7 @@ func TestUnreferencedObjectsSparesAPeersObjects(t *testing.T) {
 	peer, cleanup := setupWithOptions(t, Options{
 		Path:             tempDir(t),
 		MaxSegmentBytes:  64,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -238,10 +238,10 @@ func TestUnreferencedObjectsSparesAPeersObjects(t *testing.T) {
 	orphans, err := peer.UnreferencedObjects()
 	require.NoError(t, err)
 	for _, o := range live {
-		require.NotContains(t, orphans, o.LogKey,
+		require.NotContains(t, orphanKeys(orphans), o.LogKey,
 			"an object the tier's manifest names must never be called garbage")
 		if o.IndexKey != "" {
-			require.NotContains(t, orphans, o.IndexKey)
+			require.NotContains(t, orphanKeys(orphans), o.IndexKey)
 		}
 	}
 }

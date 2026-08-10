@@ -42,7 +42,7 @@ func tieredLog(t *testing.T) (*commitLog, *FileSegmentStore, int64) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
 		MaxSegmentBytes:  64,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)

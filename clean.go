@@ -373,7 +373,7 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 // itself. A caller reproducing that rule keeps a second copy of it, and the
 // copy that is not next to SetTierReadOnly is the one that drifts.
 func (l *commitLog) offloadLocalRetention() error {
-	if l.Options.LocalRetentionAge <= 0 || l.SegmentStore == nil {
+	if l.Options.LocalRetentionAge <= 0 || !l.hasTier() {
 		return nil
 	}
 	// No tierWritable() check here on purpose. OffloadBefore answers (0, nil)

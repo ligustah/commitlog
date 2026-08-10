@@ -145,7 +145,7 @@ type commitLog struct {
 	// already covered return without an fsync of their own, which is the whole
 	// point: N commits cost one fsync rather than N. Guarded by syncMu, which is
 	// held only around the bookkeeping, never across the fsync itself.
-	// tierReadOnly withholds this log's right to write to its SegmentStore.
+	// tierReadOnly withholds this log's right to write to its tier.
 	// Guarded by its own mutex because a pass reads it while the owner may be
 	// flipping it.
 	tierMu       sync.RWMutex
@@ -200,7 +200,7 @@ type Options struct {
 	MaxLogMessages  int64         // Retention by messages
 	MaxLogAge       time.Duration // Retention by age
 	// MaxTier* bound the segments whose bytes have been offloaded to the
-	// SegmentStore, separately from the ones still on local disk. Retention is
+	// tier, separately from the ones still on local disk. Retention is
 	// PER TIER: a segment over the local budget that also exists in a store has
 	// left the tier those limits govern rather than being deleted, and the
 	// record is gone only when the last tier's limit is reached.
@@ -210,12 +210,12 @@ type Options struct {
 	// that offloading already reclaimed.
 	//
 	// Zero keeps everything in the tier, which is what makes this compatible: a
-	// log with no SegmentStore has no offloaded segments, so these never apply.
+	// log with no tier has no offloaded segments, so these never apply.
 	MaxTierBytes    int64
 	MaxTierMessages int64
 	MaxTierAge      time.Duration
 	// LocalRetentionAge is how long a record's bytes stay on local disk before
-	// the log offloads them to the SegmentStore. Zero never offloads.
+	// the log offloads them to the tier. Zero never offloads.
 	//
 	// This is the SCHEDULE for offloading, not a retention limit: nothing is
 	// deleted, the segment keeps serving, and MaxTier* above decide when the
@@ -270,7 +270,7 @@ type Options struct {
 	// PrefixReadCoalesceBytes and PrefixReadTierCoalesceBytes are how large a
 	// gap between two wanted records ReadKeyPrefix reads THROUGH rather than
 	// splitting into a second request — for LOCAL segments and for segments
-	// offloaded to the SegmentStore. Zero takes the defaults; NEGATIVE means
+	// offloaded to the tier. Zero takes the defaults; NEGATIVE means
 	// never coalesce, i.e. one request per isolated record.
 	//
 	// They are separate settings because the right answer depends on the DEVICE,
@@ -304,7 +304,7 @@ type Options struct {
 	PrefixReadTierCoalesceBytes int64
 	// PrefixReadConcurrency and PrefixReadTierConcurrency are how many record
 	// reads ReadKeyPrefix keeps in flight against LOCAL segments and against
-	// segments offloaded to the SegmentStore. Zero takes the defaults.
+	// segments offloaded to the tier. Zero takes the defaults.
 	//
 	// The unit is a RUN — a span of wanted records read contiguously (see
 	// PrefixReadCoalesceBytes) — not a segment, so a prefix whose keys are
@@ -328,7 +328,7 @@ type Options struct {
 	PrefixReadConcurrency     int
 	PrefixReadTierConcurrency int
 	// TierReadOnly opens the log without the right to write to its
-	// SegmentStore: no offload, no rewrite of a tiered segment, no tier
+	// tier: no offload, no rewrite of a tiered segment, no tier
 	// retention, no object deletes. Reads are unaffected.
 	//
 	// This is what a process runs when it does not own the tier. Flip it with
@@ -388,13 +388,15 @@ type Options struct {
 	// byte-for-byte compatible with logs written before compression existed;
 	// existing segments keep whatever format they were written in.
 	Compression compress.Codec
-	// SegmentStore, when set, is the tier below local disk that OffloadBefore
-	// moves sealed segments' log bytes into. Reads of an offloaded segment go
-	// through the store transparently. Nil disables tiering (the default). The
-	// caller scopes the store per-log (e.g. a directory or object-store prefix per
-	// stream) since segment keys are the bare base offset.
-	SegmentStore SegmentStore
-	// RemoteIndexCache, when set (with SegmentStore), enables tiered-storage
+	// Tiers is the chain of stores below local disk that OffloadBefore moves
+	// sealed segments' log bytes into, nearest first. Reads of an offloaded
+	// segment go through its tier transparently. Empty disables tiering (the
+	// default).
+	//
+	// This build accepts at most ONE tier and refuses more, because everything
+	// below the first would silently never be written to. See Tier.
+	Tiers []Tier
+	// RemoteIndexCache, when set (with Tiers), enables tiered-storage
 	// option 2: OffloadBefore also offloads each sealed segment's index object and
 	// drops the local index, so no per-segment index file remains on local disk.
 	// Reads fetch the index into this process-wide LRU cache on demand. Nil keeps
@@ -422,6 +424,12 @@ func New(opts Options) (CommitLog, error) {
 	// in; checking it where it arrives is the whole fix.
 	if !opts.Compression.Valid() {
 		return nil, errors.Errorf("commitlog: unknown compression codec %d", byte(opts.Compression))
+	}
+	// Checked where it arrives, for the same reason as the codec above: every
+	// place further in that meets a nameless or storeless tier meets it after
+	// there are records depending on it.
+	if err := validateTiers(opts.Tiers); err != nil {
+		return nil, err
 	}
 	// Options where a negative is not a value any caller can mean.
 	//
@@ -627,9 +635,9 @@ func (l *commitLog) open() error {
 	// either an offloaded segment's index or a genuine orphan, and only the
 	// manifest can tell those apart.
 	var tier []TierObject
-	if l.SegmentStore != nil {
+	if store := l.primaryStore(); store != nil {
 		var err error
-		tier, err = readTierManifest(l.SegmentStore)
+		tier, err = readTierManifest(store)
 		if err != nil {
 			return err
 		}
@@ -1639,9 +1647,10 @@ func (l *commitLog) Truncate(offset int64) error {
 }
 
 // OffloadBefore offloads the log bytes of every sealed segment entirely below
-// minOffset to the configured SegmentStore. See the interface doc.
+// minOffset to the log's primary tier. See the interface doc.
 func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
-	if l.SegmentStore == nil || minOffset <= 0 {
+	tier, ok := l.primaryTier()
+	if !ok || minOffset <= 0 {
 		return 0, nil
 	}
 	if !l.tierWritable() {
@@ -1679,7 +1688,7 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 			continue
 		}
 		logKey, idxKey, blkKey := newStoreKeys(s.BaseOffset)
-		meta, err := s.uploadTo(l.SegmentStore, logKey, idxKey, blkKey, l.RemoteIndexCache)
+		meta, err := s.uploadTo(tier.Store, logKey, idxKey, blkKey, l.RemoteIndexCache)
 		if err != nil {
 			return n, err
 		}
@@ -1694,10 +1703,10 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 		//
 		// Per segment rather than once per pass, because a batch would put every
 		// segment in the pass on the wrong side of that second rule.
-		if err := l.writeTierManifest(meta.tierObject(s.BaseOffset, defaultTierName)); err != nil {
+		if err := l.writeTierManifest(meta.tierObject(s.BaseOffset, tier.Name)); err != nil {
 			return n, err
 		}
-		if err := s.attachOffloaded(l.SegmentStore, meta, l.RemoteIndexCache); err != nil {
+		if err := s.attachOffloaded(tier.Store, tier.Name, meta, l.RemoteIndexCache); err != nil {
 			// An error there no longer means the segment stayed local: past the
 			// point where the store backing is open the swap happens regardless,
 			// and what is reported is a local cleanup that did not fully succeed.

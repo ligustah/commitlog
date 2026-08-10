@@ -6,7 +6,16 @@ import (
 	"github.com/pkg/errors"
 )
 
-// TierObject describes where one segment's bytes live in a SegmentStore, and
+// StoreObject names one object in one tier. It is what the orphan sweep
+// reports and what the delete takes back, because a bare key does not say which
+// store to look in once a log has more than one — and the sweep's whole subject
+// is objects no manifest names, so nothing else could resolve it.
+type StoreObject struct {
+	Tier string
+	Key  string
+}
+
+// TierObject describes where one segment's bytes live in a tier's store, and
 // everything needed to place that segment without reading the object.
 //
 // It is the log's tier bookkeeping, and the tier manifest is a list of these.
@@ -108,11 +117,8 @@ func (l *commitLog) tierState() ([]TierObject, error) {
 		s.RLock()
 		if s.store != nil {
 			out = append(out, TierObject{
-				BaseOffset: s.BaseOffset,
-				// The segment does not record a tier yet, because there is only
-				// one. Step 2 of docs/multi-store-tiering.md is where this
-				// becomes a question the segment can answer.
-				Tier:           defaultTierName,
+				BaseOffset:     s.BaseOffset,
+				Tier:           s.tier,
 				LogKey:         s.storeKey,
 				IndexKey:       s.indexKey,
 				BlocksKey:      s.blocksKey,
@@ -131,7 +137,7 @@ func (l *commitLog) tierState() ([]TierObject, error) {
 	return out, nil
 }
 
-// tierWritable reports whether this log may write to its SegmentStore.
+// tierWritable reports whether this log may write to its tier.
 func (l *commitLog) tierWritable() bool {
 	l.tierMu.RLock()
 	defer l.tierMu.RUnlock()
@@ -139,7 +145,7 @@ func (l *commitLog) tierWritable() bool {
 }
 
 // SetTierReadOnly grants or withdraws this log's right to write to its
-// SegmentStore. See the interface doc.
+// tier. See the interface doc.
 func (l *commitLog) SetTierReadOnly(readOnly bool) {
 	l.tierMu.Lock()
 	l.tierReadOnly = readOnly
@@ -160,8 +166,12 @@ var errTierReadOnly = errors.New(
 // before the swap is reading the OLD object, and deleting it underneath them
 // turns a rewrite into a read error.
 type pendingReclaim struct {
-	key string
-	pin *storeBacking
+	// tier is the store the key lives in, carried rather than resolved later:
+	// by the time this drains, the segment that superseded the object may have
+	// moved on, and the object's home is a fact about the object.
+	tier string
+	key  string
+	pin  *storeBacking
 }
 
 // queueReclaim takes ownership of objects a rewrite superseded. They are
@@ -197,7 +207,7 @@ func (l *commitLog) queueReclaim(entries []pendingReclaim) {
 // retention deadline — because a deletion of already-dead bytes did not land
 // would be the worse trade. The entry stays queued and the next pass retries.
 func (l *commitLog) drainReclaim() {
-	if l.SegmentStore == nil {
+	if !l.hasTier() {
 		return
 	}
 	l.tierMu.Lock()
@@ -230,7 +240,16 @@ func (l *commitLog) drainReclaim() {
 			kept = append(kept, e)
 			continue
 		}
-		if err := l.SegmentStore.Delete(e.key); err != nil {
+		store, err := l.storeForTier(e.tier)
+		if err != nil {
+			// The queue named a tier this log no longer has. Keeping the entry
+			// is the same trade as a failed delete: it costs space, and the
+			// alternative — dropping it — would silently forget an object
+			// nothing else will ever name.
+			kept = append(kept, e)
+			continue
+		}
+		if err := store.Delete(e.key); err != nil {
 			kept = append(kept, e)
 		}
 	}
@@ -240,34 +259,33 @@ func (l *commitLog) drainReclaim() {
 	l.tierMu.Unlock()
 }
 
-// DeleteStoreObjects removes objects from the SegmentStore. See the interface
-// doc.
-func (l *commitLog) DeleteStoreObjects(keys []string) ([]string, error) {
-	if l.SegmentStore == nil || len(keys) == 0 {
+// DeleteStoreObjects removes objects from their tiers. See the interface doc.
+func (l *commitLog) DeleteStoreObjects(objs []StoreObject) ([]StoreObject, error) {
+	if !l.hasTier() || len(objs) == 0 {
 		return nil, nil
 	}
 	if !l.tierWritable() {
 		return nil, errTierReadOnly
 	}
-	deleted := make([]string, 0, len(keys))
-	for _, key := range keys {
-		if err := l.SegmentStore.Delete(key); err != nil {
-			return deleted, errors.Wrapf(err, "delete %s", key)
+	deleted := make([]StoreObject, 0, len(objs))
+	for _, o := range objs {
+		store, err := l.storeForTier(o.Tier)
+		if err != nil {
+			return deleted, err
 		}
-		deleted = append(deleted, key)
+		if err := store.Delete(o.Key); err != nil {
+			return deleted, errors.Wrapf(err, "delete %s from tier %s", o.Key, o.Tier)
+		}
+		deleted = append(deleted, o)
 	}
 	return deleted, nil
 }
 
 // UnreferencedObjects lists store objects nothing this log can see names. See
 // the interface doc — in particular, what "unreferenced" is judged from.
-func (l *commitLog) UnreferencedObjects() ([]string, error) {
-	if l.SegmentStore == nil {
+func (l *commitLog) UnreferencedObjects() ([]StoreObject, error) {
+	if !l.hasTier() {
 		return nil, nil
-	}
-	keys, err := l.SegmentStore.List()
-	if err != nil {
-		return nil, errors.Wrap(err, "list store")
 	}
 
 	// Live means named by the STORE'S MANIFEST or read by one of this log's
@@ -290,10 +308,17 @@ func (l *commitLog) UnreferencedObjects() ([]string, error) {
 	// is what makes the tier readable; the descriptor is what makes it
 	// identifiable, and collecting it leaves a log that refuses its own next
 	// open, since a log that exists with no descriptor is a refusal.
-	referenced := make(map[string]bool, len(keys))
+	referenced := make(map[string]bool)
 	referenced[manifestKey] = true
 	referenced[descriptorKey] = true
-	if manifest, err := readTierManifest(l.SegmentStore); err == nil {
+	for _, t := range l.Tiers {
+		manifest, err := readTierManifest(t.Store)
+		if err != nil {
+			// Refuse rather than under-report. A manifest that exists but cannot
+			// be read tells us nothing about what is live, and a garbage list
+			// built without it would name objects the tier still depends on.
+			return nil, errors.Wrapf(err, "read tier manifest for tier %s", t.Name)
+		}
 		for _, o := range manifest {
 			if o.LogKey != "" {
 				referenced[o.LogKey] = true
@@ -310,11 +335,6 @@ func (l *commitLog) UnreferencedObjects() ([]string, error) {
 				referenced[o.BlocksKey] = true
 			}
 		}
-	} else {
-		// Refuse rather than under-report. A manifest that exists but cannot be
-		// read tells us nothing about what is live, and a garbage list built
-		// without it would name objects the tier still depends on.
-		return nil, errors.Wrap(err, "read tier manifest")
 	}
 	l.mu.RLock()
 	for _, s := range l.segments {
@@ -332,12 +352,28 @@ func (l *commitLog) UnreferencedObjects() ([]string, error) {
 	}
 	l.mu.RUnlock()
 
-	var orphans []string
-	for _, key := range keys {
-		if !referenced[key] {
-			orphans = append(orphans, key)
+	// Listed per tier and compared against the WHOLE live set rather than that
+	// tier's slice of it. Keys are allocated per upload and never reused, so a
+	// key live in one tier cannot be garbage in another — and a key that somehow
+	// appeared in two places is a fault to leave alone, not one to collect half
+	// of.
+	var orphans []StoreObject
+	for _, t := range l.Tiers {
+		keys, err := t.Store.List()
+		if err != nil {
+			return nil, errors.Wrapf(err, "list tier %s", t.Name)
+		}
+		for _, key := range keys {
+			if !referenced[key] {
+				orphans = append(orphans, StoreObject{Tier: t.Name, Key: key})
+			}
 		}
 	}
-	sort.Strings(orphans)
+	sort.Slice(orphans, func(i, j int) bool {
+		if orphans[i].Tier != orphans[j].Tier {
+			return orphans[i].Tier < orphans[j].Tier
+		}
+		return orphans[i].Key < orphans[j].Key
+	})
 	return orphans, nil
 }

@@ -178,16 +178,16 @@ type CommitLog interface {
 	TruncateBefore(minOffset int64) error
 
 	// OffloadBefore moves the log bytes of every sealed segment entirely below
-	// minOffset (LastOffset < minOffset) into the configured SegmentStore,
+	// minOffset (LastOffset < minOffset) into the log's primary tier,
 	// freeing local log-file space while the data stays readable through the
 	// store. The index stays local and the active segment is never offloaded.
-	// It is a no-op (returns 0) when no SegmentStore is configured. Returns the
+	// It is a no-op (returns 0) when no tier is configured. Returns the
 	// number of segments offloaded. Reads of an offloaded segment continue to
 	// work transparently; a restart reopens them from the store.
 	OffloadBefore(minOffset int64) (int, error)
 
 	// SetTierReadOnly grants or withdraws this log's right to write to its
-	// SegmentStore. While read-only it will not offload, will not rewrite a
+	// tier. While read-only it will not offload, will not rewrite a
 	// tiered segment, will not apply tier retention, and refuses
 	// DeleteStoreObjects. Reads are unaffected, and a tiered read stays
 	// transparent.
@@ -205,8 +205,8 @@ type CommitLog interface {
 	// contract describes.
 	SetTierReadOnly(readOnly bool)
 
-	// DeleteStoreObjects removes objects from the SegmentStore, returning those
-	// it removed. It is refused outright while the tier is read-only.
+	// DeleteStoreObjects removes objects from the tiers naming them, returning
+	// those it removed. It is refused outright while the tier is read-only.
 	//
 	// An OPERATOR TOOL, not part of the normal path: a log reclaims what its own
 	// rewrites supersede (see CleanWithSpec). What is left for this is garbage
@@ -218,7 +218,7 @@ type CommitLog interface {
 	// Deleting is idempotent — a key that is already gone is not an error — so a
 	// caller retrying after a partial failure does not have to tell the cases
 	// apart.
-	DeleteStoreObjects(keys []string) ([]string, error)
+	DeleteStoreObjects(objs []StoreObject) ([]StoreObject, error)
 
 	// TierManifest returns what the STORE says its tier holds, read from the
 	// store itself rather than from this log's in-memory segments.

@@ -18,7 +18,7 @@ func offloadTestLog(t *testing.T, dir string) (CommitLog, SegmentStore) {
 		Name:            "offload",
 		Path:            filepath.Join(dir, "log"),
 		MaxSegmentBytes: 512, // tiny, so each batch rolls a new segment
-		SegmentStore:    store,
+		Tiers:           oneTier(store),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestOffload_ReadThroughAndRecovery(t *testing.T) {
 	}
 	l2, err := New(Options{
 		Name: "offload", Path: filepath.Join(dir, "log"),
-		MaxSegmentBytes: 512, SegmentStore: store2,
+		MaxSegmentBytes: 512, Tiers: oneTier(store2),
 	})
 	if err != nil {
 		t.Fatalf("reopen: %v", err)

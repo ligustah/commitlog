@@ -98,7 +98,7 @@ func costLog(t *testing.T, records, every int) (*commitLog, *costStore, int64) {
 		// measurement would look flat and mean nothing.
 		MaxSegmentBytes:  64 << 10,
 		Compact:          true,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)

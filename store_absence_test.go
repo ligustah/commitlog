@@ -34,7 +34,7 @@ func flakyOpts(t *testing.T, store *flakyStore) Options {
 	return Options{
 		Path:                      tempDir(t),
 		MaxSegmentBytes:           64,
-		SegmentStore:              store,
+		Tiers:                     oneTier(store),
 		DisableAutoClean:          true,
 		Compact:                   true,
 		CompactMinAge:             time.Hour,

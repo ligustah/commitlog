@@ -40,7 +40,7 @@ func reclaimFixtureStore(t *testing.T, wrap func(*FileSegmentStore) SegmentStore
 		Path:             dir,
 		MaxSegmentBytes:  128,
 		Compact:          true,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 

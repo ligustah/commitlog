@@ -63,7 +63,7 @@ func TestALogThatFailsToOpenHoldsNothingAfterwards(t *testing.T) {
 	// Repeatedly, because one leaked handle and a hundred are the same bug and
 	// only the hundred is visible: a retry loop is how this is met in practice.
 	for i := range 60 {
-		reopened, err := New(Options{Path: dir, MaxSegmentBytes: 1024, SegmentStore: store})
+		reopened, err := New(Options{Path: dir, MaxSegmentBytes: 1024, Tiers: oneTier(store)})
 		require.Error(t, err, "attempt %d: the log opened despite a manifest "+
 			"segment whose index it cannot fetch", i)
 		require.Nil(t, reopened)

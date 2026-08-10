@@ -41,7 +41,7 @@ func (e *offloadIndexEnv) open() CommitLog {
 		Path:             filepath.Join(e.dir, "log"),
 		MaxSegmentBytes:  512,
 		Compression:      e.codec,
-		SegmentStore:     e.store,
+		Tiers:            oneTier(e.store),
 		RemoteIndexCache: e.cache,
 	})
 	if err != nil {

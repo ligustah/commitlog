@@ -25,7 +25,7 @@ func blockTieredLog(t *testing.T) (*commitLog, *FileSegmentStore, int64) {
 		Path:             dir,
 		MaxSegmentBytes:  1 << 12,
 		Compression:      compress.Snappy,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)
@@ -71,7 +71,7 @@ func TestABlockTableIsNotGarbage(t *testing.T) {
 		Path:             tempDir(t),
 		MaxSegmentBytes:  1 << 12,
 		Compression:      compress.Snappy,
-		SegmentStore:     store,
+		Tiers:            oneTier(store),
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -109,7 +109,7 @@ func TestABlockTableIsNotGarbage(t *testing.T) {
 	orphans, err := peer.UnreferencedObjects()
 	require.NoError(t, err)
 	for _, key := range tables {
-		require.NotContains(t, orphans, key,
+		require.NotContains(t, orphanKeys(orphans), key,
 			"the block table of a segment the manifest names was reported as garbage")
 	}
 }
@@ -149,11 +149,11 @@ func TestABlockTableTheLogIsReadingIsNotGarbage(t *testing.T) {
 
 	orphans, err := l.UnreferencedObjects()
 	require.NoError(t, err)
-	require.NotContains(t, orphans, dropped.BlocksKey,
+	require.NotContains(t, orphanKeys(orphans), dropped.BlocksKey,
 		"a block table the log is reading was reported as garbage because no "+
 			"manifest names it yet")
 	// Its siblings prove the fixture reached the segment loop at all rather than
 	// the manifest still naming the object by another route.
-	require.NotContains(t, orphans, dropped.LogKey)
-	require.NotContains(t, orphans, dropped.IndexKey)
+	require.NotContains(t, orphanKeys(orphans), dropped.LogKey)
+	require.NotContains(t, orphanKeys(orphans), dropped.IndexKey)
 }
