@@ -38,14 +38,13 @@ func TestReadOnlyTierMakesNoTierWrites(t *testing.T) {
 	store := &writeCountingStore{FileSegmentStore: fs}
 
 	l, cleanup := setupWithOptions(t, Options{
-		Path:             dir,
-		MaxSegmentBytes:  128,
-		Compact:          true,
-		Tiers:            oneTier(store),
-		DisableAutoClean: true,
+		Path:            dir,
+		MaxSegmentBytes: 128,
+		Compact:         true,
 		// Tier retention that would otherwise reclaim aggressively: a delete is
 		// a tier write too, so read-only has to suppress it as well.
-		MaxTierBytes: 1,
+		Tiers:            []Tier{{Name: defaultTierName, Store: store, MaxBytes: 1}},
+		DisableAutoClean: true,
 	})
 	defer cleanup()
 
@@ -87,7 +86,7 @@ func TestReadOnlyTierMakesNoTierWrites(t *testing.T) {
 
 	store.puts, store.deletes = 0, 0
 
-	l.SetTierReadOnly(true)
+	require.NoError(t, l.SetTierReadOnly(defaultTierName, true))
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
 		Ceiling:          At(hw + 1),
@@ -172,7 +171,7 @@ func TestReadOnlyTierStillCompactsLocalSegments(t *testing.T) {
 	}
 	l.mu.RUnlock()
 
-	l.SetTierReadOnly(true)
+	require.NoError(t, l.SetTierReadOnly(defaultTierName, true))
 	hw := l.HighWatermark()
 	_, err = l.CleanWithSpec(CleanSpec{
 		Ceiling:          At(hw + 1),

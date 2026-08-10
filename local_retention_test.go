@@ -133,7 +133,7 @@ func TestTheScheduledOffloadDoesNotDeadlockTheCleanPass(t *testing.T) {
 // this must not reintroduce a reason for the caller to know its own role.
 func TestAReadOnlyTierSchedulesTheOffloadAndDoesNothing(t *testing.T) {
 	l, advance := localRetentionLog(t, time.Minute)
-	l.SetTierReadOnly(true)
+	require.NoError(t, l.SetTierReadOnly(defaultTierName, true))
 	advance(time.Hour)
 
 	_, err := l.CleanWithSpec(CleanSpec{})

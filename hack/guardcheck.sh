@@ -828,6 +828,24 @@ run_guard "one segment lives in one tier" manifest.go   '			owner[o.BaseOffset] 
 run_guard "a manifest block table is live" tier_state.go   '			if o.BlocksKey != "" {' '			if false {'   '^TestABlockTableIsNotGarbage$'
 run_guard "a segment block table is live" tier_state.go   '		if s.blocksKey != "" {' '		if false {'   '^TestABlockTableTheLogIsReadingIsNotGarbage$'
 
+# Retention is per tier, and deletion is a PREFIX operation on the whole log. A
+# newer tier deleting while an older one still holds something does not shorten
+# the log, it punches a hole out of its middle. Two guards because the two ways
+# a run survives — its own budget, and this log not owning it — set the same
+# flag from different branches, so either can be removed without the other
+# noticing.
+run_guard "a surviving tier blocks the newer ones" delete_cleaner.go   $'\t\tif len(survivors) > 0 {\n\t\t\tblocked = true\n\t\t}' ''   '^TestANewerTierWaitsForTheOlderToDrain$'
+# The skip branch's flag alone: the append stays so the segments are still
+# handed back and what changes is only whether the runs above may delete.
+run_guard "a read-only tier blocks the newer ones" delete_cleaner.go   $'\t\t\tkept = append(kept, r.segments...)\n\t\t\tblocked = true' $'\t\t\tkept = append(kept, r.segments...)'   '^TestAReadOnlyTierHoldsTheTiersAboveIt$'
+# Neutralized by making the lookup answer for ANY name, the same way the
+# storeForTier guard is: a deletion would take the return value with it, and
+# answering for any name IS the silent-default fallback the refusal prevents.
+run_guard "a segment's tier must be configured" delete_cleaner.go   '		if t.Name == name {' '		if true {'   '^TestASegmentNamingAnUnconfiguredTierIsRefused$'
+# One floor allowance for the whole tiered half. Renewing it per run lets a
+# two-tier chain delete twice what the caller protected.
+run_guard "the floor is spent across tiers" delete_cleaner.go   '		maxDrop -= before - len(survivors)' ''   '^TestTheFloorIsSpentAcrossTiersNotPerTier$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

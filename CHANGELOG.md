@@ -7,6 +7,43 @@ library from that fork onward.
 
 ## Unreleased
 
+### Changed
+
+- **BREAKING: tier retention and tier ownership move onto `Tier`.**
+  `Options.MaxTierBytes`, `MaxTierMessages`, `MaxTierAge` and
+  `Options.TierReadOnly` are gone; they are now `Tier.MaxBytes`,
+  `Tier.MaxMessages`, `Tier.MaxAge` and `Tier.ReadOnly`. `SetTierReadOnly`
+  takes the tier's name and returns an error, and a name that is not in
+  `Options.Tiers` is refused rather than ignored — this is the one call whose
+  purpose is to STOP writing, so a caller that misnames the tier it is handing
+  over must not be told it succeeded.
+
+  Both were per-LOG settings for something that is per tier. A node can own the
+  store it writes and not the archive under it, and one flag for the whole
+  chain would have made it choose between offloading nothing and claiming a
+  store it does not own. Likewise a budget: descent is per tier, so a segment
+  over the hot tier's limit has left that tier rather than been deleted, and
+  the record is gone only when the last tier in the chain runs out of room.
+
+  A single-tier log moves each value one level down and is otherwise unchanged.
+
+- **Retention deletes a tier at a time, oldest first, and a newer tier waits
+  for the older to drain.** Each tier's budget applies to that tier's own
+  contiguous run of segments. A run that keeps anything — for its budget, or
+  because this log does not own its tier — stops every newer run from deleting,
+  because deleting around a surviving older segment does not shorten the log,
+  it punches a hole out of its middle. The retention floor stays ONE allowance
+  for the whole tiered half rather than one per tier.
+
+  A segment naming a tier that is not configured is an error, not a segment
+  cleaned under a default budget: an unlimited default keeps objects a caller
+  believes it bounded, and a zero default deletes a store because the caller
+  mistyped its name.
+
+- **The tier manifest and the log descriptor publish per tier.** A pass on a
+  chain with one owned tier and one it does not own republishes the half it
+  may, rather than skipping both.
+
 ### Added
 
 - **Each tier carries its own manifest, and open merges them.** A manifest now

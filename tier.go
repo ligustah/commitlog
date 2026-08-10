@@ -1,6 +1,10 @@
 package commitlog
 
-import "github.com/pkg/errors"
+import (
+	"time"
+
+	"github.com/pkg/errors"
+)
 
 // Tier names one store in a log's chain.
 //
@@ -22,6 +26,28 @@ type Tier struct {
 	// directory or object-store prefix per stream), since object keys are
 	// derived from the bare base offset.
 	Store SegmentStore
+
+	// Max* bound the segments whose bytes are in THIS tier, separately from
+	// local disk and from every other tier. Retention is per tier because
+	// descent is: a segment over one tier's budget has left that tier rather
+	// than been deleted, and the record is gone only when the last tier in the
+	// chain runs out of room for it.
+	//
+	// Zero keeps everything in this tier. A log with no tiers has no offloaded
+	// segments, so none of this ever applies to it.
+	MaxBytes    int64
+	MaxMessages int64
+	MaxAge      time.Duration
+
+	// ReadOnly opens this tier without the right to write to it: no offload
+	// into it, no rewrite of a segment it holds, no manifest, no descriptor,
+	// no delete.
+	//
+	// Per tier because ownership is. A node can own the tier it writes and not
+	// the archive below it, and one flag for the whole chain would make it
+	// choose between offloading nothing and claiming a store it does not own.
+	// Use SetTierReadOnly when ownership moves.
+	ReadOnly bool
 }
 
 // validateTiers refuses a chain this build cannot honour.
@@ -42,6 +68,14 @@ func validateTiers(tiers []Tier) error {
 		}
 		if t.Store == nil {
 			return errors.Errorf("commitlog: tier %q in Options.Tiers has no Store", t.Name)
+		}
+		// Negatives, for the reason every other option refuses them: zero is
+		// the unset value, so a negative is not a smaller budget, it is a
+		// caller who computed one and got it wrong.
+		if t.MaxBytes < 0 || t.MaxMessages < 0 || t.MaxAge < 0 {
+			return errors.Errorf(
+				"commitlog: tier %q has a negative retention limit; zero means "+
+					"no limit", t.Name)
 		}
 	}
 	return nil

@@ -19,8 +19,7 @@ func readOnlyFixture(t *testing.T, readOnly bool) (*commitLog, *FileSegmentStore
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
 		MaxSegmentBytes:  64,
-		Tiers:            oneTier(store),
-		TierReadOnly:     readOnly,
+		Tiers:            oneTierReadOnly(store, readOnly),
 		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)
@@ -101,8 +100,7 @@ func TestReadOnlyTierStillReadsThroughTheStore(t *testing.T) {
 	follower, cleanup := setupWithOptions(t, Options{
 		Path:             dir,
 		MaxSegmentBytes:  64,
-		Tiers:            oneTier(store),
-		TierReadOnly:     true,
+		Tiers:            oneTierReadOnly(store, true),
 		DisableAutoClean: true,
 	})
 	defer cleanup()
@@ -149,7 +147,7 @@ func TestSetTierReadOnlyTakesEffectBothWays(t *testing.T) {
 	require.Zero(t, n)
 
 	// Ownership arrives.
-	l.SetTierReadOnly(false)
+	require.NoError(t, l.SetTierReadOnly(defaultTierName, false))
 	n, err = l.OffloadBefore(last)
 	require.NoError(t, err)
 	require.Positive(t, n, "the tier must be writable once ownership arrives")
@@ -163,11 +161,29 @@ func TestSetTierReadOnlyTakesEffectBothWays(t *testing.T) {
 	}
 
 	// And leaves again.
-	l.SetTierReadOnly(true)
+	require.NoError(t, l.SetTierReadOnly(defaultTierName, true))
 	_, err = l.DeleteStoreObjects(objs)
 	require.Error(t, err, "withdrawing ownership must take effect at once")
 
 	after, err := store.List()
 	require.NoError(t, err)
 	require.ElementsMatch(t, keys, after)
+}
+
+// A handover to a tier that does not exist is refused.
+//
+// This is the one call in the API whose whole purpose is to STOP writing, so a
+// silent no-op is the worst possible answer: a caller that misnames the tier it
+// is handing over is told nothing and goes on believing it stopped writing to a
+// store it is still writing to. That is exactly the two-writer situation the
+// single-writer contract exists to prevent, arrived at by a typo.
+func TestSetTierReadOnlyRefusesAnUnknownTier(t *testing.T) {
+	l, _, _ := readOnlyFixture(t, false)
+
+	err := l.SetTierReadOnly("archive", true)
+	require.Error(t, err, "a handover to a tier this log has no store for must not be silent")
+	require.Contains(t, err.Error(), "archive")
+
+	// And the tier it does have is untouched by the refusal.
+	require.True(t, l.tierWritable(defaultTierName))
 }

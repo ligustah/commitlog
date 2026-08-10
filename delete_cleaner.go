@@ -74,20 +74,20 @@ type deleteCleanerOptions struct {
 		Bytes    int64
 		Messages int64
 		Age      time.Duration
-		// Tier* bound the segments whose bytes live in a SegmentStore,
-		// separately from the ones on local disk. Retention becomes PER TIER: a
-		// segment over the local budget is not deleted if it also exists in a
-		// store — it has simply left the tier the budget governs — and the
-		// record is gone only when the last tier's limit is reached.
-		//
-		// Zero means a tier keeps everything. A log with no store has no
-		// offloaded segments, so these never apply to it at all and only the
-		// limits above govern.
-		TierBytes    int64
-		TierMessages int64
-		TierAge      time.Duration
 	}
-	Name string
+	// Tiers carries each tier's own budget (Tier.MaxBytes, MaxMessages,
+	// MaxAge), which bounds the segments whose bytes live in THAT tier's store
+	// separately from the ones on local disk and from every other tier.
+	// Retention is per tier: a segment over the local budget is not deleted if
+	// it also exists in a store — it has simply left the tier the budget
+	// governs — and the record is gone only when the last tier's limit is
+	// reached.
+	//
+	// Zero limits mean a tier keeps everything. A log with no tier has no
+	// offloaded segments, so this never applies to it at all and only the local
+	// limits above govern.
+	Tiers []Tier
+	Name  string
 }
 
 // deleteCleaner implements the delete cleanup policy which deletes old log
@@ -104,9 +104,10 @@ func newDeleteCleaner(opts deleteCleanerOptions) *deleteCleaner {
 
 // Clean will enforce the log retention policy by deleting old segments.
 // Deletion only occurs at the segment granularity.
-// skipTiered leaves the tier untouched: no tier retention, because deleting a
-// tier's copy is a write to storage that may be shared with other replicas.
-func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool, floor Bound) ([]*segment, error) {
+// skipTiers names the tiers this log may not write to: their segments are left
+// untouched, with no tier retention, because deleting a tier's copy is a write
+// to storage that may be shared with other replicas.
+func (c *deleteCleaner) Clean(segments []*segment, skipTiers map[string]bool, floor Bound) ([]*segment, error) {
 	var err error
 	if len(segments) == 0 || (c.noRetentionLimits() && c.noTierLimits()) {
 		return segments, nil
@@ -121,13 +122,14 @@ func (c *deleteCleaner) Clean(segments []*segment, skipTiered bool, floor Bound)
 	// so counting it would delete records to reclaim space that was already
 	// reclaimed — the budget it belongs to is the tier's.
 	tiered, local := splitOffloadedPrefix(segments)
-	if len(tiered) > 0 && !skipTiered && !c.noTierLimits() {
-		// The tier's eligibility is computed against the FULL log, then capped
-		// at the half: the last tiered segment's records run up to the first
-		// local one's base, and a floor inside the local half leaves every
-		// tiered segment eligible. Measuring the half alone would either lose
-		// that boundary or protect an object nothing is using.
-		tiered, err = c.cleanTier(tiered, min(deletablePrefix(segments, floor), len(tiered)))
+	if len(tiered) > 0 && !c.noTierLimits() {
+		// Eligibility is computed against the FULL log, then capped at the
+		// half: the last tiered segment's records run up to the first local
+		// one's base, and a floor inside the local half leaves every tiered
+		// segment eligible. Measuring the half alone would either lose that
+		// boundary or protect an object nothing is using.
+		tiered, err = c.cleanTiers(tiered, skipTiers,
+			min(deletablePrefix(segments, floor), len(tiered)))
 		if err != nil {
 			return joinTiers(tiered, local), errors.Wrap(err, "failed to apply tier retention limit")
 		}
@@ -192,9 +194,116 @@ func (c *deleteCleaner) noRetentionLimits() bool {
 	return c.Retention.Bytes == 0 && c.Retention.Messages == 0 && c.Retention.Age == 0
 }
 
+// noTierLimits is true when NO tier bounds anything, which is the only case in
+// which the tiered half can be skipped wholesale. One tier with a budget is
+// enough to make the pass worth running, because the runs are cleaned
+// individually.
 func (c *deleteCleaner) noTierLimits() bool {
-	return c.Retention.TierBytes == 0 && c.Retention.TierMessages == 0 &&
-		c.Retention.TierAge == 0
+	for _, t := range c.Tiers {
+		if t.MaxBytes != 0 || t.MaxMessages != 0 || t.MaxAge != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// tierRun is a maximal group of adjacent segments living in one tier.
+type tierRun struct {
+	tier     string
+	segments []*segment
+}
+
+// tierRuns groups the offloaded segments into contiguous same-tier runs,
+// oldest first.
+//
+// Runs rather than a map keyed by tier because deletion is a PREFIX operation
+// on the log as a whole. A tier chain ages downwards — a segment moves from the
+// hot store to the cold one as it gets older — so the oldest segments are in
+// the last tier of the chain and the runs come out in age order. Collecting a
+// tier's segments from wherever they happen to be would let retention delete
+// segment 300 while segment 100 survives, which is a hole in the middle of the
+// log rather than a shorter log.
+func tierRuns(segments []*segment) []tierRun {
+	var runs []tierRun
+	for _, s := range segments {
+		s.RLock()
+		tier := s.tier
+		s.RUnlock()
+		if n := len(runs); n > 0 && runs[n-1].tier == tier {
+			runs[n-1].segments = append(runs[n-1].segments, s)
+			continue
+		}
+		runs = append(runs, tierRun{tier: tier, segments: []*segment{s}})
+	}
+	return runs
+}
+
+// cleanTiers applies each tier's own budget to that tier's own run, oldest run
+// first, and returns the surviving tiered segments in order.
+//
+// A newer run may delete only if every older run was deleted ENTIRELY. Each
+// tier's budget is a statement about that tier's storage, and honouring one in
+// isolation would remove records that older, still-present records precede —
+// the log would be missing a stretch out of its middle. So one run keeping
+// anything, for a budget or because its tier is read-only, stops every newer
+// run from deleting. The oldest run drains first, which is also the order in
+// which a chain wants to reclaim.
+//
+// maxDrop is the retention floor's allowance for the whole tiered half and is
+// spent across runs, not renewed per run.
+func (c *deleteCleaner) cleanTiers(segments []*segment, skipTiers map[string]bool,
+	maxDrop int) ([]*segment, error) {
+
+	runs := tierRuns(segments)
+	var kept []*segment
+	blocked := false
+	for i, r := range runs {
+		if blocked || skipTiers[r.tier] {
+			kept = append(kept, r.segments...)
+			blocked = true
+			continue
+		}
+		tier, err := c.tier(r.tier)
+		if err != nil {
+			return append(kept, flattenRuns(runs[i:])...), err
+		}
+		before := len(r.segments)
+		survivors, err := c.cleanTier(r.segments, tier, maxDrop)
+		kept = append(kept, survivors...)
+		maxDrop -= before - len(survivors)
+		if err != nil {
+			return append(kept, flattenRuns(runs[i+1:])...), err
+		}
+		if len(survivors) > 0 {
+			blocked = true
+		}
+	}
+	return kept, nil
+}
+
+// flattenRuns concatenates runs back into one ordered slice, for the error
+// paths that must hand every untouched segment back to the caller.
+func flattenRuns(runs []tierRun) []*segment {
+	var out []*segment
+	for _, r := range runs {
+		out = append(out, r.segments...)
+	}
+	return out
+}
+
+// tier finds the configured tier a segment claims to live in. Not finding it is
+// an error rather than a skip: the segment was opened from a manifest that
+// named the tier, so a name with no Tier behind it means the log's own state
+// disagrees with its configuration, and guessing a budget for it would delete
+// by accident.
+func (c *deleteCleaner) tier(name string) (Tier, error) {
+	for _, t := range c.Tiers {
+		if t.Name == name {
+			return t, nil
+		}
+	}
+	return Tier{}, errors.Errorf(
+		"commitlog: a segment names tier %q, which is not in Options.Tiers", name)
 }
 
 // splitOffloadedPrefix cuts segments into the offloaded prefix and the rest.
@@ -222,16 +331,16 @@ func joinTiers(tiered, local []*segment) []*segment {
 	return append(out, local...)
 }
 
-// cleanTier applies the tier limits to the offloaded segments. It is separate
-// from the local pass for one reason beyond the different budgets: there is no
-// active segment in a tier, so every one of them is eligible. The local pass
-// must always retain the last segment because it is the one being appended to;
-// a tier has no such thing, and forcing it to keep one would mean the oldest
-// object could never be reclaimed.
-func (c *deleteCleaner) cleanTier(segments []*segment, maxTierDrop int) ([]*segment, error) {
+// cleanTier applies ONE tier's limits to the segments in that tier. It is
+// separate from the local pass for one reason beyond the different budgets:
+// there is no active segment in a tier, so every one of them is eligible. The
+// local pass must always retain the last segment because it is the one being
+// appended to; a tier has no such thing, and forcing it to keep one would mean
+// the oldest object could never be reclaimed.
+func (c *deleteCleaner) cleanTier(segments []*segment, tier Tier, maxTierDrop int) ([]*segment, error) {
 	var err error
-	if c.Retention.TierAge > 0 {
-		ttl := computeTTL(c.Retention.TierAge)
+	if tier.MaxAge > 0 {
+		ttl := computeTTL(tier.MaxAge)
 		idx := len(segments)
 		for i, seg := range segments {
 			seg.RLock()
@@ -251,17 +360,17 @@ func (c *deleteCleaner) cleanTier(segments []*segment, maxTierDrop int) ([]*segm
 		// alone once its own prefix is gone.
 		maxTierDrop -= before - len(segments)
 	}
-	if c.Retention.TierMessages > 0 {
+	if tier.MaxMessages > 0 {
 		before := len(segments)
-		segments, err = c.applyTierLimit(segments, c.Retention.TierMessages,
+		segments, err = c.applyTierLimit(segments, tier.MaxMessages,
 			(*segment).MessageCount, maxTierDrop)
 		maxTierDrop -= before - len(segments)
 		if err != nil {
 			return segments, err
 		}
 	}
-	if c.Retention.TierBytes > 0 {
-		segments, err = c.applyTierLimit(segments, c.Retention.TierBytes,
+	if tier.MaxBytes > 0 {
+		segments, err = c.applyTierLimit(segments, tier.MaxBytes,
 			(*segment).Position, maxTierDrop)
 	}
 	return segments, err

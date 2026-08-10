@@ -43,7 +43,7 @@ func TestTheMessageLimitStopsAtTheRetentionFloor(t *testing.T) {
 	// Unbounded, this limit keeps five segments (offsets 15..19) — that is what
 	// the same fixture does with a nil floor, and it is what the floor has to
 	// override rather than coincide with.
-	actual, err := cleaner.Clean(segs, false, At(12))
+	actual, err := cleaner.Clean(segs, nil, At(12))
 	require.NoError(t, err)
 
 	require.Equal(t, int64(12), actual[0].BaseOffset,
@@ -62,7 +62,7 @@ func TestTheBytesLimitStopsAtTheRetentionFloor(t *testing.T) {
 	opts.Retention.Bytes = 2 * segs[0].Position()
 	cleaner := newDeleteCleaner(opts)
 
-	actual, err := cleaner.Clean(segs, false, At(7))
+	actual, err := cleaner.Clean(segs, nil, At(7))
 	require.NoError(t, err)
 
 	require.Equal(t, int64(7), actual[0].BaseOffset)
@@ -90,7 +90,7 @@ func TestTheAgeLimitStopsAtTheRetentionFloor(t *testing.T) {
 	}
 
 	// Unbounded, this expires the first ten (see TestDeleteCleanerAge).
-	actual, err := cleaner.Clean(segs, false, At(4))
+	actual, err := cleaner.Clean(segs, nil, At(4))
 	require.NoError(t, err)
 
 	require.Equal(t, int64(4), actual[0].BaseOffset)
@@ -111,7 +111,7 @@ func TestARetentionFloorOfZeroProtectsTheWholeLog(t *testing.T) {
 
 	segs := oneMessagePerSegment(t, 20)
 
-	actual, err := cleaner.Clean(segs, false, At(0))
+	actual, err := cleaner.Clean(segs, nil, At(0))
 	require.NoError(t, err)
 	require.Len(t, actual, 20, "a floor at offset 0 leaves nothing eligible")
 	require.Equal(t, segs, actual)
@@ -128,7 +128,7 @@ func TestNoRetentionFloorLeavesTheLimitsAlone(t *testing.T) {
 
 	segs := oneMessagePerSegment(t, 20)
 
-	actual, err := cleaner.Clean(segs, false, Bound{})
+	actual, err := cleaner.Clean(segs, nil, Bound{})
 	require.NoError(t, err)
 	require.Len(t, actual, 5)
 	require.Equal(t, int64(15), actual[0].BaseOffset)
@@ -144,7 +144,7 @@ func TestAFloorAboveTheLogStillKeepsTheActiveSegment(t *testing.T) {
 
 	segs := oneMessagePerSegment(t, 5)
 
-	actual, err := cleaner.Clean(segs, false, At(9999))
+	actual, err := cleaner.Clean(segs, nil, At(9999))
 	require.NoError(t, err)
 	require.Len(t, actual, 1)
 	require.Equal(t, int64(4), actual[0].BaseOffset)
@@ -179,9 +179,9 @@ func TestTierRetentionStopsAtTheRetentionFloor(t *testing.T) {
 	// two oldest objects (see TestTierRetentionDropsOffloadedSegments). The
 	// floor sits inside the second, so only the first may go.
 	c := tierCleaner(t, func(o *deleteCleanerOptions) {
-		o.Retention.TierBytes = segs[2].Position()
+		o.Tiers[0].MaxBytes = segs[2].Position()
 	})
-	out, err := c.Clean(segs, false, At(15))
+	out, err := c.Clean(segs, nil, At(15))
 	require.NoError(t, err)
 
 	require.True(t, deleted[int64(0)], "the oldest object is entirely below the floor")
@@ -215,8 +215,8 @@ func TestAFloorInTheLocalHalfLeavesTheTierEligible(t *testing.T) {
 	// TierBytes of 1 admits nothing, so both objects are over budget. The floor
 	// is at offset 25, in the last (local, active) segment — above every tiered
 	// record, so the tier is unconstrained by it.
-	c := tierCleaner(t, func(o *deleteCleanerOptions) { o.Retention.TierBytes = 1 })
-	_, err := c.Clean(segs, false, At(25))
+	c := tierCleaner(t, func(o *deleteCleanerOptions) { o.Tiers[0].MaxBytes = 1 })
+	_, err := c.Clean(segs, nil, At(25))
 	require.NoError(t, err)
 
 	require.True(t, deleted[int64(0)])

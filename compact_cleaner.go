@@ -308,7 +308,10 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		// is corruption of shared storage rather than wasted work. It still
 		// counts as skipped, so a governor of records left in the tier is not
 		// removed ahead of them.
-		if tiered && spec.skipTiered {
+		// Read bare, like isOffloaded just above it: both are set when the
+		// segment attaches to a store and not touched again, and the pass holds
+		// no segment lock here.
+		if tiered && spec.skipTiers[segments[i].tier] {
 			skipped = true
 			continue
 		}

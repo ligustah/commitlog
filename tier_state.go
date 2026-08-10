@@ -137,19 +137,57 @@ func (l *commitLog) tierState() ([]TierObject, error) {
 	return out, nil
 }
 
-// tierWritable reports whether this log may write to its tier.
-func (l *commitLog) tierWritable() bool {
-	l.tierMu.RLock()
-	defer l.tierMu.RUnlock()
-	return !l.tierReadOnly
+// readOnlyTiers seeds the ownership map from the configured chain. A name
+// absent from it is writable, so a log with no tiers gets an empty map rather
+// than a special case.
+func readOnlyTiers(tiers []Tier) map[string]bool {
+	m := make(map[string]bool, len(tiers))
+	for _, t := range tiers {
+		if t.ReadOnly {
+			m[t.Name] = true
+		}
+	}
+	return m
 }
 
-// SetTierReadOnly grants or withdraws this log's right to write to its
-// tier. See the interface doc.
-func (l *commitLog) SetTierReadOnly(readOnly bool) {
+// tierWritable reports whether this log may write to the named tier.
+func (l *commitLog) tierWritable(name string) bool {
+	l.tierMu.RLock()
+	defer l.tierMu.RUnlock()
+	return !l.tierReadOnly[name]
+}
+
+// readOnlyTierSet is the set of tiers this log may not write to, taken once so
+// a pass sees one consistent answer: a flag flipped halfway through would
+// otherwise let a pass skip a tier's retention and rewrite its segments in the
+// same run.
+func (l *commitLog) readOnlyTierSet() map[string]bool {
+	l.tierMu.RLock()
+	defer l.tierMu.RUnlock()
+	m := make(map[string]bool, len(l.tierReadOnly))
+	for name, ro := range l.tierReadOnly {
+		if ro {
+			m[name] = true
+		}
+	}
+	return m
+}
+
+// SetTierReadOnly grants or withdraws this log's right to write to ONE tier.
+// See the interface doc.
+//
+// An unknown name is an error rather than a no-op: a caller handing over
+// ownership of a tier it has misnamed would be told nothing, and would go on
+// believing it had stopped writing to a store it is still writing to. That is
+// the failure the single-writer contract exists to prevent.
+func (l *commitLog) SetTierReadOnly(tier string, readOnly bool) error {
+	if _, err := l.storeForTier(tier); err != nil {
+		return err
+	}
 	l.tierMu.Lock()
-	l.tierReadOnly = readOnly
+	l.tierReadOnly[tier] = readOnly
 	l.tierMu.Unlock()
+	return nil
 }
 
 // errTierReadOnly is returned by anything that would write to a store this log
@@ -211,7 +249,7 @@ func (l *commitLog) drainReclaim() {
 		return
 	}
 	l.tierMu.Lock()
-	if l.tierReadOnly || l.tierManifestStale || len(l.reclaim) == 0 {
+	if l.tierManifestStale || len(l.reclaim) == 0 {
 		l.tierMu.Unlock()
 		return
 	}
@@ -240,6 +278,12 @@ func (l *commitLog) drainReclaim() {
 			kept = append(kept, e)
 			continue
 		}
+		if !l.tierWritable(e.tier) {
+			// Not this process's to delete. Kept queued: ownership moves, and
+			// the pass that has it will find the entry still here.
+			kept = append(kept, e)
+			continue
+		}
 		store, err := l.storeForTier(e.tier)
 		if err != nil {
 			// The queue named a tier this log no longer has. Keeping the entry
@@ -264,11 +308,11 @@ func (l *commitLog) DeleteStoreObjects(objs []StoreObject) ([]StoreObject, error
 	if !l.hasTier() || len(objs) == 0 {
 		return nil, nil
 	}
-	if !l.tierWritable() {
-		return nil, errTierReadOnly
-	}
 	deleted := make([]StoreObject, 0, len(objs))
 	for _, o := range objs {
+		if !l.tierWritable(o.Tier) {
+			return deleted, errors.Wrapf(errTierReadOnly, "tier %s", o.Tier)
+		}
 		store, err := l.storeForTier(o.Tier)
 		if err != nil {
 			return deleted, err

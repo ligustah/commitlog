@@ -186,16 +186,23 @@ type CommitLog interface {
 	// work transparently; a restart reopens them from the store.
 	OffloadBefore(minOffset int64) (int, error)
 
-	// SetTierReadOnly grants or withdraws this log's right to write to its
-	// tier. While read-only it will not offload, will not rewrite a
-	// tiered segment, will not apply tier retention, and refuses
-	// DeleteStoreObjects. Reads are unaffected, and a tiered read stays
-	// transparent.
+	// SetTierReadOnly grants or withdraws this log's right to write to ONE
+	// named tier. While a tier is read-only it will not offload into it, will
+	// not rewrite a segment it holds, will not apply that tier's retention,
+	// will not publish its manifest or descriptor, and refuses
+	// DeleteStoreObjects naming it. Reads are unaffected, and a tiered read
+	// stays transparent. A name that is not in Options.Tiers is an error, so a
+	// caller that misnames the tier it is handing over finds out.
+	//
+	// Per tier, because ownership is: a node can own the tier it writes and not
+	// the archive under it. One flag for the whole chain would make it choose
+	// between offloading nothing and claiming a store it does not own.
 	//
 	// This is how ownership of a shared store is expressed. commitlog assumes
-	// it is the ONLY writer to its store — see the contract on this interface —
-	// so a process that does not own the tier runs read-only, and a handover is
-	// the previous owner going read-only before the next one comes out of it.
+	// it is the ONLY writer to each of its stores — see the contract on this
+	// interface — so a process that does not own a tier runs read-only on it,
+	// and a handover is the previous owner going read-only before the next one
+	// comes out of it.
 	//
 	// Going read-only takes effect for operations that START after it returns.
 	// It does not cancel a write already in flight, because nothing can: once a
@@ -203,7 +210,7 @@ type CommitLog interface {
 	// still believes it owns anything. Sizing the handover so those writes have
 	// drained is the caller's job, and getting it wrong is the failure the
 	// contract describes.
-	SetTierReadOnly(readOnly bool)
+	SetTierReadOnly(tier string, readOnly bool) error
 
 	// DeleteStoreObjects removes objects from the tiers naming them, returning
 	// those it removed. It is refused outright while the tier is read-only.

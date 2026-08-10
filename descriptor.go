@@ -368,24 +368,26 @@ func loadDescriptor(opts Options) (descriptor, error) {
 
 // publishDescriptor writes it back to the same place.
 //
-// A log that does not own its tier does not write to it — that is what
-// TierReadOnly means, and a descriptor is not an exception to it. Such a process
-// is a follower: it has already been checked against whatever the owner
-// published, and if the owner published nothing there is nothing for it to
-// disagree with. Silently declining to write is right here in a way it would not
-// be for segment data, because the descriptor is a claim about the log rather
-// than part of it.
+// A log that does not own a tier does not write to it — that is what
+// Tier.ReadOnly means, and a descriptor is not an exception to it. Such a
+// process is a follower on that tier: it has already been checked against
+// whatever the owner published, and if the owner published nothing there is
+// nothing for it to disagree with. Silently declining to write is right here in
+// a way it would not be for segment data, because the descriptor is a claim
+// about the log rather than part of it.
 func publishDescriptor(opts Options, d descriptor) error {
 	if len(opts.Tiers) == 0 {
 		return writeDescriptor(opts.Path, d)
 	}
-	if opts.TierReadOnly {
-		return nil
-	}
-	// Every tier, because every tier must be able to say which log it belongs
-	// to. A store that cannot is not self-describing, and a node adopting it
-	// alone would have nothing to be checked against.
+	// Every tier it owns, because every tier must be able to say which log it
+	// belongs to. A store that cannot is not self-describing, and a node
+	// adopting it alone would have nothing to be checked against. Skipping the
+	// read-only ones individually rather than the whole chain: a node that owns
+	// its hot tier and not the archive must still describe the tier it owns.
 	for _, t := range opts.Tiers {
+		if t.ReadOnly {
+			continue
+		}
 		if err := writeStoreDescriptor(t.Store, d); err != nil {
 			return err
 		}

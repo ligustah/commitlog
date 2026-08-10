@@ -266,7 +266,7 @@ func TestReadOnlyTierDefersReclamationRatherThanDroppingIt(t *testing.T) {
 	queued := queuedKeys(l)
 	require.NotEmpty(t, queued, "the fixture must have superseded something")
 
-	l.SetTierReadOnly(true)
+	require.NoError(t, l.SetTierReadOnly(defaultTierName, true))
 	store.deletes = 0
 	cleanAll(t, l)
 
@@ -278,7 +278,7 @@ func TestReadOnlyTierDefersReclamationRatherThanDroppingIt(t *testing.T) {
 	require.Subset(t, keys, queued, "nothing may have been reclaimed")
 
 	// Coming back out of read-only, reclamation resumes where it left off.
-	l.SetTierReadOnly(false)
+	require.NoError(t, l.SetTierReadOnly(defaultTierName, false))
 	cleanAll(t, l)
 
 	keys, err = store.List()

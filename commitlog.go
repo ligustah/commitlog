@@ -145,11 +145,12 @@ type commitLog struct {
 	// already covered return without an fsync of their own, which is the whole
 	// point: N commits cost one fsync rather than N. Guarded by syncMu, which is
 	// held only around the bookkeeping, never across the fsync itself.
-	// tierReadOnly withholds this log's right to write to its tier.
+	// tierReadOnly withholds this log's right to write to a tier, by name.
 	// Guarded by its own mutex because a pass reads it while the owner may be
-	// flipping it.
+	// flipping it. Seeded from Tier.ReadOnly and moved by SetTierReadOnly; a
+	// name absent from the map is writable.
 	tierMu       sync.RWMutex
-	tierReadOnly bool
+	tierReadOnly map[string]bool
 	// reclaim holds store objects a rewrite superseded, waiting for the readers
 	// still on them to finish. Drained at the start of a clean pass.
 	reclaim []pendingReclaim
@@ -199,27 +200,16 @@ type Options struct {
 	MaxLogBytes     int64         // Retention by bytes
 	MaxLogMessages  int64         // Retention by messages
 	MaxLogAge       time.Duration // Retention by age
-	// MaxTier* bound the segments whose bytes have been offloaded to the
-	// tier, separately from the ones still on local disk. Retention is
-	// PER TIER: a segment over the local budget that also exists in a store has
-	// left the tier those limits govern rather than being deleted, and the
-	// record is gone only when the last tier's limit is reached.
-	//
-	// The limits above therefore bound LOCAL disk alone and no longer count
-	// offloaded segments — counting them would delete records to reclaim space
-	// that offloading already reclaimed.
-	//
-	// Zero keeps everything in the tier, which is what makes this compatible: a
-	// log with no tier has no offloaded segments, so these never apply.
-	MaxTierBytes    int64
-	MaxTierMessages int64
-	MaxTierAge      time.Duration
+	// MaxLog* above bound LOCAL disk alone and do not count offloaded
+	// segments — counting them would delete records to reclaim space that
+	// offloading already reclaimed. Each tier carries its own budget; see
+	// Tier.MaxBytes.
 	// LocalRetentionAge is how long a record's bytes stay on local disk before
 	// the log offloads them to the tier. Zero never offloads.
 	//
 	// This is the SCHEDULE for offloading, not a retention limit: nothing is
-	// deleted, the segment keeps serving, and MaxTier* above decide when the
-	// records finally go. Only whole sealed segments move, so a segment lives
+	// deleted, the segment keeps serving, and each tier's own Max* decide when
+	// the records finally go. Only whole sealed segments move, so a segment lives
 	// locally until its NEWEST record is past the horizon.
 	//
 	// It lives here because every input to the decision already did — the
@@ -327,13 +317,6 @@ type Options struct {
 	// CPU- and write-bound, not scattered reads that spend their time waiting.
 	PrefixReadConcurrency     int
 	PrefixReadTierConcurrency int
-	// TierReadOnly opens the log without the right to write to its
-	// tier: no offload, no rewrite of a tiered segment, no tier
-	// retention, no object deletes. Reads are unaffected.
-	//
-	// This is what a process runs when it does not own the tier. Flip it with
-	// SetTierReadOnly when ownership moves.
-	TierReadOnly bool
 	// AdoptOptions records THESE options as the log's descriptor instead of
 	// checking against the one the log already has. It means one thing — "I know
 	// what this log is, record it" — and that one thing answers both cases New
@@ -503,9 +486,7 @@ func New(opts Options) (CommitLog, error) {
 	cleanerOpts.Retention.Bytes = opts.MaxLogBytes
 	cleanerOpts.Retention.Messages = opts.MaxLogMessages
 	cleanerOpts.Retention.Age = opts.MaxLogAge
-	cleanerOpts.Retention.TierBytes = opts.MaxTierBytes
-	cleanerOpts.Retention.TierMessages = opts.MaxTierMessages
-	cleanerOpts.Retention.TierAge = opts.MaxTierAge
+	cleanerOpts.Tiers = opts.Tiers
 	cleaner := newDeleteCleaner(cleanerOpts)
 
 	compactCleanerOpts := compactCleanerOptions{
@@ -535,7 +516,7 @@ func New(opts Options) (CommitLog, error) {
 		// -1, not 0: offset 0 is a real record, so a zero value would report the
 		// log's very first append as already durable and skip its flush.
 		syncDurable:  -1,
-		tierReadOnly: opts.TierReadOnly,
+		tierReadOnly: readOnlyTiers(opts.Tiers),
 	}
 	// Set here rather than passed to newCompactCleaner because it closes over the
 	// log the cleaner belongs to, which does not exist until this line.
@@ -1649,7 +1630,7 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 	if !ok || minOffset <= 0 {
 		return 0, nil
 	}
-	if !l.tierWritable() {
+	if !l.tierWritable(tier.Name) {
 		// Nothing offloaded, and not an error. A process that does not own the
 		// tier is expected to call this on the same schedule as one that does
 		// and simply do nothing; failing would make every caller special-case

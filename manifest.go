@@ -92,8 +92,7 @@ type tierManifest struct {
 // Caller must not hold l.mu, and must not hold the segment lock of any segment a
 // pending entry describes: tierState reads every segment under its read lock.
 func (l *commitLog) writeTierManifest(pending ...TierObject) error {
-	store := l.primaryStore()
-	if store == nil || !l.tierWritable() {
+	if !l.hasTier() {
 		return nil
 	}
 	objs, err := l.tierState()
@@ -134,6 +133,12 @@ func (l *commitLog) writeTierManifest(pending ...TierObject) error {
 		byTier[o.Tier] = append(byTier[o.Tier], o)
 	}
 	for _, t := range l.Tiers {
+		// A tier this log does not own is not written to, manifest included: the
+		// manifest is a claim about the store, and a process that does not own
+		// the store has no business republishing what it holds.
+		if !l.tierWritable(t.Name) {
+			continue
+		}
 		body, err := json.Marshal(tierManifest{Version: manifestVersion, Segments: byTier[t.Name]})
 		if err != nil {
 			return errors.Wrapf(err, "encode tier manifest for tier %s", t.Name)

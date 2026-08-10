@@ -194,10 +194,22 @@ master one at a time and the restriction lifts LAST, in the same release.
   only that tier's objects; open reads every tier and merges. The merge refuses
   a base offset claimed by two tiers. Testable ahead of a second tier because
   `mergeTierManifests` is a pure function over what each tier reported.
-- **3b — retention and ownership move onto `Tier`.** `MaxTierBytes`,
-  `MaxTierMessages`, `MaxTierAge` and `TierReadOnly` become `Tier` fields;
-  `SetTierReadOnly` takes a tier name. Breaking. Deliberately NOT done in step
-  2, so those fields break once rather than twice.
+- **3b — retention and ownership move onto `Tier`. Done, unreleased.**
+  `MaxTierBytes`, `MaxTierMessages`, `MaxTierAge` and `TierReadOnly` became
+  `Tier.MaxBytes`, `MaxMessages`, `MaxAge` and `ReadOnly`; `SetTierReadOnly`
+  takes a tier name and refuses one it has no store for. Breaking. Deliberately
+  NOT done in step 2, so those fields break once rather than twice.
+
+  It settled one thing the plan had not: what retention does to a CHAIN.
+  Deletion is a prefix operation on the whole log, so the tiered segments are
+  grouped into contiguous same-tier runs, walked oldest first, and a run that
+  keeps anything stops every newer run from deleting — for its own budget or
+  because this log does not own its tier. Honouring a newer tier's budget in
+  isolation would punch a hole out of the middle of the log rather than shorten
+  it. The retention floor stays one allowance for the whole tiered half.
+
+  The cleaner takes its tiers as data, so all of this is exercised against a
+  two-tier chain today, ahead of the configuration that 3d will allow.
 - **3c — placement.** `CleanSpec.TierPlacement map[int64]string` and
   `TierBudgets map[string]time.Duration` replacing `TierRewriteBudget`; the
   mover that copies a segment's objects into the destination tier, publishes

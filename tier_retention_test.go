@@ -10,16 +10,28 @@ import (
 // fakeOffloaded marks a segment as living in a store, without the machinery of
 // a real offload. The delete cleaner only asks whether a segment is offloaded,
 // so this is enough to drive the tier split.
-func fakeOffloaded(s *segment) *segment {
+func fakeOffloaded(s *segment) *segment { return fakeOffloadedTo(s, defaultTierName) }
+
+// fakeOffloadedTo makes a segment look like it lives in the named tier. The
+// name matters as much as the store now: retention resolves it back to a Tier
+// to find the budget, so a segment stamped with a tier nobody configured is an
+// error rather than an unlimited one.
+func fakeOffloadedTo(s *segment, tier string) *segment {
 	s.Lock()
 	s.store = &FileSegmentStore{}
+	s.tier = tier
 	s.Unlock()
 	return s
 }
 
+// tierCleaner builds a cleaner over one tier, the one fakeOffloaded stamps.
+// The budget a test wants goes on o.Tiers[0].
 func tierCleaner(t *testing.T, set func(o *deleteCleanerOptions)) *deleteCleaner {
 	t.Helper()
-	opts := deleteCleanerOptions{Name: "tier"}
+	opts := deleteCleanerOptions{
+		Name:  "tier",
+		Tiers: []Tier{{Name: defaultTierName, Store: &FileSegmentStore{}}},
+	}
 	set(&opts)
 	return newDeleteCleaner(opts)
 }
@@ -50,7 +62,7 @@ func TestLocalRetentionIgnoresOffloadedSegments(t *testing.T) {
 	// A byte budget far below the total. With no tier limit set, the offloaded
 	// prefix must survive it untouched.
 	c := tierCleaner(t, func(o *deleteCleanerOptions) { o.Retention.Bytes = 1 })
-	out, err := c.Clean(segs, false, Bound{})
+	out, err := c.Clean(segs, nil, Bound{})
 	require.NoError(t, err)
 
 	require.False(t, deleted[segs[0].BaseOffset], "an offloaded segment is not on local disk")
@@ -84,9 +96,9 @@ func TestTierRetentionDropsOffloadedSegments(t *testing.T) {
 
 	// Room for roughly one tiered segment's bytes.
 	c := tierCleaner(t, func(o *deleteCleanerOptions) {
-		o.Retention.TierBytes = segs[2].Position()
+		o.Tiers[0].MaxBytes = segs[2].Position()
 	})
-	out, err := c.Clean(segs, false, Bound{})
+	out, err := c.Clean(segs, nil, Bound{})
 	require.NoError(t, err)
 
 	require.True(t, deleted[segs[0].BaseOffset], "the oldest tiered segment must go first")
@@ -118,8 +130,8 @@ func TestTierRetentionByAgeCanEmptyTheTier(t *testing.T) {
 	deleteSegment = func(s *segment) error { deleted[s.BaseOffset] = true; return nil }
 	defer func() { deleteSegment = restore }()
 
-	c := tierCleaner(t, func(o *deleteCleanerOptions) { o.Retention.TierAge = time.Nanosecond })
-	out, err := c.Clean(segs, false, Bound{})
+	c := tierCleaner(t, func(o *deleteCleanerOptions) { o.Tiers[0].MaxAge = time.Nanosecond })
+	out, err := c.Clean(segs, nil, Bound{})
 	require.NoError(t, err)
 
 	require.True(t, deleted[segs[0].BaseOffset])
@@ -150,7 +162,7 @@ func TestRetentionUnchangedWithoutATier(t *testing.T) {
 	c := tierCleaner(t, func(o *deleteCleanerOptions) {
 		o.Retention.Bytes = segs[3].Position()
 	})
-	out, err := c.Clean(segs, false, Bound{})
+	out, err := c.Clean(segs, nil, Bound{})
 	require.NoError(t, err)
 
 	require.True(t, deleted[segs[0].BaseOffset])

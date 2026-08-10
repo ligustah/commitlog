@@ -166,14 +166,14 @@ func TestAReadOnlyTierIsCheckedButPublishesNothing(t *testing.T) {
 	require.NoError(t, err)
 
 	opts := adoptingOpts(t, store)
-	opts.TierReadOnly = true
+	opts.Tiers[0].ReadOnly = true
 	opts.CompactMinAge = time.Minute
 	_, err = New(opts)
 	require.ErrorIs(t, err, ErrDescriptorMismatch,
 		"read-only is about writes, not about being exempt from the check")
 
 	opts = adoptingOpts(t, store)
-	opts.TierReadOnly = true
+	opts.Tiers[0].ReadOnly = true
 	l, err := New(opts)
 	require.NoError(t, err)
 	require.NoError(t, l.Close())
@@ -248,7 +248,7 @@ func TestAReadOnlyTierOpensAStoreWithNoDescriptor(t *testing.T) {
 	require.NoError(t, err)
 
 	opts := adoptingOpts(t, store)
-	opts.TierReadOnly = true
+	opts.Tiers[0].ReadOnly = true
 	l, err := New(opts)
 	require.NoError(t, err)
 	require.NoError(t, l.Close())

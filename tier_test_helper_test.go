@@ -26,3 +26,12 @@ func orphanKeys(objs []StoreObject) []string {
 	}
 	return out
 }
+
+// oneTierReadOnly is oneTier with this log's ownership of it set. Ownership is
+// per tier now, so a test that wants a follower says so on the tier rather
+// than on the log.
+func oneTierReadOnly(store SegmentStore, readOnly bool) []Tier {
+	tiers := oneTier(store)
+	tiers[0].ReadOnly = readOnly
+	return tiers
+}

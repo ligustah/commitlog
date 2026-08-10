@@ -65,13 +65,14 @@ why a rewrite may not break a reader and a removal may.
 shared-store case, where garbage this log did not create can still appear. They
 are no longer part of the normal path.
 
-## 3. `CleanSpec.SkipTiered` — merged into `TierReadOnly`
+## 3. `CleanSpec.SkipTiered` — merged into tier ownership
 
 The same idea at two scopes: one said "not this pass", the other "not this
 process". Offering both invited a caller to set them to disagree. Whether a log
-may write to its store is a property of the LOG, so `TierReadOnly` — the one
-that expresses ownership — is what remains, and `CleanWithSpec` derives the
-per-pass behaviour from the log's current mode.
+may write to a store is a property of the LOG, so the ownership flag — since
+moved onto each tier as `Tier.ReadOnly`, with `SetTierReadOnly` to change it —
+is what remains, and `CleanWithSpec` derives the per-pass behaviour from the
+log's current modes.
 
 ## Sequencing with consumers
 
