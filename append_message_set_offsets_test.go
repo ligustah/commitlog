@@ -96,8 +96,16 @@ func TestASegmentsTailNeverMovesBackwards(t *testing.T) {
 
 	// Straight at the segment, bypassing the check above — which is the point:
 	// this is the guard for a caller that does not go through AppendMessageSet.
-	regressing, entries, err := newMessageSetFromProto(0, seg.Position(), msgs, false)
+	//
+	// SHORTER than the seed, so the set ENDS below the tail. Replaying the same
+	// offsets is not a regression: the last entry lands exactly where the tail
+	// already is, an assignment writes the value it already held, and the test
+	// passes against the bug. guardcheck caught this fixture doing that.
+	require.Greater(t, len(msgs), 2, "the fixture needs room to end below the tail")
+	regressing, entries, err := newMessageSetFromProto(0, seg.Position(), msgs[:2], false)
 	require.NoError(t, err)
+	require.Less(t, entries[len(entries)-1].Offset, before-1,
+		"the set must end below the tail or it has no opinion about the direction")
 	require.NoError(t, seg.WriteMessageSet(regressing, entries))
 
 	require.EqualValues(t, before, seg.NextOffset(),
