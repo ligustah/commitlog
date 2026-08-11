@@ -322,20 +322,14 @@ type CommitLog interface {
 	// Committed data does not become uncommitted just because a caller passed a
 	// smaller number, and a late or reordered call must not walk the watermark
 	// backwards under readers that have already been told what is committed.
+	//
+	// There is no override. Lowering the watermark means telling readers that
+	// records they were already entitled to see are no longer committed, and the
+	// one caller that legitimately does that is Truncate, which lowers it itself
+	// as part of removing the records. An escape hatch for "some other reason"
+	// existed here and had no such reason behind it: its only production caller
+	// was a durable_streams pairing deleted when Truncate took the job over.
 	SetHighWatermark(hw int64)
-
-	// OverrideHighWatermark sets the high watermark on the log using the given
-	// value, even if the value is less than the current HW.
-	//
-	// This is the deliberate exception to SetHighWatermark's monotonicity. It is
-	// not needed after Truncate, which lowers the watermark itself; it is here
-	// for a caller that has some other reason to know the committed boundary has
-	// moved backwards.
-	//
-	// Lowering the watermark is not free — it tells readers that records they
-	// were already entitled to see are no longer committed — so everything else
-	// should use SetHighWatermark.
-	OverrideHighWatermark(hw int64)
 
 	// HighWatermark returns the high watermark for the log.
 	HighWatermark() int64

@@ -221,15 +221,38 @@ func TestAHighWatermarkAboveTheLogIsNotInherited(t *testing.T) {
 			"as committed by the act of being written")
 }
 
-func TestOverrideHighWatermark(t *testing.T) {
+// The high watermark never goes backwards through SetHighWatermark.
+//
+// This replaces TestOverrideHighWatermark, and the swap is the point. The log
+// used to offer OverrideHighWatermark as a deliberate exception to this rule,
+// so the pair was "monotonic, except when you ask otherwise" — and the only
+// test of either asserted the EXCEPTION while the rule itself went unasserted
+// from the day it was written. Nothing anywhere had a reason to ask: the sole
+// production caller was a durable_streams pairing removed when Truncate started
+// bringing the watermark down with the records it deletes, which is where
+// lowering belongs, because there the records really are gone.
+//
+// With the exception deleted, monotonicity is the whole contract, so it is what
+// gets a test. A late or reordered call must not walk the watermark backwards
+// under readers that have already been told those records are committed —
+// un-committing data is not something a stale number gets to do.
+func TestTheHighWatermarkNeverGoesBackwards(t *testing.T) {
 	l, cleanup := setup(t)
 	defer l.Close()
 	defer cleanup()
 
 	l.SetHighWatermark(100)
 	require.Equal(t, int64(100), l.HighWatermark())
-	l.OverrideHighWatermark(90)
-	require.Equal(t, int64(90), l.HighWatermark())
+
+	l.SetHighWatermark(90)
+	require.Equal(t, int64(100), l.HighWatermark(),
+		"a lower high watermark was applied: records already published as "+
+			"committed became uncommitted because one call arrived late")
+
+	// Forward still moves, or "monotonic" could be implemented by ignoring
+	// everything.
+	l.SetHighWatermark(110)
+	require.Equal(t, int64(110), l.HighWatermark())
 }
 
 func BenchmarkCommitLog(b *testing.B) {

@@ -1076,6 +1076,12 @@ run_guard "the descriptor is read before anything is copied" copy_tier.go   '	de
 		return errors.Wrap(err, "read source log descriptor")
 	}'   '^TestCopyTierRefusesASourceWithNoDescriptor$'
 
+# The high watermark only ever moves forward. Neutralized by applying every
+# value, which is what OverrideHighWatermark used to do on purpose — so this
+# guard also pins the deletion: bring the exception back and the rule's test is
+# what notices.
+run_guard "the high watermark only moves forward" commitlog.go   '	if hw > l.hw {' '	if true {'   '^TestTheHighWatermarkNeverGoesBackwards$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

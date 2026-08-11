@@ -1372,17 +1372,6 @@ func (l *commitLog) SetHighWatermark(hw int64) {
 	// TODO: should we flush the HW to disk here?
 }
 
-// OverrideHighWatermark sets the high watermark on the log using the given
-// value, even if the value is less than the current HW — the deliberate
-// exception to SetHighWatermark's monotonicity. See the interface doc; it is
-// not needed after Truncate, which lowers the watermark itself.
-func (l *commitLog) OverrideHighWatermark(hw int64) {
-	l.mu.Lock()
-	l.hw = hw
-	l.notifyHWChange()
-	l.mu.Unlock()
-}
-
 // notifyHWChange signals all HW waiters to wake up because the HW has changed.
 // This must be called within the log mutex.
 func (l *commitLog) notifyHWChange() {
