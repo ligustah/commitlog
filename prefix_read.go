@@ -99,14 +99,13 @@ func concurrencyBudget(v, def int) int {
 // however many records it wanted — the wrong ceiling when the point is
 // throughput.
 type prefixRun struct {
-	segIdx int
-	start  int64 // byte position to begin reading at
-	offs   []int64
+	start int64 // byte position to begin reading at
+	offs  []int64
 }
 
 // planRuns groups one segment's wanted offsets (ascending) into runs, splitting
 // wherever the byte gap to the next record exceeds coalesce.
-func planRuns(seg *segment, segIdx int, offs []int64, coalesce int64) ([]prefixRun, error) {
+func planRuns(seg *segment, offs []int64, coalesce int64) ([]prefixRun, error) {
 	var (
 		runs   []prefixRun
 		cur    prefixRun
@@ -121,7 +120,7 @@ func planRuns(seg *segment, segIdx int, offs []int64, coalesce int64) ([]prefixR
 			if len(cur.offs) > 0 {
 				runs = append(runs, cur)
 			}
-			cur = prefixRun{segIdx: segIdx, start: e.Position}
+			cur = prefixRun{start: e.Position}
 		}
 		cur.offs = append(cur.offs, off)
 		cursor = e.Position + int64(e.Size)

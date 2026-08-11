@@ -215,7 +215,7 @@ func (p *prefixSource) fetch(seg *segment, hits []int64) ([]prefixQueued, error)
 			p.log.Options.PrefixReadTierConcurrency, defaultPrefixReadTierConcurrency)
 	}
 
-	runs, err := planRuns(seg, 0, hits, coalesce)
+	runs, err := planRuns(seg, hits, coalesce)
 	if err != nil {
 		return nil, err
 	}

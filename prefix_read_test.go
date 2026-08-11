@@ -739,7 +739,7 @@ func TestPlanRunsFanOutIsNotCappedBySegmentCount(t *testing.T) {
 			if len(hits) == 0 {
 				continue
 			}
-			runs, err := planRuns(seg, 0, hits, coalesce)
+			runs, err := planRuns(seg, hits, coalesce)
 			require.NoError(t, err)
 			n += len(runs)
 		}
