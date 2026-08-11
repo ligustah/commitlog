@@ -142,6 +142,14 @@ jobs:
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
           "$(go env GOPATH)/bin/staticcheck" -checks 'U1000,S1*,SA*' ./...
+      # Not the comment-style opinion declined just above. ST1020 asks whether a
+      # doc comment is well-formed; this asks whether it is attached to the right
+      # function, which is a correctness question in a package where the comments
+      # carry the contracts. A rename or a move leaves the doc behind and nothing
+      # else in this job notices. The first sweep found six, one of them a whole
+      # doc block stranded on an unrelated function.
+      - name: docdrift
+        run: bash hack/docdrift.sh
       # Static check of the workflows themselves: bad expressions, unknown
       # action inputs, and — via shellcheck, preinstalled on the runner — the
       # `run:` blocks. Pinned and fetched through the module proxy rather than
