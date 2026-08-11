@@ -53,6 +53,13 @@ var (
 	// log that has been closed.
 	ErrCommitLogClosed = errors.New("commit log was closed")
 
+	// ErrMessageSetRefused is returned by AppendMessageSet when the caller's
+	// framing does not fit the log's tail. It is a sentinel because the caller
+	// has to be able to tell it apart from an IO failure: an IO failure is
+	// retried, but a refused set will be refused identically forever, and the
+	// answer to it is to re-derive where the follower should be reading from.
+	ErrMessageSetRefused = errors.New("message set refused")
+
 	// timestamp returns the current time in Unix nanoseconds. This function
 	// exists for mocking purposes.
 	timestamp = func() int64 { return time.Now().UnixNano() }
@@ -1320,6 +1327,13 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 	if s.closed {
 		return 0, ErrSegmentClosed
 	}
+	// Before a byte is written, because everything below assumes there is a
+	// last entry: the bookkeeping indexes entries[len(entries)-1] and the block
+	// path takes entries[:1], both AFTER the payload has gone to the backing.
+	// An empty set therefore panicked a segment it had already appended to.
+	if len(entries) == 0 {
+		return 0, errors.Wrap(ErrMessageSetRefused, "write with no entries")
+	}
 	s.dirtyData = true
 	s.dirtyIndex = true
 	if s.blockMode {
@@ -1344,9 +1358,16 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 		s.firstOffset = first.Offset
 		s.firstWriteTime = first.Timestamp
 	}
+	// A max, not an assignment. checkAppendedSet refuses a set that starts at
+	// or below the tail, so on the append path this cannot move backwards — but
+	// this is the field NextOffset is derived from, and a segment that lowers
+	// it starts handing out offsets that already name records on disk. The
+	// refusal is one caller's; the invariant belongs here.
 	last := entries[len(entries)-1]
-	s.lastOffset = last.Offset
-	s.lastWriteTime = last.Timestamp
+	if last.Offset > s.lastOffset {
+		s.lastOffset = last.Offset
+		s.lastWriteTime = last.Timestamp
+	}
 	s.notifyWaiters()
 	return n, nil
 }

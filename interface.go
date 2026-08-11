@@ -360,6 +360,18 @@ type CommitLog interface {
 	// returns the corresponding offsets in the log. This can be called even if
 	// the log is in readonly mode to allow for reconciliation, e.g. when
 	// replicating from another log.
+	//
+	// Unlike Append, the offsets come from the CALLER's framing rather than
+	// from the log, so they are checked against the tail: the set must hold at
+	// least one whole frame, its first offset must be strictly above the log's
+	// newest, and its offsets must strictly ascend. Anything else returns
+	// ErrMessageSetRefused and writes nothing.
+	//
+	// Strictly above, not exactly next. A compacted source has holes, and
+	// ReadMessageSet serves the survivors, so a follower resuming from one
+	// legitimately appends across a gap. What cannot be tolerated is a set that
+	// starts at or below the tail: those offsets already name records, and
+	// writing them again is how a replica ends up holding one record twice.
 	AppendMessageSet(ms []byte) ([]int64, error)
 
 	// ReadMessageSet returns the log's own framing VERBATIM, starting at

@@ -899,7 +899,46 @@ func (l *commitLog) AppendMessageSet(ms []byte) ([]int64, error) {
 		basePosition = segment.Position()
 		entries      = entriesForMessageSet(basePosition, ms)
 	)
+	if err := checkAppendedSet(segment.NextOffset()-1, entries); err != nil {
+		return nil, err
+	}
 	return l.append(segment, ms, entries)
+}
+
+// checkAppendedSet is the offset check Append does not need. Append derives
+// every offset from the segment's own tail, so it cannot produce a bad one;
+// AppendMessageSet takes the caller's framing verbatim, and until this existed
+// nothing on that path compared those offsets to anything at all.
+//
+// tail is the log's newest offset, or -1 for a log with nothing in it.
+func checkAppendedSet(tail int64, entries []*entry) error {
+	if len(entries) == 0 {
+		// entriesForMessageSet yields nothing for any input shorter than one
+		// header, so this is also what stops a short or garbled frame reaching
+		// segment.write — which indexes entries[len(entries)-1] AFTER writing
+		// the bytes, so an empty set used to panic a log it had already
+		// appended to.
+		return errors.Wrap(ErrMessageSetRefused, "no whole frame in the set")
+	}
+	if first := entries[0].Offset; first <= tail {
+		// Strictly above, not exactly tail+1: a compacted source has holes and
+		// ReadMessageSet serves the survivors, so a follower resuming from one
+		// appends across a gap legitimately. At or below the tail is the case
+		// that cannot be legitimate — those offsets already name records.
+		return errors.Wrapf(ErrMessageSetRefused,
+			"set starts at offset %d, at or below the log's newest (%d)", first, tail)
+	}
+	for i := 1; i < len(entries); i++ {
+		if entries[i].Offset <= entries[i-1].Offset {
+			// The index is binary-searched, so a set that does not ascend
+			// produces a segment where a seek and a scan disagree about which
+			// record an offset names.
+			return errors.Wrapf(ErrMessageSetRefused,
+				"offset %d does not ascend from %d at frame %d",
+				entries[i].Offset, entries[i-1].Offset, i)
+		}
+	}
+	return nil
 }
 
 func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int64, error) {
