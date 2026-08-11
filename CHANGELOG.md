@@ -88,6 +88,34 @@ machine set the option, and pre-v1 there is nothing to migrate.
   consumers are tests is still a capability;** what made it invisible was the doc
   declining to say what it was for.
 
+### Fixed
+
+- **A consolidation pass held every segment's backing to the end of the pass.**
+  `consolidateSegments` opened a scanner per segment with `defer ss.Close()`
+  *inside* its loop — the only defer-in-loop in the package.
+
+  What that deferred was not what it looked like. Not a file handle: `Scan`
+  closes the stream itself the moment the scan ends, precisely because a caller
+  typically rewrites the segment straight after draining it and, on Windows, an
+  open read handle blocks the rename that installs the rewrite. That hazard was
+  already closed a layer down.
+
+  What `Close` still holds is the *pin*, which outlives the stream deliberately —
+  the scan may read through the backing after the stream is gone.
+  `acquireBacking` only takes one for a store backing, a local file being
+  reference-free because nothing supersedes it under a reader. So this reached
+  **tier-backed segments only**, and it meant every already-consolidated
+  segment's superseded object stayed referenced until the whole pass returned
+  rather than until its own iteration ended, with nothing able to reclaim them in
+  between. Bounded per pass by `maxRewrites`/`CleanRewriteBudget`, so a delay and
+  a bounded accumulation rather than a wrong answer.
+
+  The loop body moved into `consolidateOne` so the defer scopes to one segment.
+  The release stays *after* `Replace`, where the inline defer had it: dropping
+  the pin before the swap would release the claim on a backing about to be
+  superseded. Scoping the release to the iteration is the fix; moving it earlier
+  within the iteration would be a commit-point change and is a separate question.
+
 ## v0.67.4 — 2026-08-11
 
 ### Fixed
