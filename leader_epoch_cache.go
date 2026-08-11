@@ -255,14 +255,34 @@ func (l *leaderEpochCache) flush() error {
 func (l *leaderEpochCache) warn(epoch, latestEpoch uint64, offset, latestOffset int64) {
 	msg := slog.String("message", l.epochChangeMsg(epoch, latestEpoch, offset, latestOffset))
 
-	if epoch < l.latestEpoch() {
+	// Every refusal logs, including the one no arm anticipated. The two named
+	// cases below are strict comparisons, so an assignment of the epoch already
+	// latest at an offset at or after its own — a reassignment, which the doc on
+	// Assign says is not allowed — fell between them and produced NOTHING: no
+	// entry written, no line logged, and a nil error returned.
+	//
+	// That is indistinguishable from a successful assign at the call site and
+	// afterwards, and it cost a downstream team an investigation: their side
+	// believed it held epoch history it had never been able to record. A default
+	// arm here is not defensive padding; it is the difference between a caller
+	// learning immediately and learning from a data loss.
+	switch {
+	case epoch < latestEpoch:
 		slog.Warn("Received log leader epoch assignment for an epoch < latest epoch. "+
 			"This implies messages have arrived out of order",
 			msg,
 		)
-	} else if offset < l.latestOffset() {
+	case offset < latestOffset:
+		// The trailing "%s" this carried was not a format verb — slog.Warn takes
+		// attributes, not a format string — so it was printed literally.
 		slog.Warn("Received log leader epoch assignment for an offset < latest offset "+
-			"for the most recently stored leader epoch. This implies messages have arrived out of order. %s",
+			"for the most recently stored leader epoch. This implies messages have arrived out of order.",
+			msg,
+		)
+	default:
+		slog.Warn("Refused a log leader epoch assignment that would reassign an epoch "+
+			"already recorded. An epoch's start offset is fixed once assigned, so "+
+			"this assignment was dropped",
 			msg,
 		)
 	}

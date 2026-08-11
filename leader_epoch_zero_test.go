@@ -1,10 +1,24 @@
 package commitlog
 
 import (
+	"bytes"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// captureWarnings redirects the default slog logger into a buffer for the rest
+// of the test, and restores it afterwards. Safe because nothing in this package
+// calls t.Parallel: the default logger is process-wide state.
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
 
 // Leader epoch 0 must be recordable, because it is the epoch nearly every
 // record in this package carries.
@@ -45,8 +59,20 @@ func TestLeaderEpochZeroIsRecorded(t *testing.T) {
 
 	// Monotonicity is still enforced, which is what the gate was FOR. Without
 	// this the fix would read as "accept anything when the cache is short".
+	//
+	// And the refusal has to SAY so. This exact shape — the epoch already latest,
+	// at an offset at or after its own — fell between warn's two strict
+	// comparisons and logged nothing at all, which is indistinguishable from a
+	// successful assign both at the call and afterwards.
+	warnings := captureWarnings(t)
 	require.NoError(t, l.Assign(0, 5))
 	require.Len(t, l.epochOffsets, 1, "epoch 0 was assigned twice")
+	require.Contains(t, warnings.String(), "reassign",
+		"a refused reassignment logged nothing: a caller cannot tell it from a "+
+			"successful assign, which is how a log comes to be trusted for epoch "+
+			"history it never recorded")
+	require.Contains(t, warnings.String(), "epoch:0",
+		"the warning did not name the assignment it refused")
 
 	// And a real failover still appends rather than replacing.
 	require.NoError(t, l.Assign(1, 50))

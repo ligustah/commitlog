@@ -477,6 +477,16 @@ run_guard "reader advances past its segment" util.go   '	next, _ := findSegment(
 # without logging anything.
 run_guard "an empty epoch cache accepts any epoch" leader_epoch_cache.go   '	if len(l.epochOffsets) == 0 || (epoch > latestEpoch && offset >= latestOffset) {' '	if epoch > latestEpoch && offset >= latestOffset {'   '^TestLeaderEpochZeroIsRecorded$'
 
+# EVERY refused epoch assignment logs. Neutralized by removing the arm no
+# condition anticipated, which is where an assignment of the already-latest
+# epoch used to land: warn's two cases are strict comparisons, so it wrote no
+# entry, logged nothing and returned nil — indistinguishable from success, both
+# at the call and afterwards. Requested by durable_streams after that silence
+# cost them an investigation into epoch history their side never held.
+run_guard "every refused epoch assignment logs" leader_epoch_cache.go   '	default:
+		slog.Warn("Refused a log leader epoch assignment that would reassign an epoch "+' '	case false:
+		slog.Warn("Refused a log leader epoch assignment that would reassign an epoch "+'   '^TestLeaderEpochZeroIsRecorded$'
+
 # A leader epoch arriving from the checkpoint file must be parsed as UNSIGNED.
 # The neutralization restores the old parse-then-convert, which is the whole bug:
 # "-1" is a valid int64, becomes 2^64-1 as a uint64, and that is a well-formed
