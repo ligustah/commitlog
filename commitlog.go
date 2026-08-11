@@ -114,7 +114,6 @@ type commitLog struct {
 	readonly       int32 // Atomic flag
 	deleteCleaner  *deleteCleaner
 	compactCleaner *compactCleaner
-	name           string
 	mu             sync.RWMutex
 	// cleanMu serializes segment-list maintenance (Clean, Truncate,
 	// TruncateBefore). Clean scans and rewrites segments outside mu so reads
@@ -164,8 +163,7 @@ type commitLog struct {
 	syncFlushing      bool
 	syncDone          chan struct{}
 	// syncWindow is how long the next flush's leader holds the door open for
-	// other committers to join it, set to the previous flush's duration, and
-	// syncJoined counts how many joined the flush in flight.
+	// other committers to join it, set to the previous flush's duration.
 	//
 	// The window is what makes the barrier batch at all. Without it — flushing
 	// the moment leadership is taken, and letting everyone else queue behind the
@@ -174,9 +172,15 @@ type commitLog struct {
 	// committers, 2323 flushes led against 1011 rides. With the window it is 51
 	// against 3149.
 	syncWindow time.Duration
-	syncJoined int
 	// Instrumentation for the batching tests: how many Sync calls led a flush
 	// versus rode someone else's. Counted under syncMu.
+	//
+	// These two are read — by sync_batch_probe_test.go — which is why they are
+	// here and syncJoined is not. That field counted joiners of the flush in
+	// flight and nothing ever asked: incremented, reset per flush, never read.
+	// The distinction is worth stating because "only a test reads it" is not a
+	// reason to remove instrumentation, and mistaking the two costs more than
+	// the field is worth.
 	syncLeaders      int64
 	syncFollowers    int64
 	hw               int64
@@ -498,7 +502,6 @@ func New(opts Options) (CommitLog, error) {
 
 	l := &commitLog{
 		Options:          opts,
-		name:             filepath.Base(path),
 		deleteCleaner:    cleaner,
 		compactCleaner:   compactCleaner,
 		hw:               -1,
@@ -2277,7 +2280,6 @@ func (l *commitLog) Sync(offset int64) error {
 			// covers this offset too, since they snapshot the tail AFTER this
 			// append landed.
 			wait := l.syncDone
-			l.syncJoined++
 			l.syncMu.Unlock()
 			waited = true
 			<-wait
@@ -2288,7 +2290,6 @@ func (l *commitLog) Sync(offset int64) error {
 		done := make(chan struct{})
 		l.syncDone = done
 		window := l.syncWindow
-		l.syncJoined = 0
 		l.syncMu.Unlock()
 
 		// Hold the door open before flushing. Without this the barrier coalesces
