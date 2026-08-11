@@ -631,6 +631,12 @@ run_guard "the read retry spends its whole budget" util.go   $'func ReadFileWith
 	deadline := time.Now().Add(waitedOnRetryBudget)'   $'func ReadFileWithRetry(path string) ([]byte, error) {
 	deadline := time.Now().Add(waitedOnRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
 
+# Delete takes the descriptor LAST. Neutralized back to the plain RemoveAll,
+# which records one error and carries on -- so one held file never stopped it
+# removing the descriptor, and a directory of segments with no descriptor is a
+# state readDescriptor refuses forever. sqlcdc lost a view's name to it.
+run_guard_windows "a failed delete keeps the descriptor" commitlog.go   '	return removeLogDir(l.Path)' '	return removeAllWithRetry(l.Path)'   '^TestAFailedDeleteLeavesALogThatStillOpens$'
+
 # The two halves that make NotifyLEO's read-then-act safe. It parks a waiter on
 # one load of vActiveSegment while deciding whether to park from another, so a
 # roll in between parks it on a segment nothing will append to again. seal() is

@@ -2,9 +2,10 @@ package commitlog
 
 import (
 	"bytes"
-
+	stderrors "errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -149,14 +150,75 @@ func exists(path string) bool {
 }
 
 func removeAllWithRetry(path string) error {
+	return removeWithRetry(func() error { return os.RemoveAll(path) })
+}
+
+// removeWithRetry runs remove until it succeeds or the attempts run out. Shaped
+// as a callback rather than a path so removeLogDir can retry a whole PASS over
+// the directory, not each entry in turn: a per-entry budget is really n budgets,
+// and the one file that is actually held gets the same 2s whether it is first
+// or last only if the pass is what repeats.
+func removeWithRetry(remove func() error) error {
 	var err error
 	for i := 0; i < 100; i++ {
-		if err = os.RemoveAll(path); err == nil {
+		if err = remove(); err == nil {
 			return nil
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	return err
+}
+
+// removeLogDir removes a log's directory, taking the DESCRIPTOR LAST.
+//
+// os.RemoveAll does not stop at its first failure: it records one error and
+// keeps deleting the remaining entries (see removeall_noat.go on Windows, and
+// removeall_at.go elsewhere). So a single held file does not prevent it from
+// removing everything around that file — including the descriptor, which is the
+// one that says the log EXISTS and what it is.
+//
+// A delete that failed on a locked .index therefore did not leave a log that
+// had failed to be deleted. It left a directory full of segments with no
+// descriptor, which readDescriptor refuses on every subsequent open, forever:
+// "a log that exists with no descriptor" is a deliberate refusal, and this
+// manufactured exactly that state. sqlcdc lost a view's name to it in a soak.
+//
+// Ordering fixes it because the descriptor is the commit point. Everything else
+// in the directory is data the descriptor accounts for, so while it survives
+// the log survives — a failed delete is a log that still opens and a Delete
+// that can simply be retried. Removing it is what makes the log stop existing,
+// so it must be the last thing that can fail.
+func removeLogDir(path string) error {
+	if err := removeWithRetry(func() error { return removeAllExcept(path, descriptorFileName) }); err != nil {
+		return err
+	}
+	// Everything the descriptor accounted for is gone. Now it, and the
+	// directory with it.
+	return removeAllWithRetry(path)
+}
+
+// removeAllExcept removes every entry in dir but the one named keep, joining
+// the failures rather than stopping at the first — the point is to get as close
+// to empty as the filesystem allows, and one held file says nothing about the
+// rest.
+func removeAllExcept(dir, keep string) error {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		if e.Name() == keep {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return stderrors.Join(errs...)
 }
 
 // Bounds for the Windows sharing-violation retries below.

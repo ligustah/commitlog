@@ -1428,7 +1428,10 @@ func (l *commitLog) Delete() error {
 	if err := l.closeSegments(); err != nil {
 		return err
 	}
-	return removeAllWithRetry(l.Path)
+	// Not removeAllWithRetry: the descriptor has to go last, or a delete that
+	// fails on one held file leaves a log nothing can ever open again. See
+	// removeLogDir.
+	return removeLogDir(l.Path)
 }
 
 // removeAllWithRetry removes the directory tree, retrying briefly. On Windows a

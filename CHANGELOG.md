@@ -5,6 +5,25 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A failed `Delete` could leave a log nothing can ever open again.**
+  `os.RemoveAll` does not stop at its first failure — it records one error and
+  keeps deleting the remaining entries. So a single held file (a locked
+  `.index`, a scanner's handle) never prevented it removing everything around
+  that file, the descriptor included. The result was not a delete that failed:
+  it was a directory full of segments with no descriptor, which
+  `readDescriptor` refuses on every subsequent open, forever. No retry fixes
+  that. Reported by sqlcdc, which lost a view's name to it in a soak.
+
+  `Delete` now removes the descriptor LAST, because the descriptor is the
+  commit point: everything else in the directory is data it accounts for, so
+  while it survives the log survives, and a failed delete is a log that still
+  opens and a `Delete` that can simply be retried. Removing it is what makes
+  the log stop existing, so it goes after everything that can fail.
+
 ## v0.66.1 — 2026-08-10
 
 ### Changed
