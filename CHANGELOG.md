@@ -5,6 +5,53 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Removed
+
+Two pieces of API deleted in a complexity sweep. Both are breaking and both are
+free: nothing in any repo on this machine called either one, and pre-v1 there is
+nothing to migrate.
+
+- **`Options.CompactMaxGoroutines`.** An unbounded public `int` whose entire
+  meaningful range was `{1, everything else}`. `loadOrBuildDigests` clamped it to
+  2 — each digest build holds a transient per-segment key map, and ten at once
+  measured over 1GB on a 12h soak — so no value could raise the cap and the only
+  setting that changed anything was `1`, which made the builds serial. The
+  field's own doc spent ten lines apologising for the gap between its name and
+  its behaviour, which is the tell: a knob needing a paragraph about which of its
+  values do nothing is not a knob.
+
+  It read as a lie as well as being one. Two of its three cross-references in
+  this repo claimed it bounded segment *rewrites*. It never did — rewrites are
+  bounded by time (`CleanRewriteBudget`, `TierBudgets`), and a worker count is
+  the wrong instrument for them. Nobody caught the contradiction because nothing
+  ever set the field.
+
+  The build cap is now a `const 2` carrying the soak measurement that fixes it
+  there. A caller wanting shorter passes sets `CleanRewriteBudget`, which was
+  doing the work all along.
+
+- **`CommitLog.OverrideHighWatermark`.** The deliberate exception to
+  `SetHighWatermark`'s monotonicity, justified in its doc by "a caller that has
+  some other reason to know the committed boundary has moved backwards". There
+  was no such caller. The only production one was a `durable_streams` pairing
+  removed when v0.46.0 made `Truncate` bring the watermark down together with the
+  records it deletes — which is where lowering belongs, because there the records
+  really are gone.
+
+  Use `SetHighWatermark`, or `Truncate` when records are actually being removed.
+
+### Added
+
+- **`TestTheHighWatermarkNeverGoesBackwards`**, replacing
+  `TestOverrideHighWatermark`, and the swap is the substantive half of the
+  change above. The old test asserted the *exception*; monotonicity — the rule —
+  had no test at all, from the day it was written. The escape hatch was covered
+  and the contract was not. The new test is registered with guardcheck (now 100
+  guards), and its neutralization is exactly what the deleted method did, so
+  reintroducing the exception turns the rule's own test red.
+
 ## v0.67.4 — 2026-08-11
 
 ### Fixed
