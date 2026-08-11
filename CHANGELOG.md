@@ -42,6 +42,16 @@ nothing to migrate.
 
   Use `SetHighWatermark`, or `Truncate` when records are actually being removed.
 
+- **Two write-only fields on `Reader`** (`uncommitted`, `noWait`), both copied
+  out of the `readSpec` at construction and then read by nothing. Internal, so
+  no caller is affected. Noted because of how it hid: `uncommittedReader` and
+  `committedReader` carry their own fields of the same names, so the reads look
+  present when you grep — they are just not reads of these.
+
+  Write-only state is the hard kind to find. staticcheck cannot flag it, because
+  a write counts as a use; review cannot, because a field named after a real
+  concept reads as though something consults it.
+
 ### Added
 
 - **`TestTheHighWatermarkNeverGoesBackwards`**, replacing
