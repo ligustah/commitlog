@@ -197,13 +197,29 @@ func TestCopyTierRefusesAManifestEntryTheSourceCannotServe(t *testing.T) {
 // A store with no descriptor is not a log's store, and copying its objects would
 // hand the new owner a tier it cannot identify — which is the silent adoption
 // the descriptor exists to prevent.
+//
+// The source is a REAL tier with its descriptor deleted, not an empty store, and
+// the error is checked for what refused it. An empty source names nothing, so a
+// copy of it is a copy of nothing and "returned an error" is satisfied by
+// whatever CopyTier happens to look at first — which is not this claim, and
+// would go on passing with the descriptor read deleted outright.
 func TestCopyTierRefusesASourceWithNoDescriptor(t *testing.T) {
 	root := tempDir(t)
-	src, err := NewFileSegmentStore(filepath.Join(root, "src"))
-	require.NoError(t, err)
+	src, _, _ := copyTierSource(t, root)
+	require.NoError(t, src.Delete(descriptorKey))
+
 	dst, err := NewFileSegmentStore(filepath.Join(root, "dst"))
 	require.NoError(t, err)
 
-	require.Error(t, CopyTier(src, dst),
+	err = CopyTier(src, dst)
+	require.Error(t, err,
 		"a store that never belonged to a log was copied as though it did")
+	require.ErrorContains(t, err, "descriptor",
+		"the copy was refused, but not for the reason under test: %v", err)
+
+	// And refused BEFORE copying anything: the descriptor is read ahead of the
+	// first object precisely so a rejected handover leaves nothing behind.
+	keys, err := dst.List()
+	require.NoError(t, err)
+	require.Empty(t, keys, "a refused copy wrote to the destination anyway")
 }

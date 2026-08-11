@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -270,24 +271,47 @@ func TestTurningCompressionOnLeavesExistingSegmentsRaw(t *testing.T) {
 	dir := tempDir(t)
 
 	// Phase 1: write raw (no compression), small segments so several roll.
+	//
+	// One message per Append, deliberately. A segment rolls between Appends, not
+	// within one, so handing the whole batch over at once produces a SINGLE
+	// segment however low MaxSegmentBytes is set — which left the version of this
+	// test that only read messages back measuring one file while its comment
+	// claimed several.
 	l, err := New(Options{Path: dir, MaxSegmentBytes: 512})
 	require.NoError(t, err)
 	first := compressibleMsgs(100)
-	_, err = l.Append(first)
-	require.NoError(t, err)
+	for i, m := range first {
+		_, err = l.Append([]*Message{m})
+		require.NoError(t, err, "msg %d", i)
+	}
 	require.NoError(t, l.Close())
+
+	// The claim is about the FILES, so record which segments predate the codec.
+	// Reading every message back proves the log is coherent; it does not
+	// distinguish "the old segments stayed raw" from "they were rewritten".
+	beforeFiles, err := filepath.Glob(filepath.Join(dir, "*"+logFileSuffix))
+	require.NoError(t, err)
+	require.Greater(t, len(beforeFiles), 2,
+		"the fixture rolled too few segments to be measuring anything")
 
 	// Phase 2: reopen with zstd and append more.
 	l2, err := New(Options{Path: dir, MaxSegmentBytes: 512, Compression: compress.Zstd})
 	require.NoError(t, err)
-	t.Cleanup(func() { l2.Close() })
+	l2Open := true
+	t.Cleanup(func() {
+		if l2Open {
+			l2.Close() // nolint: errcheck
+		}
+	})
 	second := compressibleMsgs(100)
 	// Give the new messages distinct values so we can tell them apart.
 	for i := range second {
 		second[i].Value = append([]byte("second-"), second[i].Value...)
 	}
-	_, err = l2.Append(second)
-	require.NoError(t, err)
+	for i, m := range second {
+		_, err = l2.Append([]*Message{m})
+		require.NoError(t, err, "msg %d", i)
+	}
 
 	all := append(append([]*Message{}, first...), second...)
 	ctx := context.Background()
@@ -300,6 +324,38 @@ func TestTurningCompressionOnLeavesExistingSegmentsRaw(t *testing.T) {
 		require.Equal(t, int64(i), offset)
 		compareMessages(t, exp, msg)
 	}
+
+	// Close before classifying: an active block segment's last frames are not
+	// on disk until it is flushed, and this asks what the files say.
+	require.NoError(t, l2.Close())
+	l2Open = false
+
+	old := make(map[string]bool, len(beforeFiles))
+	for _, p := range beforeFiles {
+		old[p] = true
+	}
+	afterFiles, err := filepath.Glob(filepath.Join(dir, "*"+logFileSuffix))
+	require.NoError(t, err)
+	require.Greater(t, len(afterFiles), len(beforeFiles),
+		"the second phase rolled no new segment, so nothing was written under the new codec")
+
+	var blocked int
+	for _, p := range afterFiles {
+		format, cerr := ClassifySegment(p)
+		require.NoError(t, cerr, "classifying %s", filepath.Base(p))
+		if old[p] {
+			require.False(t, format.Blocked,
+				"%s was written before the codec was configured and must have stayed raw",
+				filepath.Base(p))
+			continue
+		}
+		if format.Blocked {
+			blocked++
+		}
+	}
+	require.Positive(t, blocked,
+		"turning compression on produced no block-framed segment, so the half of "+
+			"this claim that says new ones DO compress was never exercised")
 }
 
 // TestCompressionSavesSpace is a sanity check that compression actually shrinks
