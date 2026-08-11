@@ -184,6 +184,11 @@ func TestALogCleansAtOpenWithoutWaitingForATick(t *testing.T) {
 // only caller of Clean(). So the one pass nobody drives by hand was the one pass
 // that could run for as long as it liked — 6m42s against a 5m interval, on the
 // log this came from.
+//
+// This half is about the OPTION: that New resolves it, and to what. The half
+// that the fix actually changed — Clean() copying the resolved value into the
+// spec it builds — is TestTheAutomaticCleanSpendsTheConfiguredBudget. Neither
+// implies the other, and for a while only this one existed.
 func TestTheAutomaticCleanIsBounded(t *testing.T) {
 	open := func(o Options) *commitLog {
 		o.Name, o.Path = "budget", tempDir(t)
@@ -209,4 +214,61 @@ func TestTheAutomaticCleanIsBounded(t *testing.T) {
 	l = open(Options{Compact: true, CleanerInterval: 90 * time.Second,
 		CleanRewriteBudget: -1})
 	require.Negative(t, l.Options.CleanRewriteBudget)
+}
+
+// Clean() spends the budget it was configured with, and an unbounded one does
+// more work than an exhausted one.
+//
+// A resolved option is not a bounded pass. New defaulting CleanRewriteBudget to
+// the tick and Clean() putting that value into the spec are two separate lines
+// in two separate files, and only the first was ever asserted — so the two lines
+// the "automatic pass is bounded" fix ADDED could be deleted with the whole
+// suite still green, restoring exactly the unbounded pass they were written to
+// stop.
+//
+// One nanosecond is not arbitrary. rewriteBudget.allow() lets the first rewrite
+// through whatever the deadline says, so debt still drains under a pathological
+// budget: an exhausted budget is exactly ONE segment rewritten, which needs no
+// timing to hold. The control is the same fixture with a negative budget, which
+// Clean() must NOT copy — that is the unbounded pass, and it collapses the log.
+func TestTheAutomaticCleanSpendsTheConfiguredBudget(t *testing.T) {
+	// Each sealed segment holds superseded copies of one hot key plus filler
+	// nothing supersedes. The filler is load-bearing: a segment whose records
+	// are ALL droppable is deleted rather than rewritten, and a deleted segment
+	// never draws on the rewrite budget at all.
+	build := func(budget time.Duration) (l *commitLog, before int) {
+		l, cleanup := setupWithOptions(t, Options{
+			Path:               tempDir(t),
+			MaxSegmentBytes:    220,
+			Compact:            true,
+			DisableAutoClean:   true,
+			CleanRewriteBudget: budget,
+		})
+		t.Cleanup(cleanup)
+		var last int64
+		for i := 0; i < 40; i++ {
+			offs, err := l.Append([]*Message{
+				{Key: []byte("hot"), Value: []byte(fmt.Sprintf("v%02d", i))},
+				{Key: []byte(fmt.Sprintf("f%02d", i)), Value: []byte("xxxxxxxxxxxxxxxx")},
+			})
+			require.NoError(t, err)
+			last = offs[len(offs)-1]
+		}
+		l.SetHighWatermark(last)
+		require.NoError(t, l.Clean())
+		return l, 80
+	}
+
+	exhausted, total := build(time.Nanosecond)
+	unbounded, _ := build(-1)
+
+	left := len(readAllMsgs(t, exhausted))
+	all := len(readAllMsgs(t, unbounded))
+
+	require.Less(t, left, total,
+		"the exhausted pass rewrote nothing at all, so this compares two passes "+
+			"that both did no work")
+	require.Greater(t, left, all,
+		"the exhausted pass dropped as much as the unbounded one: Clean() is not "+
+			"putting Options.CleanRewriteBudget into the spec it builds")
 }

@@ -957,6 +957,16 @@ run_guard "a refused delete batch deletes nothing" tier_state.go   '	stores := m
 # budget the same, which is exactly the single shared budget this replaced.
 run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFor(segments[i].tier)' '			b = budgetFor("")'   '^TestOneTiersBudgetDoesNotShrinkAnothers$'
 
+# Clean() puts the configured budget into the spec it builds. Neutralized by
+# building the empty spec again, which is the unbounded automatic pass this
+# replaced — and which the test named for that fix went on passing against,
+# because it asserted the OPTION rather than the pass.
+run_guard "the automatic pass spends its budget" clean.go   '	if l.Options.CleanRewriteBudget > 0 {
+		spec.RewriteBudget = l.Options.CleanRewriteBudget
+	}' '	if false {
+		spec.RewriteBudget = 0
+	}'   '^TestTheAutomaticCleanSpendsTheConfiguredBudget$'
+
 # A segment created while a codec is configured is block-framed. Neutralized by
 # never blocking, which is a log that silently ignores its Compression setting
 # and writes raw — every message still reads back, so the test that only read
