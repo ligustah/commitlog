@@ -1054,7 +1054,16 @@ func (s *segment) reconcileIndexTailRaw() error {
 			// A read that FAILED says nothing about what is on disk, so the tail
 			// stays: dropping bytes on a transient IO error would turn a
 			// retryable open into permanent data loss.
-			break
+			//
+			// It must not report SUCCESS either, and that is what breaking here
+			// did. torn is false on this path, so the loop fell through to
+			// `return nil` and the segment opened having reconciled nothing:
+			// lastOffset left at the stale index tail while position was the
+			// file size. The next append then took its offset from NextOffset
+			// and wrote a record the file already held at that offset — the
+			// duplicate a replica reported holding. An open that cannot read
+			// the tail it is reconciling has to fail, so the caller retries it.
+			return errors.Wrapf(err, "reconcile index tail: read frame header at %d", startPos)
 		}
 		m := messageSet(hdr)
 		frameLen := int64(msgSetHeaderLen) + int64(m.Size())
