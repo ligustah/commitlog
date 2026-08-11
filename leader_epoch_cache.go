@@ -196,7 +196,22 @@ func (l *leaderEpochCache) assign(epoch uint64, offset int64) error {
 		latestEpoch  = l.latestEpoch()
 		latestOffset = l.latestOffset()
 	)
-	if epoch > latestEpoch && offset >= latestOffset {
+	// len, not `epoch > latestEpoch` alone. latestEpoch() answers 0 for an EMPTY
+	// cache, which is also a perfectly good epoch — ordinary Append stamps 0 —
+	// so the monotonicity check refused the first assignment of epoch 0 on every
+	// log, permanently, for the whole of its life before a first failover. A
+	// sentinel made of a valid value: 0 meant both "nothing recorded yet" and
+	// "the latest epoch is 0", and the gate could not tell which it had.
+	//
+	// Silently, too. The else branch's warn() fires on `epoch < latestEpoch`
+	// (0 < 0) or `offset < latestOffset` (against -1), and neither is true here,
+	// so nothing was logged at the call or anywhere after it.
+	//
+	// Asking the length tests the thing actually in question and leaves the
+	// comparison meaning only what it says. An empty cache has no previous epoch
+	// to be monotonic against, so any epoch may open the history; every
+	// assignment after the first is checked exactly as before.
+	if len(l.epochOffsets) == 0 || (epoch > latestEpoch && offset >= latestOffset) {
 		l.epochOffsets = append(l.epochOffsets, &epochOffset{
 			leaderEpoch: epoch,
 			startOffset: offset,

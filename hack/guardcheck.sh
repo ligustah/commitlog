@@ -470,6 +470,13 @@ run_guard "reader advances past its segment" util.go   '	next, _ := findSegment(
 		next = segments[nextIdx]
 	}'   '^TestASegmentAdvanceSkipsTheTrimOfTheSegmentJustRead$'
 
+# An empty cache has no previous epoch to be monotonic against, so any epoch may
+# open the history — including 0, which is what ordinary Append stamps.
+# Neutralized by the gate as it stood, where latestEpoch()'s empty-cache answer
+# of 0 made `0 > 0` refuse the first assignment on every log, permanently and
+# without logging anything.
+run_guard "an empty epoch cache accepts any epoch" leader_epoch_cache.go   '	if len(l.epochOffsets) == 0 || (epoch > latestEpoch && offset >= latestOffset) {' '	if epoch > latestEpoch && offset >= latestOffset {'   '^TestLeaderEpochZeroIsRecorded$'
+
 # A leader epoch arriving from the checkpoint file must be parsed as UNSIGNED.
 # The neutralization restores the old parse-then-convert, which is the whole bug:
 # "-1" is a valid int64, becomes 2^64-1 as a uint64, and that is a well-formed

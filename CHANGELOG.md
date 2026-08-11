@@ -5,6 +5,33 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **Leader epoch 0 could never be recorded.** `assign` gated on
+  `epoch > latestEpoch()`, and `latestEpoch()` answers `0` for an empty cache —
+  so `0 > 0` refused the first assignment on every log, permanently, for the
+  whole of its life before a first failover. Ordinary `Append` stamps epoch 0,
+  so this was the common case rather than an edge one: a sentinel made of a
+  valid value, where `0` meant both "nothing recorded yet" and "the latest epoch
+  is 0" and the gate could not tell which it had.
+
+  It was silent as well. The refusal's `warn` fires on `epoch < latestEpoch`
+  (`0 < 0`) or `offset < latestOffset` (against `-1`), and neither holds for the
+  epoch-0 case, so nothing was logged at the call or afterwards.
+
+  The gate now asks the cache's length, which is the fact actually in question,
+  and leaves the comparison meaning only what it says. Monotonicity is unchanged
+  for every assignment after the first.
+
+  Scope, since the discovery came from an incident this does **not** explain:
+  `LastOffsetForLeaderEpoch` is unaffected either way, because it answers from
+  `findEpoch(epoch+1)` — the *next* epoch's anchor, which was always recorded
+  normally. What was wrong is the cache's account of where a log's epoch history
+  begins, and with it the "a trim at the earliest end re-anchors rather than
+  drops" invariant, which could not apply to an epoch that was never added.
+
 ## v0.67.3 — 2026-08-11
 
 ### Fixed
