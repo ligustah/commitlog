@@ -457,7 +457,10 @@ func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (int, error) {
 		// what makes the tier genuinely self-contained rather than
 		// self-contained only when the index happened to be offloaded as well.
 		if o.IndexKey == "" {
-			if err := seg.reconcileIndexTail(); err != nil {
+			// No floor: an offloaded segment is sealed and its backing is
+			// remote, so there is no torn tail to discard here — the walk only
+			// rebuilds the index from an object written in one shot.
+			if err := seg.reconcileIndexTail(-1); err != nil {
 				seg.Close()
 				return adopted, errors.Wrapf(err,
 					"rebuild index for manifest segment %d", o.BaseOffset)

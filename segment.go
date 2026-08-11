@@ -980,7 +980,11 @@ func (s *segment) rebuildIndexFromLog() error {
 	s.firstWriteTime, s.lastWriteTime = 0, 0
 	// reconcileIndexTail resumes after the last indexed entry; over an emptied
 	// index that means walking the whole log from the start.
-	return s.reconcileIndexTail()
+	//
+	// No floor: this runs when the index reaches PAST its log, so the records
+	// it names are already gone from disk and there is no committed tail here
+	// to protect. The caller that has a watermark passes it directly.
+	return s.reconcileIndexTail(-1)
 }
 
 // lastFrameInBlock scans message frames starting at logical position start
@@ -1033,14 +1037,14 @@ func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
 // would disagree on which record an offset names, and the next append could
 // land on an existing un-indexed record. Run on open for the active segment;
 // a no-op when the index already covers the log.
-func (s *segment) reconcileIndexTail() error {
+func (s *segment) reconcileIndexTail(committedThrough int64) error {
 	if s.Index == nil {
 		return nil // offloaded: index is remote and the segment is immutable
 	}
 	if s.blockMode {
 		return s.reconcileIndexTailBlocks()
 	}
-	return s.reconcileIndexTailRaw()
+	return s.reconcileIndexTailRaw(committedThrough)
 }
 
 // reconcileIndexTailRaw scans raw message-set frames past the last indexed one
@@ -1059,7 +1063,7 @@ func (s *segment) reconcileIndexTail() error {
 // unreachable: it returns early whenever the checkpoint is at or above the
 // recovered tail, which a torn last record is exactly the case for, and its
 // Truncate takes an OFFSET — and a half-written frame is not a record with one.
-func (s *segment) reconcileIndexTailRaw() error {
+func (s *segment) reconcileIndexTailRaw(committedThrough int64) error {
 	var startPos int64
 	if n := s.Index.numEntries(); n > 0 {
 		var last entry
@@ -1116,6 +1120,32 @@ func (s *segment) reconcileIndexTailRaw() error {
 	}
 	if !torn {
 		return nil
+	}
+	// A torn tail is dropped, but never down through records the log has already
+	// COMMITTED. Above the high watermark the bytes are uncommitted by
+	// definition and discarding them is the whole point of this path; at or
+	// below it they were acknowledged, and a durable log does not get to delete
+	// those because a later frame did not parse.
+	//
+	// Without this the walk had no floor at all, and the damage scaled with how
+	// early the bad frame sat: a first frame whose size field overruns the file
+	// resolves NOTHING, so startPos is 0 and the "tail" is the entire segment.
+	// The open then SUCCEEDED, and the watermark was clamped down to match the
+	// now-empty log — 2900 bytes and fifty acknowledged records to nothing, with
+	// a WARN as the only trace. That is what a replica coming back claiming to
+	// hold no records looks like from the inside.
+	//
+	// Gated on the segment's own base, not on the watermark alone: a fresh
+	// active segment above the watermark holds nothing committed, so a crash
+	// during its very first append still discards and still opens — which is the
+	// ordinary unclean shutdown this path exists for, and the case that makes
+	// refusing outright the wrong answer.
+	if committedThrough >= s.BaseOffset && s.lastOffset < committedThrough {
+		return errors.Errorf(
+			"commitlog: refusing to discard a torn tail below the high "+
+				"watermark: the walk resolved through offset %d of segment %d, "+
+				"but %d was committed",
+			s.lastOffset, s.BaseOffset, committedThrough)
 	}
 	if err := s.discardTornTail(startPos, s.position); err != nil {
 		return err

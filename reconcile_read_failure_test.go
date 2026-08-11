@@ -79,7 +79,9 @@ func TestAReconcileThatCannotReadTheTailFails(t *testing.T) {
 	require.NoError(t, lb.f.Close())
 	seg.Unlock()
 
-	rerr := seg.reconcileIndexTailRaw()
+	// No floor: this test is about the read failing, not about what a torn tail
+	// may drop, and -1 leaves the discard path exactly as it was.
+	rerr := seg.reconcileIndexTailRaw(-1)
 
 	// A working handle again, so the assertions below can read the log. The old
 	// one is closed for good; reopening the path is what the retry this error is

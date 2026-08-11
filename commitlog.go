@@ -728,7 +728,11 @@ func (l *commitLog) open() error {
 	// NewestOffset / NextOffset reflect the true physical log — otherwise a seek
 	// and a sequential scan disagree on offsets and the next append can collide
 	// with an un-indexed record.
-	if err := activeSegment.reconcileIndexTail(); err != nil {
+	// l.hw is the floor: the reconcile may drop a torn tail, but not records
+	// this log has already acknowledged. It is read out of the checkpoint file
+	// in the directory walk above, so it is available here, and the clamp below
+	// is what used to paper over a discard that went too far.
+	if err := activeSegment.reconcileIndexTail(l.hw); err != nil {
 		return err
 	}
 	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&l.vActiveSegment)),

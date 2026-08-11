@@ -988,6 +988,12 @@ run_guard "a write with no entries is refused" segment.go   '	if len(entries) ==
 # lastOffset at the stale index tail for the next append to collide with.
 run_guard "a failed tail read fails the reconcile" segment.go   '			return errors.Wrapf(err, "reconcile index tail: read frame header at %d", startPos)' '			break'   '^TestAReconcileThatCannotReadTheTailFails$'
 
+# A torn tail is never discarded below the high watermark. Neutralized by
+# dropping the floor, which is the unbounded discard: a first frame that does
+# not resolve leaves startPos at 0, so the "tail" is the whole segment, the open
+# succeeds, and the watermark is clamped down to the empty log it just made.
+run_guard "a torn tail stops at the watermark" segment.go   '	if committedThrough >= s.BaseOffset && s.lastOffset < committedThrough {' '	if false {'   '^TestATornTailIsNotDiscardedBelowTheWatermark$'
+
 # An unparseable FIRST block header refuses the open. Neutralized by the break
 # it used to share with a torn tail — which, having resolved nothing, hands the
 # whole file to discardTornTail: one flipped byte costs every record, the open

@@ -9,6 +9,28 @@ library from that fork onward.
 
 ### Fixed
 
+- **Recovery discarded a torn tail straight through committed records.**
+  `reconcileIndexTailRaw` walks the frames the index does not cover, and a frame
+  it cannot resolve ends the walk — everything from there to the end of the file
+  is handed to `discardTornTail`. Above the high watermark that is the point:
+  those bytes are uncommitted. But the walk had no floor, so the damage scaled
+  with how early the bad frame sat, and a FIRST frame whose size field overruns
+  the file resolves nothing at all — the "tail" is then the entire segment.
+
+  The open still succeeded, and the watermark, now higher than the empty log,
+  was clamped down to match it. Fifty acknowledged records to nothing, durably,
+  with a `WARN` as the only trace. A replica doing that on restart comes back
+  claiming it holds no records, and its leader truncates its own tail to agree.
+
+  A torn tail is now dropped only above what the log has acknowledged. The floor
+  is gated on the segment's own base offset rather than the watermark alone, so
+  a crash during a fresh segment's first append — which holds nothing committed,
+  and is the ordinary unclean shutdown this path exists for — still discards and
+  still opens. Reported as a whole-partition loss by sqlcdc, whose `hw=895
+  newest=-1 truncated_at=0` is this bug seen from outside. This needs no
+  compression configured and is therefore the default shape; the block-format
+  case below is the same defect on the other walk.
+
 - **A corrupt first block header discarded the whole segment, and the open
   still succeeded.** `scanBlocks` walks a chain of block headers, and a header
   it cannot resolve ends the walk rather than failing it — right for a torn
