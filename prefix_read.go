@@ -57,8 +57,10 @@ const (
 // far too low and there is no reason it should not match or exceed the tier
 // value.
 //
-// Neither is CompactMaxGoroutines: that bounds segment REWRITES, which are CPU-
-// and write-bound, not scattered reads that spend nearly all their time waiting.
+// Neither of them bounds compaction, which is bounded by TIME rather than by a
+// worker count: a rewrite is CPU- and write-bound, not a scattered read that
+// spends nearly all its time waiting, so what limits it is a deadline
+// (CleanRewriteBudget, TierBudgets) and not a number of goroutines.
 const (
 	defaultPrefixReadConcurrency     = 8
 	defaultPrefixReadTierConcurrency = 64

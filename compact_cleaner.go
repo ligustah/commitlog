@@ -14,13 +14,10 @@ import (
 	"github.com/pkg/errors"
 )
 
-const defaultCompactMaxGoroutines = 10
-
 // compactCleanerOptions contains configuration settings for the
 // compactCleaner.
 type compactCleanerOptions struct {
-	Name          string
-	MaxGoroutines int
+	Name string
 	// MinAge protects a compaction horizon: a segment whose most recent write is
 	// newer than MinAge is kept intact rather than compacted. Zero disables it.
 	MinAge time.Duration
@@ -54,9 +51,6 @@ type compactCleaner struct {
 // rewriting segments such that they contain only the last message for a given
 // key.
 func newCompactCleaner(opts compactCleanerOptions) *compactCleaner {
-	if opts.MaxGoroutines == 0 {
-		opts.MaxGoroutines = defaultCompactMaxGoroutines
-	}
 	return &compactCleaner{compactCleanerOptions: opts}
 }
 
@@ -593,16 +587,22 @@ func (c *compactCleaner) canSkip(spec CleanSpec, d *keyDigest, m *mergeResult, i
 // sealed segments (built and installed when missing or stale), an in-memory
 // one for the active tail. Builds run on the cleaner's worker pool.
 func (c *compactCleaner) loadOrBuildDigests(segments []*segment) ([]*keyDigest, error) {
-	// Build concurrency is capped at 2, NOT MaxGoroutines: each build holds a
-	// transient per-segment key map, and the post-restart first clean can owe
-	// digests for every segment the catch-up burst sealed — 10 concurrent
-	// ~40MB maps measured >1GB on a 12h soak. Cleans no longer block appends
-	// (Stream.cleanMu split), so slower builds cost nothing on the commit
-	// path; peak memory is what matters.
-	buildConc := 2
-	if c.MaxGoroutines < buildConc {
-		buildConc = c.MaxGoroutines
-	}
+	// Two, fixed, and deliberately not configurable. Each build holds a transient
+	// per-segment key map, and the post-restart first clean can owe digests for
+	// every segment the catch-up burst sealed — 10 concurrent ~40MB maps measured
+	// >1GB on a 12h soak. Cleans no longer block appends (Stream.cleanMu split),
+	// so slower builds cost nothing on the commit path; peak memory is what
+	// matters, and peak memory is a function of this number alone.
+	//
+	// There WAS an Options.CompactMaxGoroutines feeding this, and it is worth
+	// recording why it went rather than leaving the constant looking like an
+	// oversight. It could not raise the cap — this line clamped it — so the only
+	// setting that changed anything was 1. A public unbounded int whose entire
+	// meaningful range is {1, everything else} is a knob shaped like a lie, and it
+	// read as one: two of its three cross-references in this repo claimed it
+	// bounded segment REWRITES, which it never did (those are bounded by time —
+	// CleanRewriteBudget and TierBudgets). Nothing in any repo ever set it.
+	const buildConc = 2
 	var (
 		digests = make([]*keyDigest, len(segments))
 		errs    = make([]error, len(segments))

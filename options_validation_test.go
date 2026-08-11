@@ -15,7 +15,6 @@ import (
 // check that exists to catch a missing one and lands somewhere that cannot
 // cope. Measured, before this was refused:
 //
-//	CompactMaxGoroutines  panic: makechan: size out of range
 //	HWCheckpointInterval  panic: non-positive interval for NewTicker
 //	CleanerInterval       panic: non-positive interval for NewTicker
 //	MaxSegmentBytes       no panic — the probe never returned
@@ -25,7 +24,7 @@ import (
 // the third is a hang. That is why the answer is refusal at New rather than a
 // clamp: a clamp keeps the caller's mistake and hides it.
 //
-// Table-driven on purpose. The defect is one defect in four places, and the
+// Table-driven on purpose. The defect is one defect in three places, and the
 // next option defaulted this way should be added here rather than discovered.
 //
 // CleanRewriteBudget is deliberately absent. It is defaulted the same way, but
@@ -36,11 +35,10 @@ import (
 // negative wrong.
 func TestNegativeOptionsAreRefused(t *testing.T) {
 	for name, mut := range map[string]func(*Options){
-		"CompactMaxGoroutines": func(o *Options) { o.CompactMaxGoroutines = -1 },
 		"MaxSegmentBytes":      func(o *Options) { o.MaxSegmentBytes = -1 },
 		"HWCheckpointInterval": func(o *Options) { o.HWCheckpointInterval = -time.Second },
 		"CleanerInterval":      func(o *Options) { o.CleanerInterval = -time.Second },
-		// Not one of the four — zero already means "never offload" here, so a
+		// Not one of the three — zero already means "never offload" here, so a
 		// negative is not an unset value reaching a default. It is a horizon in
 		// the future, which makes every sealed segment older than it and
 		// offloads the whole log on the first pass.
@@ -70,7 +68,6 @@ func TestAZeroOptionStillTakesTheDefault(t *testing.T) {
 	t.Cleanup(func() { l.Close() })
 
 	cl := l.(*commitLog)
-	require.Equal(t, defaultCompactMaxGoroutines, cl.compactCleaner.MaxGoroutines)
 	require.Equal(t, int64(defaultMaxSegmentBytes), cl.Options.MaxSegmentBytes)
 	require.Equal(t, defaultHWCheckpointInterval, cl.Options.HWCheckpointInterval)
 	require.Equal(t, defaultCleanerInterval, cl.Options.CleanerInterval)

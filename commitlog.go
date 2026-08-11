@@ -223,16 +223,6 @@ type Options struct {
 	// to force one.
 	LocalRetentionAge time.Duration
 	Compact           bool // Run compaction on log clean
-	// CompactMaxGoroutines bounds concurrent key-digest builds during a
-	// compaction pass. Zero picks the default; negative is refused by New.
-	//
-	// It no longer means what its name suggests, and the gap is worth stating
-	// rather than leaving for the next reader to discover in loadOrBuildDigests:
-	// digest builds are capped at 2 regardless, because each holds a transient
-	// per-segment key map and ten at once measured over 1GB on a soak. So the
-	// only value of this field that changes anything is 1, which makes the
-	// builds serial. Anything above 2 is the same as 2.
-	CompactMaxGoroutines int
 	// CompactMinAge is a protected compaction horizon: a segment is not eligible
 	// for compaction until its most recent write is at least this old, so recent
 	// segments keep their full per-record history. Zero disables the lag (any
@@ -314,8 +304,11 @@ type Options struct {
 	// modest — on fast random-access storage there is no reason it should not
 	// match or exceed the tier value.
 	//
-	// Neither is CompactMaxGoroutines: that bounds segment rewrites, which are
-	// CPU- and write-bound, not scattered reads that spend their time waiting.
+	// Nor is either of them a bound on compaction. A pass is bounded by TIME
+	// (CleanRewriteBudget, TierBudgets), not by a worker count, because a rewrite
+	// is CPU- and write-bound rather than a scattered read that spends most of
+	// its life waiting — and how many of those fit at once is not something a
+	// caller can usefully say in advance.
 	PrefixReadConcurrency     int
 	PrefixReadTierConcurrency int
 	// AdoptOptions records THESE options as the log's descriptor instead of
@@ -419,14 +412,12 @@ func New(opts Options) (CommitLog, error) {
 	}
 	// Options where a negative is not a value any caller can mean.
 	//
-	// Four of them are here because of one defect wearing four hats: each is
+	// Three of them are here because of one defect wearing three hats: each is
 	// defaulted by a test for ZERO, because zero is the unset value, and a test
 	// for zero reads as "the caller supplied a number" for every value that is
 	// not exactly the zero value. So a negative passed the arm that exists to
 	// catch a missing one and arrived somewhere that could not cope:
 	//
-	//   CompactMaxGoroutines  make(chan struct{}, n)  panic: makechan: size out
-	//                                                 of range
 	//   HWCheckpointInterval  time.NewTicker(d)       panic: non-positive
 	//   CleanerInterval       time.NewTicker(d)       interval for NewTicker
 	//   MaxSegmentBytes       the split check         no panic — every append
@@ -452,7 +443,6 @@ func New(opts Options) (CommitLog, error) {
 		bad  bool
 		got  any
 	}{
-		{"CompactMaxGoroutines", opts.CompactMaxGoroutines < 0, opts.CompactMaxGoroutines},
 		{"MaxSegmentBytes", opts.MaxSegmentBytes < 0, opts.MaxSegmentBytes},
 		{"HWCheckpointInterval", opts.HWCheckpointInterval < 0, opts.HWCheckpointInterval},
 		{"CleanerInterval", opts.CleanerInterval < 0, opts.CleanerInterval},
@@ -494,7 +484,6 @@ func New(opts Options) (CommitLog, error) {
 
 	compactCleanerOpts := compactCleanerOptions{
 		Name:               opts.Name,
-		MaxGoroutines:      opts.CompactMaxGoroutines,
 		MinAge:             opts.CompactMinAge,
 		TombstoneRetention: opts.CompactTombstoneRetention,
 	}
