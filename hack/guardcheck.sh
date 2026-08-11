@@ -957,6 +957,36 @@ run_guard "a refused delete batch deletes nothing" tier_state.go   '	stores := m
 # budget the same, which is exactly the single shared budget this replaced.
 run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFor(segments[i].tier)' '			b = budgetFor("")'   '^TestOneTiersBudgetDoesNotShrinkAnothers$'
 
+# A segment created while a codec is configured is block-framed. Neutralized by
+# never blocking, which is a log that silently ignores its Compression setting
+# and writes raw — every message still reads back, so the test that only read
+# messages back passed under exactly this break. It now asks the FILES.
+run_guard "a codec makes new segments blocked" segment.go   '		s.blockMode = s.codec != compress.None' '		s.blockMode = false'   '^TestTurningCompressionOnLeavesExistingSegmentsRaw$'
+
+# CopyTier reads the source descriptor BEFORE copying a single object, so a
+# handover it is going to refuse leaves the destination untouched. Neutralized
+# by moving the read after the copy: still refused, but with 300 objects already
+# in a destination nothing will ever claim.
+run_guard "the descriptor is read before anything is copied" copy_tier.go   '	desc, err := readStoreDescriptor(src)
+	if err != nil {
+		return errors.Wrap(err, "read source log descriptor")
+	}
+
+	// These three lines are the contract, and their ORDER is the contract. The
+	// manifest is published last because it is the commit: until it lands,
+	// nothing in dst is claimed by anything, so a copy that stops anywhere above
+	// leaves collectable orphans instead of a tier missing its records.
+	if err := copyTierObjects(src, dst, objs); err != nil {
+		return err
+	}' '	if err := copyTierObjects(src, dst, objs); err != nil {
+		return err
+	}
+
+	desc, err := readStoreDescriptor(src)
+	if err != nil {
+		return errors.Wrap(err, "read source log descriptor")
+	}'   '^TestCopyTierRefusesASourceWithNoDescriptor$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
