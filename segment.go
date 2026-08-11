@@ -685,6 +685,26 @@ func (s *segment) scanBlocks(size int64) error {
 			if errors.Is(err, ErrBlockFormat) {
 				return err
 			}
+			if phys == 0 {
+				// A whole header that does not parse, with nothing resolved
+				// before it, is not a torn tail — there is no tail, because
+				// nothing was resolved. Breaking here hands the ENTIRE file to
+				// discardTornTail below: one flipped byte in this header costs
+				// every record in the segment, the open still SUCCEEDS, and the
+				// log comes up reporting itself empty. A high watermark is then
+				// clamped down to match, so the loss is durable before anything
+				// notices.
+				//
+				// Refuse for the reason the version check just above gives:
+				// dropping bytes we merely failed to understand is not
+				// recovery. A partial write leaves a PREFIX, so a header that
+				// is entirely present is the header that was written — the
+				// genuine cut-inside-the-first-block cases break out above (too
+				// few bytes for a header) and below (payload short of what the
+				// header promises), and both still discard as they did.
+				return errors.Wrapf(err,
+					"first block header of a %d byte segment", size)
+			}
 			break // garbage where a header should be: a partial flush
 		}
 		physLen := int64(blockHeaderLen) + int64(cLen)

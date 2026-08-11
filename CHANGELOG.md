@@ -5,6 +5,32 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A corrupt first block header discarded the whole segment, and the open
+  still succeeded.** `scanBlocks` walks a chain of block headers, and a header
+  it cannot resolve ends the walk rather than failing it — right for a torn
+  tail, since everything before the cut is intact and refusing would take every
+  sealed segment down with the active one. But the walk then hands the distance
+  between where it stopped and the end of the file to `discardTornTail`, and
+  when the FIRST header is the one that did not parse it had got nowhere: the
+  "torn tail" was the entire segment.
+
+  So one flipped byte in that header truncated the whole file, and `New`
+  returned no error. The log came up empty and the high-watermark checkpoint was
+  clamped down to match it — fifty records to none, durably, with a log warning
+  as the only trace. A replica doing that on restart comes back claiming it has
+  recorded nothing, and a leader then truncates its own tail to agree.
+
+  A header that is entirely present is the header that was written, because a
+  partial write leaves a prefix. So an unparseable one at position 0 is now
+  refused, on the same reasoning the block-version check beside it already used:
+  dropping bytes we merely failed to understand is not recovery. The genuine
+  cut-inside-the-first-block cases — too few bytes for a header, or a payload
+  shorter than the header promises — are unaffected and still discard.
+
 ## v0.67.0 — 2026-08-11
 
 ### Fixed

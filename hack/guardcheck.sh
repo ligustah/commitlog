@@ -988,6 +988,13 @@ run_guard "a write with no entries is refused" segment.go   '	if len(entries) ==
 # lastOffset at the stale index tail for the next append to collide with.
 run_guard "a failed tail read fails the reconcile" segment.go   '			return errors.Wrapf(err, "reconcile index tail: read frame header at %d", startPos)' '			break'   '^TestAReconcileThatCannotReadTheTailFails$'
 
+# An unparseable FIRST block header refuses the open. Neutralized by the break
+# it used to share with a torn tail — which, having resolved nothing, hands the
+# whole file to discardTornTail: one flipped byte costs every record, the open
+# succeeds anyway, and the log comes up empty with its watermark clamped to
+# match.
+run_guard "a corrupt first block header refuses the open" segment.go   '			if phys == 0 {' '			if false {'   '^TestACorruptFirstBlockHeaderIsNotATornTail$'
+
 # Clean() puts the configured budget into the spec it builds. Neutralized by
 # building the empty spec again, which is the unbounded automatic pass this
 # replaced — and which the test named for that fix went on passing against,
