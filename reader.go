@@ -32,12 +32,17 @@ type contextReader interface {
 // Reader reads messages atomically from a CommitLog. Readers should not be
 // used concurrently.
 type Reader struct {
-	ctxReader   contextReader
-	offset      int64
-	log         *commitLog
-	uncommitted bool
-	noWait      bool // never block for future appends
-	spec        readSpec
+	ctxReader contextReader
+	offset    int64
+	log       *commitLog
+	// spec is the whole of the caller's request. There were two more fields
+	// here, `uncommitted` and `noWait`, copied out of it at construction and then
+	// never read by anything — the readers that act on those answers
+	// (uncommittedReader, committedReader) carry their own. Write-only state,
+	// which is invisible to staticcheck because a write counts as a use, and
+	// invisible to review because a field named after a real concept reads as
+	// though something consults it.
+	spec readSpec
 	// prefix serves a KeyPrefix read, skipping past non-matching records over
 	// sealed segments instead of reading them. Nil for an unfiltered read, and
 	// exhausted (then nil) once the read reaches the live tail.
@@ -67,11 +72,9 @@ func (l *commitLog) NewReader(opts ...ReadOption) (*Reader, error) {
 		return nil, err
 	}
 	r := &Reader{
-		offset:      spec.offset,
-		log:         l,
-		uncommitted: spec.uncommitted,
-		noWait:      !spec.follow,
-		spec:        spec,
+		offset: spec.offset,
+		log:    l,
+		spec:   spec,
 	}
 	if spec.prefixSet {
 		r.prefix = newPrefixSource(l, spec)
