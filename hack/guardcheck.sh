@@ -994,12 +994,12 @@ run_guard "a failed tail read fails the reconcile" segment.go   '			return error
 # succeeds, and the watermark is clamped down to the empty log it just made.
 run_guard "a torn tail stops at the watermark" segment.go   '	if committedThrough >= s.BaseOffset && s.lastOffset < committedThrough {' '	if false {'   '^TestATornTailIsNotDiscardedBelowTheWatermark$'
 
-# An unparseable FIRST block header refuses the open. Neutralized by the break
-# it used to share with a torn tail — which, having resolved nothing, hands the
-# whole file to discardTornTail: one flipped byte costs every record, the open
-# succeeds anyway, and the log comes up empty with its watermark clamped to
-# match.
-run_guard "a corrupt first block header refuses the open" segment.go   '			if phys == 0 {' '			if false {'   '^TestACorruptFirstBlockHeaderIsNotATornTail$'
+# An unparseable block header refuses the open at ANY offset. Neutralized by the
+# break it used to share with a torn tail, which discards from that point to the
+# end of the file: at byte 0 that is every record in the segment, and mid-file it
+# is every record past the flipped byte, acknowledged ones included. Either way
+# the open succeeded and the watermark was clamped down to match.
+run_guard "a corrupt block header refuses the open" segment.go   '			return errors.Wrapf(err, "block header at byte %d of %d", phys, size)' '			break'   '^TestACorruptBlockHeaderIsNotATornTail$'
 
 # Clean() puts the configured budget into the spec it builds. Neutralized by
 # building the empty spec again, which is the unbounded automatic pass this

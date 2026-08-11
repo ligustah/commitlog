@@ -5,6 +5,27 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A corrupt block header mid-segment still discarded every record after it.**
+  v0.67.1 stopped `scanBlocks` discarding the whole file when the FIRST header
+  did not parse, but left the same walk discarding from any later bad header to
+  the end of the file — which is every record beyond the flipped byte,
+  acknowledged ones included. A single corrupted codec field halfway through a
+  segment cost twenty committed records, and the open still returned nil with
+  the watermark clamped down to match.
+
+  The rule is now the same at every offset, and simpler for it: tearing versus
+  corruption. A partial write leaves a *prefix*, so a torn tail always runs out
+  of file — a header the file is too short to hold, or a payload shorter than
+  its header promises — and both of those still discard, because that is what a
+  crash mid-append leaves. A header that is entirely present and does not parse
+  is corruption, and the open refuses. That is the same bound the raw walk gets
+  from the high watermark, applied where no offsets exist yet to compare
+  against.
+
 ## v0.67.1 — 2026-08-11
 
 ### Fixed

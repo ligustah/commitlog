@@ -685,27 +685,30 @@ func (s *segment) scanBlocks(size int64) error {
 			if errors.Is(err, ErrBlockFormat) {
 				return err
 			}
-			if phys == 0 {
-				// A whole header that does not parse, with nothing resolved
-				// before it, is not a torn tail — there is no tail, because
-				// nothing was resolved. Breaking here hands the ENTIRE file to
-				// discardTornTail below: one flipped byte in this header costs
-				// every record in the segment, the open still SUCCEEDS, and the
-				// log comes up reporting itself empty. A high watermark is then
-				// clamped down to match, so the loss is durable before anything
-				// notices.
-				//
-				// Refuse for the reason the version check just above gives:
-				// dropping bytes we merely failed to understand is not
-				// recovery. A partial write leaves a PREFIX, so a header that
-				// is entirely present is the header that was written — the
-				// genuine cut-inside-the-first-block cases break out above (too
-				// few bytes for a header) and below (payload short of what the
-				// header promises), and both still discard as they did.
-				return errors.Wrapf(err,
-					"first block header of a %d byte segment", size)
-			}
-			break // garbage where a header should be: a partial flush
+			// A header that is ENTIRELY PRESENT and does not parse is
+			// corruption, not tearing, and the two need opposite answers.
+			//
+			// A partial write leaves a PREFIX: the bytes that landed are the
+			// bytes that were written, in order. So a torn tail always runs out
+			// of file — which the two length checks around this one catch, above
+			// for a header the file is too short to hold and below for a payload
+			// shorter than the header promises. Both of those are still
+			// discarded, because that is what a crash mid-append leaves and
+			// recovering it is what this walk is for.
+			//
+			// Reaching HERE means the bytes are all there and wrong, and
+			// discarding from this point would drop everything after it too. At
+			// phys 0 that was the whole segment; anywhere else it is still every
+			// record beyond the flipped byte, INCLUDING acknowledged ones — a
+			// corrupt header halfway through cost twenty committed records and
+			// the open still returned nil, with the watermark clamped down to
+			// match the log it had just shortened.
+			//
+			// So refuse, for the reason the version check just above already
+			// gives: dropping bytes we merely failed to understand is not
+			// recovery. It is the same rule the raw walk enforces with the high
+			// watermark, applied where no offsets exist yet to compare against.
+			return errors.Wrapf(err, "block header at byte %d of %d", phys, size)
 		}
 		physLen := int64(blockHeaderLen) + int64(cLen)
 		if phys+physLen > size {
