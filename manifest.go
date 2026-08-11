@@ -396,7 +396,7 @@ func (l *commitLog) TierManifest() ([]TierObject, error) {
 	return l.readMergedTierManifest()
 }
 
-// adoptTierManifest materialises segments this log does not have but the store's
+// adoptTierManifestLocked materialises segments this log does not have but the store's
 // manifest describes, by opening them over their store objects.
 //
 // This is what makes a tier self-contained in practice: a process that has the

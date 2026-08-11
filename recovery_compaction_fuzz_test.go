@@ -79,7 +79,7 @@ const (
 
 func fzKey(i int) string { return fmt.Sprintf("k%d", i) }
 
-// txnHeaders returns the pid/epoch/seq headers a transactional record carries,
+// fzTxnHeaders returns the pid/epoch/seq headers a transactional record carries,
 // which StripBelow removes and Aborted keys off.
 func fzTxnHeaders() map[string][]byte {
 	return map[string][]byte{

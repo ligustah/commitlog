@@ -43,7 +43,7 @@ func specLog(t *testing.T) (*commitLog, func(m *Message) int64) {
 	return l, app
 }
 
-// readAll returns every message currently in the log keyed by offset.
+// readAllMsgs returns every message currently in the log keyed by offset.
 func readAllMsgs(t *testing.T, l *commitLog) map[int64]SerializedMessage {
 	out := map[int64]SerializedMessage{}
 	oldest := l.OldestOffset()

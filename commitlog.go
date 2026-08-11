@@ -1434,12 +1434,7 @@ func (l *commitLog) Delete() error {
 	return removeLogDir(l.Path)
 }
 
-// removeAllWithRetry removes the directory tree, retrying briefly. On Windows a
-// concurrent reader's in-flight segment mmap/handle can still block removal for
-// a moment after the log's own segments are closed — the reader releases it as
-// soon as its read observes the deletion (ReadMessage returns ErrCommitLogDeleted),
-// so a short retry covers that window. On Unix the first attempt always succeeds
-// (an open file is unlinkable), so there is no added cost there.
+// IsDeleted returns true if Delete has run against this log.
 func (l *commitLog) IsDeleted() bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -2009,11 +2004,6 @@ func (l *commitLog) IsConcurrencyControlEnabled() bool {
 	return l.Options.ConcurrencyControl
 }
 
-// checkAndPerformSplit determines if a new log segment should be rolled out
-// either because the active segment is full or MaxSegmentAge has passed since
-// the first message was written to it. It then performs the split if eligible,
-// returning any error resulting from the split. The returned bool indicates if
-// a split was performed.
 // checkAndPerformSplitLocked is checkAndPerformSplit for callers that do NOT
 // already hold appendMu — currently the cleaner loop, which rolls on its own
 // ticker with no append involved.
@@ -2028,8 +2018,14 @@ func (l *commitLog) checkAndPerformSplitLocked() (bool, error) {
 	return l.checkAndPerformSplit()
 }
 
-// checkAndPerformSplit requires appendMu, since rolling a segment changes which
-// segment the caller's append lands in.
+// checkAndPerformSplit determines if a new log segment should be rolled out
+// either because the active segment is full or MaxSegmentAge has passed since
+// the first message was written to it. It then performs the split if eligible,
+// returning any error resulting from the split. The returned bool indicates if
+// a split was performed.
+//
+// It requires appendMu, since rolling a segment changes which segment the
+// caller's append lands in.
 func (l *commitLog) checkAndPerformSplit() (bool, error) {
 	// Do this in a loop because segment splitting may fail due to a competing
 	// thread performing the split at the same time. If this happens, we just

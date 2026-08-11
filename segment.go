@@ -259,12 +259,12 @@ type offloadMeta struct {
 	BlockMode      bool
 }
 
-// offloadTo uploads the segment's log bytes to store under key and swaps the
-// backing to a read-only storeBacking. The segment must be sealed and not
-// already offloaded. When cache is non-nil (tiered storage, option 2) it also
-// uploads the index object and drops the local index, so no per-segment index
-// file remains on local disk; reads then fetch the index into the shared cache
-// on demand. Otherwise the index stays local (option 1).
+// uploadTo uploads the segment's log bytes to store under key and returns the
+// metadata naming what it wrote. The segment must be sealed and not already
+// offloaded. When cache is non-nil (tiered storage, option 2) it also uploads
+// the index object, and attachOffloaded then drops the local index so no
+// per-segment index file remains on local disk; reads fetch it into the shared
+// cache on demand. Otherwise the index stays local (option 1).
 //
 // It only UPLOADS. Nothing local is dropped and no backing is swapped, because
 // until the tier manifest names these objects the offload is not committed, and

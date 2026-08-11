@@ -7,8 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// tieredLog builds a log with some sealed segments offloaded, and returns it
-// with its store.
 // isStoreMetaKey reports whether a store object DESCRIBES the log rather than
 // holding it: the manifest says what the tier holds, the descriptor says what
 // the log is. Neither is a segment, and every "objects in the store" count in
