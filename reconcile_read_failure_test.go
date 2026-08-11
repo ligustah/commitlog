@@ -26,7 +26,17 @@ import (
 //
 // Asserting only the error would accept an implementation that returned the
 // error and discarded the tail — which trades a duplicate record for a lost
-// one. durable_streams caught that gap in the first version of this test.
+// one. durable_streams caught that gap in the first version of this test, and
+// then caught it a second time in the version written to close it.
+//
+// Both misses came from HOW the read failure was injected. Wrapping the backing
+// in a failing type defeats discardTornTail, which type-asserts
+// s.backing.(*localBacking) and returns nil for anything else — so the discard
+// under test could not run, and a patch that called it changed nothing the
+// fixture could see. The failure is therefore injected by closing the segment's
+// own file handle: reads fail for real, the backing stays a *localBacking, and
+// os.Truncate works through the PATH, so the discard path stays live and a
+// wrong implementation really does destroy the bytes.
 func TestAReconcileThatCannotReadTheTailFails(t *testing.T) {
 	opts := Options{
 		Path:                 tempDir(t),
@@ -63,40 +73,43 @@ func TestAReconcileThatCannotReadTheTailFails(t *testing.T) {
 	seg.Lock()
 	require.NoError(t, seg.Index.reset())
 	seg.firstOffset, seg.lastOffset = -1, -1
-	realBacking := seg.backing
-	// Embedded, so everything except the data read still works: the index lives
-	// in its own file, and Close still reaches the real backing underneath.
-	seg.backing = &readFailingBacking{realBacking}
+	lb, ok := seg.backing.(*localBacking)
+	require.True(t, ok, "the fixture needs the real local backing: closing its "+
+		"handle is what makes the read fail while leaving the discard path live")
+	require.NoError(t, lb.f.Close())
 	seg.Unlock()
 
 	rerr := seg.reconcileIndexTailRaw()
 
+	// A working handle again, so the assertions below can read the log. The old
+	// one is closed for good; reopening the path is what the retry this error is
+	// supposed to provoke would do anyway.
 	seg.Lock()
-	seg.backing = realBacking
+	fresh, oerr := openBackingWithRetry(logPath)
+	require.NoError(t, oerr)
+	seg.backing = fresh
 	seg.Unlock()
 
-	require.ErrorIs(t, rerr, errInjectedBackingRead,
+	require.ErrorIs(t, rerr, os.ErrClosed,
 		"a reconcile whose read of the tail failed reported success, leaving "+
 			"lastOffset at the stale index tail for the next append to collide with")
 
-	// The other half: the tail is still there to retry over. Asserted by
-	// REBUILDING from the log rather than by comparing the file size, because a
-	// byte count cannot fail here — discardTornTail type-asserts *localBacking,
-	// and behind the injected wrapper it returns without truncating anything.
-	// An implementation that discarded the tail would still leave the file its
-	// original length, and a size assertion would sail through while the
-	// records were unreachable.
-	//
-	// Rebuilding catches both the file truncation and the bookkeeping one, and
-	// it is the property that actually matters: a failed open has to be
-	// RETRYABLE, not merely non-destructive.
-	require.NoError(t, seg.rebuildIndexFromLog())
-	require.EqualValues(t, 6, seg.NextOffset()-1,
-		"the records did not survive the failed reconcile — a read that FAILED "+
-			"says nothing about what is on disk, so discarding the tail turns a "+
-			"transient IO error into permanent data loss")
-
+	// The other half, and the one two earlier versions of this test could not
+	// see: the bytes are still on disk. discardTornTail truncates through
+	// os.Truncate(lb.f.Name(), keep), which does not care that the handle is
+	// closed — so an implementation that discards the tail here really does
+	// shorten the file, and this assertion really does fail.
 	fi, err = os.Stat(logPath)
 	require.NoError(t, err)
-	require.Equal(t, sizeBefore, fi.Size(), "the log file changed length")
+	require.Equal(t, sizeBefore, fi.Size(),
+		"the failed reconcile truncated the log — a read that FAILED says "+
+			"nothing about what is on disk, so discarding the tail turns a "+
+			"transient IO error into permanent data loss")
+
+	// And that the records are reachable, not merely present: a discard that
+	// moved position without truncating leaves the file its original length.
+	// A failed open has to be RETRYABLE, not just non-destructive.
+	require.NoError(t, seg.rebuildIndexFromLog())
+	require.EqualValues(t, 6, seg.NextOffset()-1,
+		"the records did not survive the failed reconcile")
 }
