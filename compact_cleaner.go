@@ -972,31 +972,61 @@ func consolidateSegments(segments []*segment, maxRewrites int, budgetDur time.Du
 			out = append(out, seg)
 			continue
 		}
-		cleaned, err := seg.Cleaned()
+		cleaned, err := consolidateOne(seg, bw, sc)
 		if err != nil {
-			return nil, err
-		}
-		bw.reset(cleaned)
-		ss := newSegmentScannerCache(seg, sc)
-		defer ss.Close()
-		for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
-			if err := bw.add(ms); err != nil {
-				return nil, err
-			}
-		}
-		if err := bw.flush(); err != nil {
-			return nil, err
-		}
-		if err := cleaned.Sync(); err != nil {
-			return nil, err
-		}
-		if err := cleaned.Replace(seg); err != nil {
 			return nil, err
 		}
 		out = append(out, cleaned)
 		budget.note()
 	}
 	return append(out, segments[len(segments)-1]), nil
+}
+
+// consolidateOne rewrites one sealed segment's blocks verbatim at the pass's
+// target layout and installs the result.
+//
+// Separate from consolidateSegments only so the scanner's Close scopes to ONE
+// segment. Inline, its defer was the sole defer-in-loop in the package, and what
+// it deferred was not a file handle: Scan closes the stream itself the moment it
+// ends (see there), because on Windows an open read handle blocks the rename
+// that installs the rewrite. What Close still holds is the PIN, which
+// acquireBacking only takes for a tier-backed segment — so the leak was that
+// every already-consolidated segment's superseded object stayed referenced()
+// until the whole pass returned, instead of until its own iteration ended, and
+// nothing could reclaim them in between.
+//
+// bw and sc stay owned by the caller: one block writer and one decode-buffer
+// pair serve the entire pass, and handing each iteration its own would give up
+// exactly the reuse they exist for.
+func consolidateOne(seg *segment, bw *blockWriter, sc *blockCache) (*segment, error) {
+	cleaned, err := seg.Cleaned()
+	if err != nil {
+		return nil, err
+	}
+	bw.reset(cleaned)
+	ss := newSegmentScannerCache(seg, sc)
+	// Deliberately still AFTER Replace, which is where the inline defer put it
+	// too. The pin outlives the stream on purpose, and the scan may read through
+	// the backing after the stream is gone; releasing it before the swap would
+	// drop the claim on a backing that is about to be superseded. Scoping the
+	// release to the iteration is this function's point — moving it earlier
+	// within the iteration is a commit-point change, and a separate question.
+	defer ss.Close() // nolint: errcheck — read-only
+	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
+		if err := bw.add(ms); err != nil {
+			return nil, err
+		}
+	}
+	if err := bw.flush(); err != nil {
+		return nil, err
+	}
+	if err := cleaned.Sync(); err != nil {
+		return nil, err
+	}
+	if err := cleaned.Replace(seg); err != nil {
+		return nil, err
+	}
+	return cleaned, nil
 }
 
 // refreshDigest rebuilds and persists a segment's key digest after a clean
