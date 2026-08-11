@@ -173,7 +173,20 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	}
 
 	// Write new segments. Skip the last segment since we will not compact it.
-	// TODO: Join segments that are below the bytes limit.
+	//
+	// TODO: join adjacent segments that have shrunk below the bytes limit.
+	// Genuinely unbuilt — consolidateSegments is a different thing, rewriting
+	// blocks WITHIN one segment. Compaction only ever shrinks segments, so a
+	// long-lived compacted log accumulates small ones that each still cost a
+	// file set and a mapping; durable_streams reports 336-segment logs.
+	//
+	// Not done here because a join is not a rewrite. A segment is IDENTIFIED by
+	// its base offset — the file names, the tier manifest keys, the index and
+	// digest sidecars, and the reader's "which segment holds this offset" search
+	// all key off it — so merging two means one base offset ceases to exist, and
+	// every one of those has to agree about that at the same moment. The rewrite
+	// path never faces this: a replacement keeps its predecessor's base offset,
+	// which is exactly why it can swap under live readers.
 	//
 	// Classify every sealed segment, then SPEND the rewrite budget in
 	// DROP-DENSITY order — most droppable records first. Both the choice of

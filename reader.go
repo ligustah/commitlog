@@ -153,8 +153,14 @@ func (l *commitLog) newRecoveryReader(offset int64) (*Reader, error) {
 // ReadMessage should not be called concurrently, and the headersBuf slice
 // must have a capacity of at least HeaderBufferLen.
 //
-// TODO: Should this just return a MessageSet directly instead of a Message and
-// the MessageSet header values?
+// The bundled-return form this used to ask for as a TODO exists, as
+// ReadMessageMetadata — added beside this rather than replacing it, which is the
+// answer to the question and the reason it is not folded in here. That path
+// returns everything in one MessageMetadata, and pays for it: it does not
+// CRC-validate the payload, and its bytes are borrowed from the caller's buffer
+// rather than owned. This one checks the payload CRC and hands back memory the
+// caller keeps. Merging them would force that trade on every caller, so the
+// five return values stay.
 func (r *Reader) ReadMessage(ctx context.Context, headersBuf []byte) (SerializedMessage, int64, int64, uint64, error) {
 	for {
 		msg, offset, timestamp, leaderEpoch, err := r.readOne(ctx, headersBuf)
