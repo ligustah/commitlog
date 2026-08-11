@@ -32,6 +32,22 @@ library from that fork onward.
   begins, and with it the "a trim at the earliest end re-anchors rather than
   drops" invariant, which could not apply to an epoch that was never added.
 
+- **A refused epoch assignment could log nothing at all.** The refusal warning's
+  two cases are strict comparisons — `epoch < latestEpoch` and
+  `offset < latestOffset` — so an assignment of the epoch already latest, at an
+  offset at or after its own, fell between them: no entry written, nothing
+  logged, `nil` returned. Indistinguishable from a successful assign, at the
+  call and forever after.
+
+  There is now a default arm, so the switch is total by construction rather than
+  by having anticipated the cases. Requested by durable_streams, whose side
+  believed it held epoch history it had never been able to record; the silence,
+  not the refusal, is what cost them the investigation.
+
+  The two existing messages are unchanged apart from a trailing `%s` that was
+  never a format verb — `slog.Warn` takes attributes, not a format string — and
+  so was printed literally.
+
 ## v0.67.3 — 2026-08-11
 
 ### Fixed
