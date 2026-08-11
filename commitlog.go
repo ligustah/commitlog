@@ -1201,6 +1201,14 @@ func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, 
 	// answer provably is not. In practice it steps back once: a tie has to span
 	// the boundary to be here at all, and one clock tick does not usually span
 	// whole segments.
+	//
+	// Deliberately NOT resolved through current(), unlike the search below. This
+	// only picks where to start, and a rewrite can only DROP records, so a stale
+	// segment's LastWriteTime is at or after its replacement's — which makes the
+	// condition true at least as often and steps back at least as far. Erring
+	// backwards is free here: the forward loop simply searches one more segment
+	// that holds no match. Reading a stale field cannot produce a wrong ANSWER
+	// where it cannot produce a wrong STOPPING POINT.
 	for at > 0 && l.segments[at-1].LastWriteTime() >= timestamp {
 		at--
 	}
@@ -1320,6 +1328,16 @@ func (l *commitLog) LatestOffsetBeforeTimestamp(timestamp int64) (int64, error) 
 	// begins now rather than where it began: retention has taken everything
 	// under it, and answering with a record that is gone would be worse than
 	// refusing.
+	//
+	// Segment 0 is the one a maintenance pass is most likely to have just
+	// rewritten or removed, and this reads it unresolved on purpose. The error
+	// direction is what makes that safe: a rewrite only DROPS records, so the
+	// stale first write time is at or before its replacement's, and a stale entry
+	// makes this condition LESS likely to hold. So the reading can only ever
+	// refuse too rarely, never too often — and the case it then falls through to
+	// is a search that answers with the earliest surviving record at or after the
+	// target, which is a better answer than the refusal anyway. Resolving here
+	// would buy a slightly earlier ErrTimestampBeforeLog and nothing else.
 	if timestamp < l.segments[0].FirstWriteTime() {
 		return 0, ErrTimestampBeforeLog
 	}
