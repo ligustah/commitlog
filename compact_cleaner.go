@@ -181,12 +181,17 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// file set and a mapping; durable_streams reports 336-segment logs.
 	//
 	// Not done here because a join is not a rewrite. A segment is IDENTIFIED by
-	// its base offset — the file names, the tier manifest keys, the index and
-	// digest sidecars, and the reader's "which segment holds this offset" search
-	// all key off it — so merging two means one base offset ceases to exist, and
-	// every one of those has to agree about that at the same moment. The rewrite
-	// path never faces this: a replacement keeps its predecessor's base offset,
-	// which is exactly why it can swap under live readers.
+	// its base offset, so merging two means one base offset ceases to exist and
+	// the file names, tier manifest keys, sidecars and reader search must all
+	// agree about that at one moment. The rewrite path never faces this: a
+	// replacement keeps its predecessor's base offset, which is exactly why it
+	// can swap under live readers.
+	//
+	// docs/segment-join.md carries the design: the hazards, an ordered sketch,
+	// and the one constraint that is already settled — the replacement link
+	// itself tolerates a differing base offset (every consumer bounds only from
+	// above), but it becomes MANY-TO-ONE, so the l.segments splice has to retire
+	// both inputs in a single critical section or LocalBytes double-counts.
 	//
 	// Classify every sealed segment, then SPEND the rewrite budget in
 	// DROP-DENSITY order — most droppable records first. Both the choice of
