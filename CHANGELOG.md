@@ -5,6 +5,58 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A reconcile that could not read the tail reported success.**
+  `reconcileIndexTailRaw` walks the log frames the index does not yet cover.
+  When the read of a frame header failed it broke out of the loop, and that
+  path leaves `torn` false — so the function fell through to `return nil` and
+  the segment opened having reconciled nothing, with `lastOffset` at the stale
+  index tail while `position` was the file size. The next append then took its
+  offset from `NextOffset` and wrote a record at an offset the file already
+  held. That is the duplicate a replica was reported holding, and the open that
+  produced it had said it was fine.
+
+  Keeping the bytes on a failed read was always right; reporting success was
+  not. An open that cannot read the tail it is reconciling now fails, and the
+  caller retries it. Reported by durable_streams, who also established that
+  neither offset guard below catches this one — the under-reported tail means
+  the follower asks for a frame strictly *above* what the log claims.
+
+- **`AppendMessageSet` took the caller's offsets on trust.** `Append` derives
+  every offset from the segment's own tail and cannot produce a bad one;
+  `AppendMessageSet` takes the framing verbatim, and nothing on that path
+  compared those offsets to anything. A set starting at or below the tail was
+  written as-is, and the log then held two records claiming one offset.
+
+  A set must now hold at least one whole frame, start strictly above the log's
+  newest offset, and ascend; anything else returns `ErrMessageSetRefused` and
+  writes nothing. Strictly above rather than exactly next, because compaction
+  leaves holes and `ReadMessageSet` serves the survivors — a follower resuming
+  from a compacted source appends across a gap legitimately.
+
+- **A segment's tail could move backwards, and an empty set panicked it.**
+  `segment.write` took `lastOffset` by assignment, whichever direction the last
+  entry pointed; it is the field `NextOffset` derives from, so a segment that
+  lowers it hands out offsets that already name records. Now a max. Separately,
+  it indexes `entries[len(entries)-1]` and the block path takes `entries[:1]`,
+  both *after* the payload is on the backing, while `entriesForMessageSet`
+  yields nothing for any input shorter than one header — so a short or garbled
+  frame panicked a segment it had already appended bytes to. Refused before the
+  write now.
+
+### Changed
+
+- CI checks that a doc comment names the function it sits above
+  (`hack/docdrift.sh`). Go's convention is that a doc comment opens with its
+  function's name, so an opener naming something else means a rename or a move
+  left the doc behind — invisible to the compiler, to vet and to staticcheck.
+  Not the `ST*` comment-style family this repo declines: that asks whether a
+  comment is well-formed, this asks whether it is attached to the right
+  function. Six were.
+
 ## v0.66.2 — 2026-08-11
 
 ### Fixed
