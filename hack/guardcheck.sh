@@ -957,6 +957,31 @@ run_guard "a refused delete batch deletes nothing" tier_state.go   '	stores := m
 # budget the same, which is exactly the single shared budget this replaced.
 run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFor(segments[i].tier)' '			b = budgetFor("")'   '^TestOneTiersBudgetDoesNotShrinkAnothers$'
 
+# AppendMessageSet checks the caller's offsets against the tail. Neutralized by
+# accepting whatever arrives, which is what the path did before: a set starting
+# at or below the tail written verbatim, and the log holding one offset twice.
+run_guard "an appended set is checked against the tail" commitlog.go   '	if err := checkAppendedSet(segment.NextOffset()-1, entries); err != nil {
+		return nil, err
+	}' '	if false {
+		return nil, nil
+	}'   '^TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail$'
+
+# The segment's tail only ever moves forward. Neutralized by the assignment it
+# used to be, which lowers the field NextOffset is derived from.
+run_guard "a segment tail only moves forward" segment.go   '	if last.Offset > s.lastOffset {
+		s.lastOffset = last.Offset
+		s.lastWriteTime = last.Timestamp
+	}' '	s.lastOffset = last.Offset
+	s.lastWriteTime = last.Timestamp'   '^TestASegmentsTailNeverMovesBackwards$'
+
+# An empty entry list is refused BEFORE the payload is written. Neutralized by
+# dropping the check, which is a panic on a segment already appended to.
+run_guard "a write with no entries is refused" segment.go   '	if len(entries) == 0 {
+		return 0, errors.Wrap(ErrMessageSetRefused, "write with no entries")
+	}' '	if false {
+		return 0, nil
+	}'   '^TestASegmentRefusesAWriteWithNoEntries$'
+
 # A reconcile whose read of the tail failed must not report success. Neutralized
 # by the silent break it used to have, which leaves torn false and falls through
 # to `return nil` — a segment that opened having reconciled nothing, with
