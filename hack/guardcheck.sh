@@ -957,6 +957,12 @@ run_guard "a refused delete batch deletes nothing" tier_state.go   '	stores := m
 # budget the same, which is exactly the single shared budget this replaced.
 run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFor(segments[i].tier)' '			b = budgetFor("")'   '^TestOneTiersBudgetDoesNotShrinkAnothers$'
 
+# A reconcile whose read of the tail failed must not report success. Neutralized
+# by the silent break it used to have, which leaves torn false and falls through
+# to `return nil` — a segment that opened having reconciled nothing, with
+# lastOffset at the stale index tail for the next append to collide with.
+run_guard "a failed tail read fails the reconcile" segment.go   '			return errors.Wrapf(err, "reconcile index tail: read frame header at %d", startPos)' '			break'   '^TestAReconcileThatCannotReadTheTailFails$'
+
 # Clean() puts the configured budget into the spec it builds. Neutralized by
 # building the empty spec again, which is the unbounded automatic pass this
 # replaced — and which the test named for that fix went on passing against,
