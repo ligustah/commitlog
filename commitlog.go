@@ -1267,15 +1267,22 @@ func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, 
 // never learned, and both public timestamp lookups inherited it because
 // LatestOffsetBeforeTimestamp is defined in terms of the loop above.
 //
-// Resolving is necessary but NOT sufficient, which is the part worth keeping:
-// current() and the search are two steps, and a pass can replace the resolved
-// segment between them. That window is real and was observed — the first fix
-// resolved only, and the reproduction went from failing in 0.13s to failing in
-// 3s, which looks like a fix and is a narrower race. So it retries, the same
-// answer newSourceReader gives for the same two-step problem on the offset side,
-// under the same bound and the same segmentSwapped predicate: ErrSegmentClosed
-// and ErrSegmentReplaced are one condition wearing two names, and which one
-// surfaces depends only on where the caller happened to touch the segment.
+// Resolving is necessary but not sufficient: current() and the search are two
+// steps, and a pass can replace the resolved segment between them. So it
+// retries, the same answer newSourceReader gives for the same two-step problem
+// on the offset side, under the same bound and the same segmentSwapped
+// predicate — ErrSegmentClosed and ErrSegmentReplaced are one condition wearing
+// two names, and which one surfaces depends only on where the caller happened to
+// touch the segment.
+//
+// The honest limit, because the difference matters to anyone changing this: the
+// RESOLVE is covered — remove it and the test fails in 0.13s. The RETRY is not.
+// Its window is a few instructions wide, and with it removed that same test
+// passed 8 runs out of 8, having failed once at 3s in an earlier five-run
+// sample. So it is not registered in guardcheck, and it rests on that single
+// observation plus the precedent, not on a test that bites. Do not read its
+// absence from guardcheck as evidence it is unnecessary; read it as the window
+// being too narrow to schedule.
 //
 // Re-resolution starts from s, not from the segment just resolved, so each
 // attempt follows the replacement chain from the published entry rather than

@@ -1006,13 +1006,18 @@ run_guard "a corrupt block header refuses the open" segment.go   '			return erro
 # which is what the offset path stopped doing when the same symptom was fixed for
 # readers: mid-pass the list hands out replaced segments, and searching one
 # answers ErrSegmentReplaced, so the lookup fails on a healthy log.
-run_guard "a timestamp lookup resolves the segment" commitlog.go   '		seg, ok := s.current()' '		seg, ok := s, true'   '^TestTimestampLookupsWhileCompactionReplacesSegments$'
+run_guard "a timestamp lookup resolves the segment" commitlog.go   '	for range readerResolveAttempts {
+		seg, ok := s.current()' '	for range readerResolveAttempts {
+		seg, ok := s, true'   '^TestTimestampLookupsWhileCompactionReplacesSegments$'
 
-# And retries when the pass replaces that segment BETWEEN resolving it and
-# searching it. Neutralized by a single attempt, which is the resolve-only fix
-# that looked correct: it moved the reproduction from 0.13s to 3s rather than
-# closing it, because current() and the search are two steps.
-run_guard "a timestamp lookup retries a swap" commitlog.go   '	for range readerResolveAttempts {' '	for range 1 {'   '^TestTimestampLookupsWhileCompactionReplacesSegments$'
+# The RETRY in that same helper is deliberately NOT registered here. It covers
+# the window between resolving the segment and searching it, which is a few
+# instructions wide: with the retry removed the reproduction passed 8 runs out of
+# 8, having failed once at 3s in an earlier five-run sample. A guard whose test
+# goes red one time in tens is worse than no guard — guardcheck's whole value is
+# that a red means something — so the retry stands on the observed failure and on
+# newSourceReader's precedent, not on a claim of coverage. See the comment on
+# findEntryByTimestampResolving.
 
 # Clean() puts the configured budget into the spec it builds. Neutralized by
 # building the empty spec again, which is the unbounded automatic pass this
