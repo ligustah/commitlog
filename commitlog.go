@@ -1369,7 +1369,15 @@ func (l *commitLog) SetHighWatermark(hw int64) {
 		l.notifyHWChange()
 	}
 	l.mu.Unlock()
-	// TODO: should we flush the HW to disk here?
+	// No flush here, and the question is settled rather than open — it stood as a
+	// TODO long after checkpointHWLoop answered it. The HW reaches disk on a
+	// ticker (HWCheckpointInterval, 5s by default) and again on Close, so a
+	// checkpoint is at most that stale; recovery is written to expect exactly
+	// that and clamps to what the log can prove it holds.
+	//
+	// Flushing here instead would put an fsync on the commit path, once per
+	// watermark advance, to save at most one tick of staleness — and a checkpoint
+	// AHEAD of the data it describes is the dangerous direction, not behind it.
 }
 
 // notifyHWChange signals all HW waiters to wake up because the HW has changed.
