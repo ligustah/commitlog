@@ -1230,7 +1230,7 @@ func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, 
 	// iteration: everything skipped is a segment holding no record at or after
 	// the target, which past the answer's segment means an empty one.
 	for i := at; i < len(l.segments); i++ {
-		entry, err := l.segments[i].findEntryByTimestamp(timestamp)
+		entry, err := findEntryByTimestampResolving(l.segments[i], timestamp)
 		if err == nil {
 			return entry.Offset, nil
 		}
@@ -1244,7 +1244,61 @@ func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, 
 	}
 	// Nothing in the log is at or after the target, so it is beyond the end:
 	// answer with the next assignable offset.
+	//
+	// Not resolved through current(), unlike the loop above, because the LAST
+	// segment is the active one and no pass touches it: compaction and
+	// consolidation both walk segments[:len-1] and re-append the last unchanged,
+	// and retention deletes from the oldest end. So there is no mid-pass state
+	// for this one to be in, and an arm for it would be an arm nothing reaches.
 	return l.segments[len(l.segments)-1].NextOffset(), nil
+}
+
+// findEntryByTimestampResolving searches the segment that CURRENTLY holds s's
+// records for the first entry at or after timestamp, riding out a compaction
+// pass replacing that segment underneath the search.
+//
+// A pass rewrites and removes segments as it walks them and swaps l.segments
+// only at the very end, so mid-pass the published list hands out segments that
+// are already replaced or gone. Searching one directly answers ErrSegmentReplaced
+// — which the caller correctly refuses to read as "not in this segment" and
+// returns as an error — so a lookup by timestamp failed at random on a healthy
+// log, for records sitting in the replacement. The offset path has resolved
+// through current() since that same symptom was fixed for readers; this path
+// never learned, and both public timestamp lookups inherited it because
+// LatestOffsetBeforeTimestamp is defined in terms of the loop above.
+//
+// Resolving is necessary but NOT sufficient, which is the part worth keeping:
+// current() and the search are two steps, and a pass can replace the resolved
+// segment between them. That window is real and was observed — the first fix
+// resolved only, and the reproduction went from failing in 0.13s to failing in
+// 3s, which looks like a fix and is a narrower race. So it retries, the same
+// answer newSourceReader gives for the same two-step problem on the offset side,
+// under the same bound and the same segmentSwapped predicate: ErrSegmentClosed
+// and ErrSegmentReplaced are one condition wearing two names, and which one
+// surfaces depends only on where the caller happened to touch the segment.
+//
+// Re-resolution starts from s, not from the segment just resolved, so each
+// attempt follows the replacement chain from the published entry rather than
+// from a link that may itself now be stale.
+//
+// A gone segment reports ErrEntryNotFound rather than an error: it was rewritten
+// to nothing or deleted outright, so there is no entry in it to find, and the
+// caller's not-found arm already does the right thing with that — move to the
+// next segment. A genuine read failure is untouched and still reaches the
+// caller, which is the distinction that arm exists to draw.
+func findEntryByTimestampResolving(s *segment, timestamp int64) (*entry, error) {
+	var err error
+	for range readerResolveAttempts {
+		seg, ok := s.current()
+		if !ok {
+			return nil, ErrEntryNotFound
+		}
+		var e *entry
+		if e, err = seg.findEntryByTimestamp(timestamp); err == nil || !segmentSwapped(err) {
+			return e, err
+		}
+	}
+	return nil, err
 }
 
 // LatestOffsetBeforeTimestamp returns the latest offset whose timestamp is less

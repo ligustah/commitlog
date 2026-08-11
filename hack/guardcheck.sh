@@ -1001,6 +1001,19 @@ run_guard "a torn tail stops at the watermark" segment.go   '	if committedThroug
 # the open succeeded and the watermark was clamped down to match.
 run_guard "a corrupt block header refuses the open" segment.go   '			return errors.Wrapf(err, "block header at byte %d of %d", phys, size)' '			break'   '^TestACorruptBlockHeaderIsNotATornTail$'
 
+# A timestamp lookup searches the segment that currently HOLDS the records, not
+# the one the published list names. Neutralized by taking the slice entry as-is,
+# which is what the offset path stopped doing when the same symptom was fixed for
+# readers: mid-pass the list hands out replaced segments, and searching one
+# answers ErrSegmentReplaced, so the lookup fails on a healthy log.
+run_guard "a timestamp lookup resolves the segment" commitlog.go   '		seg, ok := s.current()' '		seg, ok := s, true'   '^TestTimestampLookupsWhileCompactionReplacesSegments$'
+
+# And retries when the pass replaces that segment BETWEEN resolving it and
+# searching it. Neutralized by a single attempt, which is the resolve-only fix
+# that looked correct: it moved the reproduction from 0.13s to 3s rather than
+# closing it, because current() and the search are two steps.
+run_guard "a timestamp lookup retries a swap" commitlog.go   '	for range readerResolveAttempts {' '	for range 1 {'   '^TestTimestampLookupsWhileCompactionReplacesSegments$'
+
 # Clean() puts the configured budget into the spec it builds. Neutralized by
 # building the empty spec again, which is the unbounded automatic pass this
 # replaced — and which the test named for that fix went on passing against,

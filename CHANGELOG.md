@@ -5,6 +5,34 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A lookup by timestamp failed at random while compaction ran.**
+  A pass rewrites and removes segments as it walks them and swaps the published
+  segment list only at the very end, so for the whole of it the log hands out
+  segments that are already replaced or gone. The offset path resolves every
+  candidate through `current()` for exactly that reason; the timestamp path
+  walked the list directly, so it searched a replaced segment and got
+  `ErrSegmentReplaced` — which it correctly refuses to read as "not in this
+  segment" and returns as an error. Both public lookups failed that way, since
+  `LatestOffsetBeforeTimestamp` is defined in terms of
+  `EarliestOffsetAfterTimestamp`, and the records were sitting in the
+  replacement the whole time. A consumer resuming as-of a timestamp against a
+  compacting log saw it as an intermittent, unexplained failure.
+
+  Resolving is necessary but not sufficient, and that is the part worth
+  recording: `current()` and the search are two steps, and a pass can replace
+  the resolved segment between them. The resolve-only fix moved a deterministic
+  reproduction from failing in 0.13s to failing in 3s, which reads as a fix and
+  is a narrower race. So the lookup now retries a swap, the same answer
+  `newSourceReader` already gives for the same two-step problem on the offset
+  side, under the same bound and the same predicate.
+
+  Found as a once-in-a-suite flake in an unrelated test, and reproduced by
+  driving compaction rather than waiting for the cleaner's interval.
+
 ## v0.67.2 — 2026-08-11
 
 ### Fixed
