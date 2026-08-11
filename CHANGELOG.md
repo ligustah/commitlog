@@ -31,15 +31,33 @@ machine set the option, and pre-v1 there is nothing to migrate.
   there. A caller wanting shorter passes sets `CleanRewriteBudget`, which was
   doing the work all along.
 
-- **Two write-only fields on `Reader`** (`uncommitted`, `noWait`), both copied
-  out of the `readSpec` at construction and then read by nothing. Internal, so
-  no caller is affected. Noted because of how it hid: `uncommittedReader` and
-  `committedReader` carry their own fields of the same names, so the reads look
-  present when you grep — they are just not reads of these.
+- **Five write-only struct fields**, all internal, so no caller is affected.
+  A sweep of every struct in the package for fields that are written and never
+  read now comes back empty.
+
+  | field | was |
+  |---|---|
+  | `Reader.uncommitted`, `Reader.noWait` | copied out of the `readSpec` at construction |
+  | `commitLog.name` | set to `filepath.Base(path)` |
+  | `commitLog.syncJoined` | incremented per joiner, reset per flush |
+  | `prefixRun.segIdx` | set at construction, always `0` |
+
+  `prefixRun.segIdx` took two more things with it: `planRuns`' `segIdx`
+  parameter, whose only use was setting the field, and the literal `0` both call
+  sites passed. The concept was left from a design where runs were planned
+  *across* segments; today `planRuns` is called once per segment.
 
   Write-only state is the hard kind to find. staticcheck cannot flag it, because
   a write counts as a use; review cannot, because a field named after a real
-  concept reads as though something consults it.
+  concept reads as though something consults it. `Reader`'s pair had extra cover:
+  `uncommittedReader` and `committedReader` carry their own fields of the same
+  names, so the reads look present when you grep — they are just not reads of
+  these.
+
+  Deliberately kept: `commitLog.syncLeaders` and `syncFollowers`, which are also
+  written only by `Sync` but *are* read, by `sync_batch_probe_test.go`. Only a
+  test reading a field is not a reason to remove it — see the
+  `OverrideHighWatermark` note below for what that mistake costs.
 
 ### Added
 
