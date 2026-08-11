@@ -221,6 +221,47 @@ func TestAHighWatermarkAboveTheLogIsNotInherited(t *testing.T) {
 			"as committed by the act of being written")
 }
 
+// OverrideHighWatermark builds the one state nothing else in this API can: a
+// log holding records ABOVE the commit boundary.
+//
+// This is the method's actual purpose, and it is asserted here because the
+// previous test — TestOverrideHighWatermark — only checked that a lower value
+// was applied. That is the mechanism, not the reason, and a test of the
+// mechanism could not say what the method was for. So a sweep that read its doc
+// ("a caller that has some other reason") and found no production caller deleted
+// it, and neither this test nor the doc contradicted that. durable_streams did,
+// with a measurement: the swap to SetHighWatermark silently no-opped and turned
+// their fetch test red.
+//
+// Hence the shape below. Reaching this state by appending is impossible for a
+// caller that commits as it appends — the watermark ends at the newest record —
+// and SetHighWatermark cannot walk it back. Anything testing a path that serves
+// only committed records needs exactly this.
+func TestOverrideHighWatermarkBuildsRecordsAboveTheBoundary(t *testing.T) {
+	l, cleanup := setup(t)
+	defer l.Close()
+	defer cleanup()
+
+	for i := 0; i < 3; i++ {
+		_, err := l.Append([]*Message{{Value: []byte(fmt.Sprintf("v:%d", i))}})
+		require.NoError(t, err)
+	}
+	l.SetHighWatermark(l.NewestOffset())
+	require.Equal(t, int64(2), l.HighWatermark(), "the fixture starts fully committed")
+
+	// The substitution that looked equivalent and was not.
+	l.SetHighWatermark(1)
+	require.Equal(t, int64(2), l.HighWatermark(),
+		"SetHighWatermark lowered the boundary; it is monotonic and must no-op here")
+
+	l.OverrideHighWatermark(1)
+	require.Equal(t, int64(1), l.HighWatermark(),
+		"the log cannot be put into the state a fetch path serving only committed "+
+			"records has to be tested against")
+	require.Greater(t, l.NewestOffset(), l.HighWatermark(),
+		"records above the commit boundary is the whole point of this call")
+}
+
 // The high watermark never goes backwards through SetHighWatermark.
 //
 // This replaces TestOverrideHighWatermark, and the swap is the point. The log

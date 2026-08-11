@@ -1380,6 +1380,17 @@ func (l *commitLog) SetHighWatermark(hw int64) {
 	// AHEAD of the data it describes is the dangerous direction, not behind it.
 }
 
+// OverrideHighWatermark sets the high watermark using the given value, even when
+// it is below the current one — the deliberate exception to SetHighWatermark's
+// monotonicity. See the interface doc for the state it exists to construct, and
+// for why deleting it was wrong.
+func (l *commitLog) OverrideHighWatermark(hw int64) {
+	l.mu.Lock()
+	l.hw = hw
+	l.notifyHWChange()
+	l.mu.Unlock()
+}
+
 // notifyHWChange signals all HW waiters to wake up because the HW has changed.
 // This must be called within the log mutex.
 func (l *commitLog) notifyHWChange() {

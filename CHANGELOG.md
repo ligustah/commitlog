@@ -9,9 +9,8 @@ library from that fork onward.
 
 ### Removed
 
-Two pieces of API deleted in a complexity sweep. Both are breaking and both are
-free: nothing in any repo on this machine called either one, and pre-v1 there is
-nothing to migrate.
+Deleted in a complexity sweep. Breaking and free: nothing in any repo on this
+machine set the option, and pre-v1 there is nothing to migrate.
 
 - **`Options.CompactMaxGoroutines`.** An unbounded public `int` whose entire
   meaningful range was `{1, everything else}`. `loadOrBuildDigests` clamped it to
@@ -32,16 +31,6 @@ nothing to migrate.
   there. A caller wanting shorter passes sets `CleanRewriteBudget`, which was
   doing the work all along.
 
-- **`CommitLog.OverrideHighWatermark`.** The deliberate exception to
-  `SetHighWatermark`'s monotonicity, justified in its doc by "a caller that has
-  some other reason to know the committed boundary has moved backwards". There
-  was no such caller. The only production one was a `durable_streams` pairing
-  removed when v0.46.0 made `Truncate` bring the watermark down together with the
-  records it deletes — which is where lowering belongs, because there the records
-  really are gone.
-
-  Use `SetHighWatermark`, or `Truncate` when records are actually being removed.
-
 - **Two write-only fields on `Reader`** (`uncommitted`, `noWait`), both copied
   out of the `readSpec` at construction and then read by nothing. Internal, so
   no caller is affected. Noted because of how it hid: `uncommittedReader` and
@@ -54,13 +43,32 @@ nothing to migrate.
 
 ### Added
 
-- **`TestTheHighWatermarkNeverGoesBackwards`**, replacing
-  `TestOverrideHighWatermark`, and the swap is the substantive half of the
-  change above. The old test asserted the *exception*; monotonicity — the rule —
-  had no test at all, from the day it was written. The escape hatch was covered
-  and the contract was not. The new test is registered with guardcheck (now 100
-  guards), and its neutralization is exactly what the deleted method did, so
-  reintroducing the exception turns the rule's own test red.
+- **`TestTheHighWatermarkNeverGoesBackwards`.** `SetHighWatermark` is monotonic,
+  and that rule had no test at all, from the day it was written — while
+  `OverrideHighWatermark`, the *exception* to it, did. The escape hatch was
+  covered and the contract was not. Registered with guardcheck (now 100 guards).
+
+- **`TestOverrideHighWatermarkBuildsRecordsAboveTheBoundary`**, replacing
+  `TestOverrideHighWatermark`, which asserted only that a lower value was
+  applied — the mechanism, not the reason.
+
+  `OverrideHighWatermark` was deleted during this sweep and restored before
+  release. Recorded because the failure is instructive rather than incidental.
+  Its doc justified it with "a caller that has some other reason", and a doc that
+  will not name its caller reads as one having none, so the sweep looked for
+  production call sites, found none, and read the remaining test uses as
+  incidental. One was not: it was the only construction of the above-watermark
+  state, performing a real lowering. The substitution looked equivalent — the
+  watermark there was assumed to be `-1`, making the call a raise — and was not,
+  because the caller commits as it appends. `SetHighWatermark` silently no-opped
+  and turned a downstream fetch test red. Caught by `durable_streams`, who
+  measured it.
+
+  Two things changed as a result. The method's doc now names the state it exists
+  to build, and this test asserts that state rather than the mechanism, so the
+  next sweep meets a reason instead of a shrug. **A capability whose only
+  consumers are tests is still a capability;** what made it invisible was the doc
+  declining to say what it was for.
 
 ## v0.67.4 — 2026-08-11
 

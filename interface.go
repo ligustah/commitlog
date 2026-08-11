@@ -322,14 +322,33 @@ type CommitLog interface {
 	// Committed data does not become uncommitted just because a caller passed a
 	// smaller number, and a late or reordered call must not walk the watermark
 	// backwards under readers that have already been told what is committed.
-	//
-	// There is no override. Lowering the watermark means telling readers that
-	// records they were already entitled to see are no longer committed, and the
-	// one caller that legitimately does that is Truncate, which lowers it itself
-	// as part of removing the records. An escape hatch for "some other reason"
-	// existed here and had no such reason behind it: its only production caller
-	// was a durable_streams pairing deleted when Truncate took the job over.
 	SetHighWatermark(hw int64)
+
+	// OverrideHighWatermark sets the high watermark using the given value, even
+	// when it is BELOW the current one. The deliberate exception to
+	// SetHighWatermark's monotonicity.
+	//
+	// It exists to construct a log holding records ABOVE the commit boundary,
+	// and nothing else in this API can produce that state: appending does not,
+	// because a caller that commits as it appends ends with the watermark at the
+	// newest record, and SetHighWatermark cannot walk it back down. That state is
+	// what a fetch path serving only committed records has to be tested against.
+	//
+	// Not needed after Truncate, which lowers the watermark itself as part of
+	// removing the records — there the records really are gone, and that is the
+	// ordinary way the boundary moves backwards.
+	//
+	// This method was deleted in the v0.68.0 sweep and restored before release,
+	// which is worth recording because the reasoning failed in an avoidable way.
+	// Its previous doc justified it with "a caller that has some other reason",
+	// and a doc that will not name its caller reads as one having no caller —
+	// so the sweep looked for production call sites, found none, and read the
+	// remaining test uses as incidental. One of them was not: it was the only
+	// construction of the above-watermark state, doing a real lowering, and
+	// substituting SetHighWatermark silently no-opped and turned a downstream
+	// fetch test red. A capability whose only consumers are tests is still a
+	// capability; what made it invisible was the doc declining to say so.
+	OverrideHighWatermark(hw int64)
 
 	// HighWatermark returns the high watermark for the log.
 	HighWatermark() int64
