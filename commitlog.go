@@ -1635,21 +1635,31 @@ func (l *commitLog) Delete() error {
 	// delete — its error would return here, before the release and the removal.
 	// See closeSegmentsOnly.
 	//
-	// A segment that genuinely fails to close DOES stop the delete here, and
-	// keeps the lock: the files are still open, removing them would fail on
-	// Windows anyway, and holding the claim keeps anyone else out of a
-	// half-deleted directory. closeSegmentsOnly is idempotent, so a caller that
-	// retries Delete skips straight to the release and the removal.
-	if err := l.closeSegmentsOnly(); err != nil {
-		return err
-	}
-	// Before removeLogDir, not after: on Windows the lock handle is opened with
-	// no sharing, so the lock file cannot be removed while it is held, and a
-	// Delete that left it open would fail to empty the directory. Releasing here
-	// is safe because the segments are already closed — there is nothing left
-	// for a second process to race into, and the directory is about to stop
-	// existing.
-	if err := l.dirLock.release(); err != nil {
+	// The claim goes back on EVERY path out of here, including the one where a
+	// segment refused to close. There is no retry that can recover it later:
+	// Delete is terminal, and a caller whose Delete failed drops the log so the
+	// name stays openable — durable_streams does exactly that. Once the last
+	// reference is gone nothing can call Delete again, so a lock kept here is
+	// kept until the process exits, and the directory is then neither
+	// deletable nor openable. A transient sharing violation on one segment
+	// would brick the name for the life of the process.
+	//
+	// Holding it buys nothing to weigh against that. The lock exists to stop a
+	// SECOND WRITER, and this log is not one any more: l.deleted is set, the
+	// background loops have been joined, and appends are refused. Whatever
+	// handles leaked from the failed close have no writer behind them.
+	//
+	// Ordering is still release-then-remove, and on Windows that part is not
+	// optional: the lock handle is opened with no sharing, so the lock file
+	// cannot be unlinked while it is held and the removal would leave the
+	// directory standing.
+	closeErr := l.closeSegmentsOnly()
+	if err := stderrors.Join(closeErr, l.dirLock.release()); err != nil {
+		// No removeLogDir after a failed close, deliberately. Files are still
+		// open, so the removal would half-succeed — and removeLogDir sequences
+		// the descriptor last precisely so a partial failure leaves a log that
+		// can still be opened. Deleting around held segments would strip that
+		// protection and leave an openable log with pieces missing.
 		return err
 	}
 	// Not removeAllWithRetry: the descriptor has to go last, or a delete that

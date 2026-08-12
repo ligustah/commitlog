@@ -9,6 +9,49 @@ library from that fork onward.
 
 ### Fixed
 
+- **`Delete` kept the directory lock when it failed, which nothing could ever
+  give back.** The first design held the claim on a failed delete on the
+  grounds that the segments were still open and no one else should walk into a
+  half-deleted directory. That argument assumes the caller retries, and the
+  retry assumes the caller still has the log.
+
+  durable_streams does the opposite: a failed delete drops the log, so the name
+  stays openable. Once the last reference is gone nothing can call `Delete`
+  again — so the lock is held until the process exits, and the directory is
+  then neither deletable (no handle to delete it with) nor openable (a fresh
+  `New` is refused with `ErrLogLocked`). One transient sharing violation on one
+  segment would brick that name for the life of the process.
+
+  This is not hypothetical. sqlcdc's failed deletes fail on a held `.index`
+  with "being used by another process" — the segment-close branch exactly —
+  and they retry. Under the held-lock design that retry hits `ErrLogLocked`.
+
+  `Delete` now releases on every path out. Nothing is given up by that: the
+  lock exists to keep a second WRITER out, and after `Delete` this log is not
+  one — `l.deleted` is set, the background loops are joined, appends are
+  refused, and whatever handles leaked from the failed close have no writer
+  behind them.
+
+  Still no `removeLogDir` after a failed close, deliberately. The files are
+  open, so the removal would half-succeed, and `removeLogDir` sequences the
+  descriptor last precisely so a partial failure leaves a log that can still be
+  opened. Deleting around held segments would strip that protection and leave
+  an openable log with pieces missing.
+
+- **`Delete` wrote a high-watermark checkpoint into the directory it was
+  removing.** A checkpoint records where to resume a log that still exists.
+  `Delete` already said as much about the background loop — it sets `l.deleted`
+  before signalling close specifically "so the checkpoint loop skips writing to
+  a directory about to be removed" — and then called `closeSegments`, which
+  wrote that same checkpoint synchronously on the way out.
+
+  That contradiction was harmless only while a checkpoint failure aborted
+  `closeSegments` before it did anything. With the fix below, the error reaches
+  `Delete`, whose early return skips both the lock release and the removal — so
+  a best-effort write nobody wanted could leave the log closed, the directory
+  locked, and every file still on disk. The segment walk is now its own method,
+  `closeSegmentsOnly`, and `Delete` calls that. Reported by sqlcdc.
+
 - **A failed high-watermark checkpoint aborted the rest of `Close`.**
   `closeSegments` returned at the first checkpoint error, before closing a
   single segment — so every segment stayed open with its index mapped, for the

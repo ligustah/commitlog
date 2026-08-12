@@ -1164,11 +1164,15 @@ run_guard "closing gives the directory back" commitlog.go   '	return stderrors.J
 # flock does not stop an unlink, so the same removal succeeds either way and the
 # test cannot see the difference -- it would pass with the guard removed, which
 # is a guard that proves nothing.
-run_guard_windows "delete releases before it removes" commitlog.go   '	if err := l.dirLock.release(); err != nil {
-		return err
-	}' '	if false {
-		return nil
-	}'   '^TestDeleteRemovesTheLockFileWithTheDirectory$'
+run_guard_windows "delete releases before it removes" commitlog.go   '	if err := stderrors.Join(closeErr, l.dirLock.release()); err != nil {' '	if err := stderrors.Join(closeErr, error(nil)); err != nil {'   '^TestDeleteRemovesTheLockFileWithTheDirectory$'
+
+# The same line, neutralized the same way, but checked against the OTHER thing
+# it has to do: give the claim back when the close FAILED. A release that only
+# ran on the success path would satisfy the guard above and still brick the
+# directory for the life of the process, because the caller that just got an
+# error drops the log and cannot retry. Not Windows-only: nothing here depends
+# on unlink semantics, only on the second open being refused.
+run_guard "a failed delete releases too" commitlog.go   '	if err := stderrors.Join(closeErr, l.dirLock.release()); err != nil {' '	if err := stderrors.Join(closeErr, error(nil)); err != nil {'   '^TestAFailedDeleteStillReleasesTheDirectory$'
 
 # The neutralization IS the bug that was there: a best-effort checkpoint
 # returning early and taking the mandatory segment close with it. That also
