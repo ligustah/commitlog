@@ -51,6 +51,30 @@ library from that fork onward.
 
 ### Fixed
 
+- **A rewrite of an offloaded segment published it under the wrong tier.** The
+  commit point of a tiered rewrite passes a PENDING manifest entry, and it built
+  that entry naming `defaultTierName` — a constant — rather than the tier the
+  segment is actually in. Correct only for a log whose tier happens to be called
+  `"default"`.
+
+  It is worse than a misfiling. `publishTierManifests` applies pending entries as
+  an override keyed by base offset, so the wrong-tier entry CONSUMED the correct
+  one that `tierState` reported, and was then filed under a tier name the log has
+  no store for. The manifest that went out therefore named neither the segment's
+  old objects nor its new ones — it did not name the segment at all. A process
+  dying anywhere in the rest of the pass would reopen to a tier that has lost
+  those records, with their objects indistinguishable from garbage.
+
+  What kept it alive is that `clean()` ends with an unconditional republish
+  rebuilt from `tierState` alone, which repairs the entry — so the damage is only
+  reachable through the crash window, and the state the pass settles on is always
+  correct. And what kept it invisible is the test helper: `oneTier` names every
+  single-store test chain `defaultTierName`, so the whole suite used the one name
+  that made the constant right. The new test builds a tier named anything else,
+  records EVERY manifest the pass publishes, and requires each to name the
+  segments the log is still serving — the invariant a per-segment commit exists
+  to hold, rather than the one the pass converges on.
+
 - **The replication fetch read a tiered segment with no claim on its object.**
   `ReadMessageSet` was the one site in the package that assembled a
   `segmentScanner` as a struct literal instead of calling

@@ -29,13 +29,13 @@ const manifestKey = "manifest"
 // exists to remove. Nothing is deployed against version 1, so there is nothing
 // to migrate; a store written by an older build is re-offloaded, not converted.
 //
-// Version 3 adds Tier, naming the store an object lives in. It is the first step
-// of multi-store tiering (docs/multi-store-tiering.md) and carries no behaviour
-// yet: one tier is configurable, so every entry names defaultTierName. It goes in
-// ahead of the capability so that the manifest a store is already carrying can
-// describe itself once the second tier exists, rather than needing a second
-// version bump at the moment it matters. Refused rather than adapted, for the
-// same reason as version 1.
+// Version 3 adds Tier, naming the store an object lives in. It went in ahead of
+// multi-store tiering (docs/multi-store-tiering.md) so the manifest a store was
+// already carrying could describe itself once the second tier existed, rather
+// than needing a second version bump at the moment it mattered — and it now
+// carries that behaviour: an entry names the tier its object is actually in, and
+// publishTierManifests files entries by that name. Refused rather than adapted,
+// for the same reason as version 1.
 const manifestVersion = 3
 
 // defaultTierName is the conventional name for the one tier of a single-store

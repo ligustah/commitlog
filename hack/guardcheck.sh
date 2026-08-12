@@ -1348,6 +1348,21 @@ run_guard "an unjoinable segment breaks the run" clean_join.go   '		if cap <= 0 
 			continue
 		}'   '^TestPlanJoinsGroupsAdjacentSegmentsWithinTheCap$'
 
+# ---- tiered rewrite ----
+
+# A rewrite publishes its pending entry under the segment's OWN tier. Neutralized
+# back to the hard-coded defaultTierName that shipped, which is not a misfiling:
+# the override is keyed by base offset, so it CONSUMES the correct tierState
+# entry, and the tier's manifest goes out naming neither the old objects nor the
+# new. The end-of-pass republish rebuilds from tierState and repairs it, so the
+# test has to watch the manifests the pass publishes along the way rather than
+# the one it settles on -- and every other tiered test misses it outright,
+# because oneTier names its tier the very thing that was hard-coded.
+# Anchored on the ASSIGNMENT, not the call: swapping the argument would leave
+# segTier declared and unused, and the harness would report a build error instead
+# of an uncovered guard.
+run_guard "a rewrite publishes under its own tier" compact_cleaner.go   '		segTier := seg.tier' '		segTier := defaultTierName'   '^TestNoManifestAPassPublishesEverDropsALiveSegment$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

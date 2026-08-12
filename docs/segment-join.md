@@ -224,18 +224,26 @@ yet", which is what the joined result is at the moment of the commit. Because
 pending entry REPLACES the first input's entry rather than adding a second — the
 identity choice that made the local rename work pays off a second time here.
 
-**Removing A…N is not.** There is no removal override and there should not be:
-a pending entry names an object, and "stop naming this one" is not an object. The
-mover already shows the intended route — its release is `writeOneTierManifest(src)`
-with NO pending entry at all, and the source manifest stops naming the segment
-purely because `swapTier` changed `s.tier` first. Removal is expressed by changing
-the SEGMENT and rebuilding.
+**Removing A…N is not.** There is no removal override, because a pending entry
+names an object and "stop naming this one" is not an object. The mover shows one
+route — its release passes NO pending entry, and the source manifest stops naming
+the segment purely because `swapTier` changed `s.tier` first — but that route is
+not open to a join. `swapTier` could mutate before the commit because it repointed
+the segment at objects that are real and complete. A join has nowhere to repoint
+inputs 2…N to: they are about to stop existing. Clearing their tier fields before
+the commit would mean a failed publish leaves segments the log still serves but no
+longer believes are offloaded, and the pass would have to roll that back — which
+is exactly the obligation "the publish is the commit" exists to abolish.
+`swapReplacement` states the rule the other way round: *everything here is
+post-commit; nothing it does can be undone by failing.*
 
-So the real constraint the tiered path inherits is an ordering one, and it
-inverts steps 2 and 3 of the sketch below: the inputs must have stopped being
-offloaded segments **before** the publish, because the publish reads them. The
-local path could splice last — the rename had already committed. The tiered path
-must retire first, because the retirement is *how the removal is written down*.
+So the removal is expressed at publish time instead, as an explicit set of base
+offsets the write retires — the symmetric partner to `pending`. The two describe
+the same instant, the one `writeTierManifest`'s own doc already names: the moment
+of the commit, when the log's view and the tier's necessarily disagree. `pending`
+is "this object is real but its segment has not switched to it yet"; retiring is
+"these segments are real but their objects stop being the tier's at this write".
+It is not a patch — the manifest is still rebuilt whole from `tierState`.
 
 Ordering, with what each crash leaves:
 
@@ -243,17 +251,17 @@ Ordering, with what each crash leaves:
    under fresh keys. A crash here leaves orphans nothing points at — reclaimable
    by comparing the store's keys against the manifest, which is what a crashed
    rewrite already leaves.
-2. Retire inputs A…N in memory so `tierState()` stops reporting them, and
-   `SupersededBy` them onto A'. A crash here leaves the manifest still naming all
-   the inputs and their objects still present — the pre-join state, intact.
-3. ONE manifest write, with A' as the pending entry. This is the commit. Before
-   it the manifest names the inputs and the log reads them; after it the manifest
-   names A' alone. There is no state in between, which is the entire requirement.
+2. ONE manifest write: A' as the pending entry, A₂…A\_N as the retiring set. This
+   is the commit, and nothing before it has changed anything. Before it the
+   manifest names the inputs and the log reads them; after it, A' alone. There is
+   no state in between, which is the entire requirement.
+3. Repoint the first input at A' with the existing `swapReplacement`, and retire
+   the rest onto it with `SupersededBy`. All post-commit.
 4. Splice the list and return it for the pass to publish in one critical section,
    exactly as the local path does.
-5. Queue the superseded objects through `pendingReclaim`, AFTER the manifest, so
-   an object is only ever considered for deletion once a published manifest has
-   stopped naming it — the rule `clean()` already follows for rewrites.
+5. Queue the superseded objects through `pendingReclaim`, AFTER the splice, so an
+   object is only ever considered for deletion once a published manifest has
+   stopped naming it AND nothing can still reach the segment to acquire it.
 
 Note what this ordering does NOT need: a `MovedFrom`-style marker. A move can
 leave two tiers claiming one object because it writes two manifests; a join
@@ -267,31 +275,43 @@ Open questions this raises:
   `Put` per tier, rebuilt rather than patched, and a run never spans two tiers.
 - ~~Which base offset does the tier manifest keep?~~ **The run's lowest**, same as
   the local path, which is also what makes the pending entry a replace.
-- **What exactly does "retire in memory" do to an input segment?** It has to make
-  `tierState()` skip it while readers may still be mid-scan on its object. The
-  mover's answer was to repoint `s.store`/`s.tier` at somewhere real; a join has
-  nowhere to repoint to, so this is the one genuinely new mechanism the tiered
-  path needs. `tierState()` skips on `s.store == nil`, so the mechanism is
-  probably "clear the tier fields under the write lock and hand the old backing
-  to `pendingReclaim` as the pin" — the second half of `swapReplacement` without
-  the first.
+- **What does `publishTierManifests` need to take?** A retiring set of base
+  offsets, applied to the rebuilt list after the overrides and before the grouping
+  by tier. Base offsets are unique across a log, so the set needs no tier of its
+  own. A base offset that is both pending and retiring should be REFUSED rather
+  than resolved either way: A' keeps the first input's base offset and the first
+  input is not retired, so an overlap is a caller who has confused which input
+  survives, and both readings of it publish a manifest that is wrong.
 
-  Two things constrain it, and both are already satisfied by the ordering above,
-  which is the reason to write them down rather than rediscover them:
+  Small, and symmetric with `pending` — but it is a new way to be wrong about a
+  manifest, so it wants the treatment the pending path just got: a test that
+  watches every manifest a pass publishes, not only the one it settles on.
 
-  - Between the publish (3) and the splice (4) an input is still reachable
-    through `findSegment` while the manifest has stopped naming its object. That
-    is fine — the object still EXISTS, and a crash there reopens from a manifest
-    naming A', which covers those records anyway.
-  - It stops being fine the moment the object can be deleted. `drainReclaim`'s
-    safety rests on "for a superseded backing, refs can only fall", which holds
-    only once nothing can reach the segment to acquire its backing again. So the
-    queueing (5) must come after the splice (4) — not merely after the publish.
-    An input is unreachable only when it is out of `l.segments`.
+  Between the publish (2) and the splice (4) an input is still reachable through
+  `findSegment` while the manifest has stopped naming its object. That is fine —
+  the object still EXISTS, and a crash there reopens from a manifest naming A',
+  which covers those records anyway. It stops being fine the moment the object
+  can be DELETED: `drainReclaim`'s safety rests on "for a superseded backing,
+  refs can only fall", which holds only once nothing can reach the segment to
+  acquire its backing again. Hence queueing after the splice, not merely after
+  the publish. An input is unreachable only when it is out of `l.segments`.
 
-  Note that the FIRST input needs none of this: it becomes A', and the existing
-  `uploadReplacement`/`swapReplacement` pair already describes exactly that.
-  Only inputs 2…N need the new verb, which is a smaller surface than it looked.
+  Note that the FIRST input needs no new mechanism at all: it becomes A', and the
+  existing `uploadReplacement`/`swapReplacement` pair already describes exactly
+  that. Only inputs 2…N are new, which is a smaller surface than it looked.
+
+- **Does the retiring set need to reach `writeOneTierManifest` too?** A run never
+  spans tiers, so the join only ever needs one tier's manifest — but the mover is
+  the only caller of the one-tier form today, and adding a second changes what
+  that helper is for. Worth deciding deliberately rather than by whichever is
+  fewer lines.
+
+- **The tiered path must check `tierWritable`, not just `TierJoinBelow`.** Leaving
+  a read-only tier out of `TierJoinBelow` is how it stays untouched by default,
+  but nothing stops a caller naming one — and absence-as-refusal only refuses the
+  callers who did not ask. Uploading into a store this log does not own is the
+  thing `ReadOnly` exists to prevent, so the run has to be refused on ownership
+  as well as on configuration. The local path never had to care: it writes files.
 
 ## Settled
 

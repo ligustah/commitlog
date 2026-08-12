@@ -38,7 +38,12 @@ type compactCleaner struct {
 	// it belongs to the log rather than to the cleaner: only the log can build a
 	// manifest, because a manifest describes every segment and the cleaner sees
 	// one at a time.
-	commitTier func(baseOffset int64, meta offloadMeta) error
+	//
+	// tier is the segment's own tier, and it is a parameter rather than
+	// something the log fills in because the log cannot: the segment has not
+	// switched to these objects yet, which is the whole reason this is a
+	// pending entry. See the call site for what naming the wrong one costs.
+	commitTier func(baseOffset int64, tier string, meta offloadMeta) error
 	// superseded collects the store objects this pass replaced. They are NOT
 	// deleted here: a reader that opened a segment before its rewrite holds a
 	// backing over the old key and is entitled to finish. Each entry carries
@@ -975,7 +980,18 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		// The commit, between the upload and the swap. Until the manifest names
 		// the new objects the segment goes on serving the one it supersedes, so
 		// a failure here leaves a rewrite that simply did not happen.
-		if err := c.commitTier(seg.BaseOffset, meta); err != nil {
+		//
+		// Published under the segment's OWN tier. The entry goes in as a pending
+		// override keyed by base offset, so it replaces what tierState reports
+		// for this segment, and publishTierManifests then files it by its Tier
+		// name. Naming any other tier would therefore not merely misfile the
+		// entry — it would take the segment out of its tier's manifest
+		// altogether, publishing one that names neither the old objects nor the
+		// new ones.
+		seg.RLock()
+		segTier := seg.tier
+		seg.RUnlock()
+		if err := c.commitTier(seg.BaseOffset, segTier, meta); err != nil {
 			return nil, removed, err
 		}
 		if err := seg.swapReplacement(cleaned, meta); err != nil {

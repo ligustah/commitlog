@@ -555,8 +555,8 @@ func New(opts Options) (_ CommitLog, err error) {
 	}
 	// Set here rather than passed to newCompactCleaner because it closes over the
 	// log the cleaner belongs to, which does not exist until this line.
-	compactCleaner.commitTier = func(baseOffset int64, meta offloadMeta) error {
-		return l.writeTierManifest(meta.tierObject(baseOffset, defaultTierName))
+	compactCleaner.commitTier = func(baseOffset int64, tier string, meta offloadMeta) error {
+		return l.writeTierManifest(meta.tierObject(baseOffset, tier))
 	}
 
 	if err := l.init(); err != nil {
