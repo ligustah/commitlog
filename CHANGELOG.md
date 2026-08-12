@@ -5,9 +5,19 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.71.1 — 2026-08-12
 
 ### Fixed
+
+- **A guard disarmed itself when the line it anchored on was restructured.**
+  "delete does not checkpoint a directory it is removing" anchored on
+  `if err := l.closeSegmentsOnly(); err != nil {`, and the next commit turned
+  that into `closeErr := l.closeSegmentsOnly()` so the release could also run
+  on the failure path. guardcheck reported SKIP rather than a failure — the
+  guard stopped guarding and said so quietly, which is exactly why it has to be
+  run unfiltered. A filtered run had passed both new guards before the
+  restructure, and nothing rechecked them after it. Re-anchored; 105 guards,
+  all covered.
 
 - **`Delete` kept the directory lock when it failed, which nothing could ever
   give back.** The first design held the claim on a failed delete on the
