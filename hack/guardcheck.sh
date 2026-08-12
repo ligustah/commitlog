@@ -276,7 +276,14 @@ run_guard "append tail-under-lock" commitlog.go   '	// Reading the tail and writ
 	l.appendMu.Lock()
 	defer l.appendMu.Unlock()'   '	// BREAK: tail read and write no longer one step'   '^TestConcurrentAppends'
 
-run_guard "frame-header CRC" reader.go   'if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got {'   'if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got && false {'   '^FuzzCorruptFrameHeaderIsNeverServedAsTruth$'
+# The read path's frame-header CRC. Anchored on the RETURN under it, not on the
+# condition alone: readMessage and readMessageMetadata now decode out of an
+# identically-named local, so the bare condition matches both and apply_edit
+# refuses an ambiguous anchor. The bare form silently expired the moment those
+# two lines became the same text.
+run_guard "frame-header CRC" reader.go   'if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got {
+		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,'   'if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got && false {
+		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,'   '^FuzzCorruptFrameHeaderIsNeverServedAsTruth$'
 
 # scanForward must report a failed read rather than calling it "entry not found",
 # because both timestamp lookups turn not-found into a plausible offset. The
