@@ -105,8 +105,8 @@ func TestAnEpochWithNoSurvivingRecordsIsStillInTheCache(t *testing.T) {
 	write(3, "c", "4") // offset 4, active segment
 	l.SetHighWatermark(l.NewestOffset())
 
-	require.EqualValues(t, 1, l.LastOffsetForLeaderEpoch(1), "epoch 2 began at 1")
-	require.EqualValues(t, 3, l.LastOffsetForLeaderEpoch(2), "epoch 3 began at 3")
+	require.EqualValues(t, 1, lastOffsetForEpoch(t, l, 1), "epoch 2 began at 1")
+	require.EqualValues(t, 3, lastOffsetForEpoch(t, l, 2), "epoch 3 began at 3")
 
 	require.NoError(t, l.Clean())
 
@@ -116,6 +116,6 @@ func TestAnEpochWithNoSurvivingRecordsIsStillInTheCache(t *testing.T) {
 		"the epoch whose every record was compacted away was dropped from the cache")
 	// Unchanged: epoch 2 still owns [1, 3), which is where it led, however
 	// little of what it wrote is still on disk.
-	require.EqualValues(t, 1, l.LastOffsetForLeaderEpoch(1))
-	require.EqualValues(t, 3, l.LastOffsetForLeaderEpoch(2))
+	require.EqualValues(t, 1, lastOffsetForEpoch(t, l, 1))
+	require.EqualValues(t, 3, lastOffsetForEpoch(t, l, 2))
 }

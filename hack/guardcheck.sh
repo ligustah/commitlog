@@ -506,6 +506,14 @@ run_guard "leader epoch parsed unsigned" leader_epoch_cache.go   '		leaderEpoch,
 # the only integrity check it gets.
 run_guard "checkpoint version is exact" leader_epoch_cache.go   '	if version != leaderEpochFileV0 {'   '	if version > leaderEpochFileV0 {'   '^TestALeaderEpochCheckpointWithANegativeVersionIsRefused$'
 
+# A probe that names no leader epoch has no safe answer, because the caller
+# truncates to whatever it is told. The refusal is the whole reason the argument
+# is a type and not a uint64: without it the log falls back to answering for
+# epoch 0, which is a real epoch, and on a log whose first recorded epoch is 1
+# that answer is offset 0 -- an instruction to delete everything. durable_streams
+# lost a node and 450 committed records to exactly that.
+run_guard "an unknown epoch probe is refused" commitlog.go   '	if !known {'   '	if false {'   '^TestAnUnknownLeaderEpochProbeIsRefused$'
+
 # A store key names an object INSIDE the store. The manifest is the one place
 # keys arrive from outside, and they become an action rather than a description:
 # s.storeKey is handed to store.Delete. Neutralizing the boundary check lets a

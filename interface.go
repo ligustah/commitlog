@@ -357,9 +357,15 @@ type CommitLog interface {
 	NewLeaderEpoch(epoch uint64) error
 
 	// LastOffsetForLeaderEpoch returns the start offset of the first leader
-	// epoch larger than the provided one or the log end offset if the current
-	// epoch equals the provided one.
-	LastOffsetForLeaderEpoch(epoch uint64) int64
+	// epoch larger than the named one, or the log end offset when no recorded
+	// epoch is larger — the probing follower is level with this log or ahead of
+	// it, and has nothing to discard.
+	//
+	// An Epoch that names nothing is refused with ErrUnknownLeaderEpoch rather
+	// than answered. The caller of this truncates to the answer, so an offset
+	// returned to a question the log cannot answer is a deletion instruction the
+	// log invented; see Epoch.
+	LastOffsetForLeaderEpoch(epoch Epoch) (int64, error)
 
 	// LastLeaderEpoch returns the latest leader epoch for the log.
 	LastLeaderEpoch() uint64

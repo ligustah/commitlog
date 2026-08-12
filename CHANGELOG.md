@@ -7,6 +7,31 @@ library from that fork onward.
 
 ## Unreleased
 
+### Changed
+
+- **`LastOffsetForLeaderEpoch` now takes an `Epoch` and returns an error.**
+  Breaking. It was `LastOffsetForLeaderEpoch(epoch uint64) int64`, and a
+  `uint64` has no value meaning "I don't know". A follower with no epoch history
+  — a fresh replica, or one whose checkpoint died with its process — had nothing
+  to pass but `0`, and `0` is a real epoch: it is what ordinary `Append` stamps
+  and the first epoch of every log that has never failed over.
+
+  So the log answered the question it was asked — *where does the epoch after 0
+  begin* — which on a log whose first recorded epoch is 1 is offset 0. A
+  follower truncates to that answer. durable_streams lost a node this way, with
+  450 committed records, and every step of it read as correct.
+
+  The log cannot tell those two callers apart from a `uint64` and must not
+  guess, so the caller says which it is: `AtEpoch(e)` names an epoch, the zero
+  `Epoch` names none, and the zero one is refused with the new
+  `ErrUnknownLeaderEpoch` rather than answered. Every answer for a named epoch
+  is unchanged, epoch 0 included.
+
+  The same shape `CleanSpec.Ceiling` was given when its zero value had to mean
+  both "no ceiling" and "ceiling at 0". The difference is what the unset case
+  does: a missing ceiling has a safe default and falls back, a missing epoch has
+  none and is refused. Requested by durable_streams, who own the caller side.
+
 ### Fixed
 
 - **An atomic write made the bytes durable and stopped there.** Every file the

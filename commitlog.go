@@ -1460,14 +1460,24 @@ func (l *commitLog) NewLeaderEpoch(epoch uint64) error {
 }
 
 // LastOffsetForLeaderEpoch returns the start offset of the first leader epoch
-// larger than the provided one or the log end offset if the current epoch
-// equals the provided one.
-func (l *commitLog) LastOffsetForLeaderEpoch(epoch uint64) int64 {
-	offset := l.leaderEpochCache.LastOffsetForLeaderEpoch(epoch)
+// larger than the named one, or the log end offset when no recorded epoch is
+// larger — the probing follower is level with this log or ahead of it, and has
+// nothing to discard.
+//
+// An Epoch that names nothing is refused with ErrUnknownLeaderEpoch. See Epoch
+// for why that is a refusal and not a default: the caller truncates to the
+// answer, so an offset returned to a question the log cannot actually answer is
+// a deletion instruction it invented.
+func (l *commitLog) LastOffsetForLeaderEpoch(epoch Epoch) (int64, error) {
+	e, known := epoch.Get()
+	if !known {
+		return 0, ErrUnknownLeaderEpoch
+	}
+	offset := l.leaderEpochCache.LastOffsetForLeaderEpoch(e)
 	if offset == -1 {
 		offset = l.activeSegment().NextOffset() - 1
 	}
-	return offset
+	return offset, nil
 }
 
 // LastLeaderEpoch returns the latest leader epoch for the log.

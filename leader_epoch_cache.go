@@ -24,6 +24,42 @@ const (
 	leaderEpochFileV0   = 0
 )
 
+// ErrUnknownLeaderEpoch reports a probe that named no epoch. The log refuses it
+// rather than answering, because there is no answer that is safe to give: the
+// caller of LastOffsetForLeaderEpoch truncates to what it is told, and every
+// offset the log could return is an instruction to delete down to it.
+var ErrUnknownLeaderEpoch = errors.New("commitlog: leader epoch probe named no epoch")
+
+// Epoch is an optional leader epoch. Its zero value is "no epoch known", which
+// is what a caller that has never recorded one has, and AtEpoch(0) is the epoch
+// numbered zero — a distinction a uint64 cannot make and a follower's life
+// depends on.
+//
+// It exists because the probe took a bare uint64, and a follower with no epoch
+// history had nothing to pass but 0. Zero is also a REAL epoch — ordinary
+// Append stamps it, and it is the first epoch of every log that has not failed
+// over — so the log answered the question it was asked: where does the epoch
+// after 0 begin. On a log whose first recorded epoch is 1, that is offset 0, and
+// a follower that truncates to what it is told deletes the log. durable_streams
+// lost a node to exactly this, with 450 committed records, and it read as a
+// correct answer at every step.
+//
+// The same shape as Bound, for the same reason and with the same two words. The
+// difference is what happens to the unset case: a Bound falls back, because a
+// missing compaction ceiling has an obvious safe default. A missing epoch has
+// none, so this one is refused.
+type Epoch struct {
+	epoch uint64
+	known bool
+}
+
+// AtEpoch returns an Epoch naming leader epoch e. Every uint64 is valid,
+// including 0.
+func AtEpoch(e uint64) Epoch { return Epoch{epoch: e, known: true} }
+
+// Get returns the epoch and whether one was named.
+func (e Epoch) Get() (uint64, bool) { return e.epoch, e.known }
+
 // epochOffset contains the start offset for a given leader epoch.
 type epochOffset struct {
 	leaderEpoch uint64

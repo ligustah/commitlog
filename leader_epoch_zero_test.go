@@ -45,6 +45,14 @@ func captureWarnings(t *testing.T) *bytes.Buffer {
 // asks findEpoch(epoch+1), so it answers from the NEXT epoch's anchor, which is
 // recorded normally. What was wrong is the cache's account of where a log's
 // epoch history begins.
+//
+// That incident has since been explained, and by the probe after all — not by
+// its arithmetic, which is right, but by its ARGUMENT. It took a bare uint64,
+// so a follower with no epoch history had nothing to pass but 0, and the log
+// answered the question it was asked. See TestAnUnknownLeaderEpochProbeIsRefused
+// and the Epoch type; the sentence above is still true of this fix and is left
+// standing because a scope note that quietly grows to cover a later fix stops
+// being one.
 func TestLeaderEpochZeroIsRecorded(t *testing.T) {
 	dir := tempDir(t)
 	l, err := newLeaderEpochCache("epoch-zero", dir)

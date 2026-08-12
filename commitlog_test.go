@@ -373,7 +373,7 @@ func TestCleanerDeleteLeaderEpochOffsets(t *testing.T) {
 	defer cleanup()
 
 	require.Equal(t, uint64(0), l.LastLeaderEpoch())
-	require.Equal(t, int64(-1), l.LastOffsetForLeaderEpoch(0))
+	require.Equal(t, int64(-1), lastOffsetForEpoch(t, l, 0))
 
 	// Add some messages.
 	for i := 0; i < 5; i++ {
@@ -407,10 +407,10 @@ func TestCleanerDeleteLeaderEpochOffsets(t *testing.T) {
 
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
-	require.Equal(t, int64(0), l.LastOffsetForLeaderEpoch(0))
-	require.Equal(t, int64(5), l.LastOffsetForLeaderEpoch(1))
-	require.Equal(t, int64(10), l.LastOffsetForLeaderEpoch(2))
-	require.Equal(t, int64(14), l.LastOffsetForLeaderEpoch(3))
+	require.Equal(t, int64(0), lastOffsetForEpoch(t, l, 0))
+	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
+	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
 
 	// Force a clean.
 	require.NoError(t, l.Clean())
@@ -420,10 +420,10 @@ func TestCleanerDeleteLeaderEpochOffsets(t *testing.T) {
 	require.Equal(t, int64(14), l.NewestOffset())
 	require.Equal(t, 1, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
-	require.Equal(t, int64(10), l.LastOffsetForLeaderEpoch(0))
-	require.Equal(t, int64(10), l.LastOffsetForLeaderEpoch(1))
-	require.Equal(t, int64(10), l.LastOffsetForLeaderEpoch(2))
-	require.Equal(t, int64(14), l.LastOffsetForLeaderEpoch(3))
+	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 0))
+	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
+	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
 }
 
 // Ensure a compacting Clean keeps every leader epoch and only raises the
@@ -446,7 +446,7 @@ func TestCleanerKeepsLeaderEpochOffsetsThroughCompaction(t *testing.T) {
 	defer cleanup()
 
 	require.Equal(t, uint64(0), l.LastLeaderEpoch())
-	require.Equal(t, int64(-1), l.LastOffsetForLeaderEpoch(0))
+	require.Equal(t, int64(-1), lastOffsetForEpoch(t, l, 0))
 
 	// Add some messages.
 	for i := 0; i < 5; i++ {
@@ -486,10 +486,10 @@ func TestCleanerKeepsLeaderEpochOffsetsThroughCompaction(t *testing.T) {
 
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
-	require.Equal(t, int64(0), l.LastOffsetForLeaderEpoch(0))
-	require.Equal(t, int64(5), l.LastOffsetForLeaderEpoch(1))
-	require.Equal(t, int64(10), l.LastOffsetForLeaderEpoch(2))
-	require.Equal(t, int64(14), l.LastOffsetForLeaderEpoch(3))
+	require.Equal(t, int64(0), lastOffsetForEpoch(t, l, 0))
+	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
+	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
 
 	// Force a clean.
 	require.NoError(t, l.Clean())
@@ -502,10 +502,10 @@ func TestCleanerKeepsLeaderEpochOffsetsThroughCompaction(t *testing.T) {
 	// Epoch 1 started at 0, which is now below the floor, so it is re-anchored
 	// there rather than dropped. Epochs 2 and 3 are untouched: a clean does not
 	// move where a leadership began.
-	require.Equal(t, int64(4), l.LastOffsetForLeaderEpoch(0))
-	require.Equal(t, int64(5), l.LastOffsetForLeaderEpoch(1))
-	require.Equal(t, int64(10), l.LastOffsetForLeaderEpoch(2))
-	require.Equal(t, int64(14), l.LastOffsetForLeaderEpoch(3))
+	require.Equal(t, int64(4), lastOffsetForEpoch(t, l, 0))
+	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
+	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
 }
 
 // Ensure EarliestOffsetAfterTimestamp returns the earliest offset whose
@@ -816,18 +816,18 @@ func TestTruncate(t *testing.T) {
 	require.Equal(t, int64(14), l.NewestOffset())
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
-	require.Equal(t, int64(0), l.LastOffsetForLeaderEpoch(0))
-	require.Equal(t, int64(5), l.LastOffsetForLeaderEpoch(1))
-	require.Equal(t, int64(10), l.LastOffsetForLeaderEpoch(2))
-	require.Equal(t, int64(14), l.LastOffsetForLeaderEpoch(3))
+	require.Equal(t, int64(0), lastOffsetForEpoch(t, l, 0))
+	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
+	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
 
 	require.NoError(t, l.Truncate(7))
 
 	require.Equal(t, int64(6), l.NewestOffset())
 	require.Equal(t, 2, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(2), l.LastLeaderEpoch())
-	require.Equal(t, int64(0), l.LastOffsetForLeaderEpoch(0))
-	require.Equal(t, int64(5), l.LastOffsetForLeaderEpoch(1))
+	require.Equal(t, int64(0), lastOffsetForEpoch(t, l, 0))
+	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
 }
 
 // Ensure NotifyLEO returns a closed channel when the given offset is not the
@@ -1091,4 +1091,18 @@ func tempDir(t testing.TB) string {
 
 func remove(t require.TestingT, path string) {
 	require.NoError(t, os.RemoveAll(path))
+}
+
+// lastOffsetForEpoch probes for a KNOWN epoch and requires the log to answer.
+//
+// The tests that use it are about the offsets, not about the probe's shape, and
+// spelling AtEpoch and a NoError at each of them would bury one in the other.
+// The refusal — the reason the argument is a type and not a uint64 — has its own
+// test, which calls the API directly: see
+// TestAnUnknownLeaderEpochProbeIsRefused.
+func lastOffsetForEpoch(t testing.TB, l CommitLog, epoch uint64) int64 {
+	t.Helper()
+	off, err := l.LastOffsetForLeaderEpoch(AtEpoch(epoch))
+	require.NoError(t, err)
+	return off
 }
