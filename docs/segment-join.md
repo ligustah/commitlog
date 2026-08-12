@@ -299,6 +299,19 @@ What this settled, and how it was built:
   tier's view is what makes the retirement stick for the rest of the pass. Doing
   it post-commit is what keeps it safe.
 
+  The other half of the same instant is what a run that does NOT get through
+  hands back, and the answer is nothing. `uploadReplacement`'s reclaim entries
+  name the first input's CURRENT objects; they stop being current only at the
+  repoint. `drainReclaim` deletes an entry whose backing has no readers and is
+  entitled to treat that zero as terminal — rather than as a lull that might end
+  — for one stated reason: *every entry in this queue was put there BY that
+  swap*. So entries from a run that never swapped are deleted out from under a
+  segment still serving them. The tiered rewrite has always honoured this
+  structurally, appending to its pile several lines BELOW the swap rather than
+  where the entries were produced; the join now does the same. It is worth
+  noticing that the wrong version reads as the careful one — the upload made
+  those entries, so passing them on looks like not losing track of them.
+
   Between the publish (2) and the splice (4) an input is still reachable through
   `findSegment` while the manifest has stopped naming its object. That is fine —
   the object still EXISTS, and a crash there reopens from a manifest naming A',
