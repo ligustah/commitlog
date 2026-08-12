@@ -1536,9 +1536,21 @@ func (l *commitLog) closeSegments() error {
 		return nil
 	}
 	// The last checkpoint this log will write, with a Close() waiting on it.
-	if err := l.checkpointHW(waitedOnRetryBudget); err != nil {
-		return err
-	}
+	// Its failure is REPORTED, never fatal to the rest of this function: the
+	// checkpoint is an optimization that RecoverTail rides out staleness in
+	// (see checkpointHWLoop, which logs a failed tick and moves on), while
+	// closing the segments is the part nothing else will do. Returning here
+	// made a best-effort write abort the mandatory work — every segment left
+	// open with its index mapped, which is the exact outcome the paragraph
+	// below refuses to accept from a segment that genuinely failed to close.
+	//
+	// It also broke the claim Close makes directly above its release(): that
+	// the directory is given back only after the segments are shut, so no
+	// window exists where this process has let go of the directory but still
+	// holds files open in it. A checkpoint failure opened precisely that
+	// window, and a second process taking the lock inside it is the two-writer
+	// state the lock exists to prevent.
+	errs := []error{l.checkpointHW(waitedOnRetryBudget)}
 	// Close EVERY segment before reporting any failure — the same rule
 	// closeSegment holds over its two halves, one level up and for the same
 	// reason. Returning at the first error left every LATER segment open, and
@@ -1548,7 +1560,6 @@ func (l *commitLog) closeSegments() error {
 	// file handles and index mmaps for the life of the process — and on Windows
 	// a mapped index cannot be unlinked, so the directory could not be removed
 	// either.
-	var errs []error
 	for _, segment := range l.segments {
 		if err := segment.Close(); err != nil {
 			errs = append(errs, err)

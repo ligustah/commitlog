@@ -1170,6 +1170,16 @@ run_guard_windows "delete releases before it removes" commitlog.go   '	if err :=
 		return nil
 	}'   '^TestDeleteRemovesTheLockFileWithTheDirectory$'
 
+# The neutralization IS the bug that was there: a best-effort checkpoint
+# returning early and taking the mandatory segment close with it. That also
+# broke Close's release invariant, since the lock goes back either way -- so
+# the window between "let go of the directory" and "still holding files open
+# in it" existed for as long as this early return did.
+run_guard "a failed checkpoint does not abort the close" commitlog.go   '	errs := []error{l.checkpointHW(waitedOnRetryBudget)}' '	var errs []error
+	if err := l.checkpointHW(waitedOnRetryBudget); err != nil {
+		return err
+	}'   '^TestAFailedCheckpointStillClosesTheLogAndReleasesTheDirectory$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

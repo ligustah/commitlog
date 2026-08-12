@@ -5,6 +5,39 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A failed high-watermark checkpoint aborted the rest of `Close`.**
+  `closeSegments` returned at the first checkpoint error, before closing a
+  single segment — so every segment stayed open with its index mapped, for the
+  life of the process, because nothing retries a `Close` it was already told
+  failed. On Windows a mapped index cannot be unlinked, so the directory could
+  not be removed afterwards either.
+
+  The checkpoint had no business being fatal to that. It is an optimization:
+  `checkpointHWLoop` logs a failed tick and carries on, on the grounds that
+  `RecoverTail` rides out a stale checkpoint. Closing the segments is the part
+  nothing else will do. The function's own comment already made this argument
+  one paragraph lower, about a segment that genuinely fails to close; the
+  checkpoint above it was the same mistake, unfixed. It is now attempted, its
+  error collected, and the segment walk happens regardless.
+
+  This also silently broke the invariant `Close` documents at its `release()`:
+  that the directory claim is given back only after the segments are shut, so
+  no window exists where this process has let go of the directory but still
+  holds files open in it. A checkpoint failure opened exactly that window —
+  lock released, every segment still live — and a second process taking the
+  lock inside it is the two-writer state v0.71.0's lock exists to prevent.
+
+  `Close` still releases the lock on failure, deliberately: durable_streams
+  closes and reopens one directory synchronously (a provisionally-opened stream
+  reopened with real config, and a promote), and a `Close` that kept the claim
+  after a transient checkpoint error would brick that path until the process
+  restarted. The fix is to make the failure stop being a half-close, not to
+  start holding the directory hostage to it.
+
 ## v0.71.0 — 2026-08-12
 
 ### Fixed
