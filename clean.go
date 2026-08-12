@@ -274,6 +274,34 @@ type CleanSpec struct {
 	// Every budget still guarantees at least one rewrite, so debt anywhere
 	// drains rather than deadlocking under a small budget.
 	TierBudgets map[string]time.Duration
+	// JoinBelow enables joining adjacent sealed LOCAL segments: a run of them is
+	// replaced by one segment holding every record, while the result stays at or
+	// below this many bytes. 0 disables it.
+	//
+	// Caller-driven, like everything else on this spec, because a join is worth
+	// doing when load is low and commitlog cannot see load. It is its own stage
+	// of the pass rather than part of compaction: compact() and
+	// consolidateSegments run on opposite branches of `if l.Compact`, so a join
+	// placed in either would only ever reach half the logs, and both accumulate
+	// segments.
+	//
+	// The cap is about RETENTION GRANULARITY and the cost of a later rewrite, not
+	// about rolling — a sealed segment is never appended to, and CheckSplit runs
+	// on the active one. A joined segment is an ordinary segment: the same size
+	// and age retention rules apply, with no join-specific horizon. The accepted
+	// consequence is that a run mixing an older segment with a newer one frees
+	// space only when the whole result ages out, which is what this cap bounds.
+	JoinBelow int64
+	// TierJoinBelow is JoinBelow per tier, for segments whose bytes live in a
+	// store. A run never crosses a tier boundary — every input shares one — so
+	// this is the cap for runs entirely inside the named tier.
+	//
+	// A tier ABSENT from this map is not joined. Note the contrast with
+	// TierBudgets, which falls back to RewriteBudget: there is deliberately no
+	// fallback here, because absence is how a READ-ONLY tier stays untouched
+	// without having to be named. A fallback would join into a store this log may
+	// not write to.
+	TierJoinBelow map[string]int64
 	// TierPlacement names, per segment base offset, the tier that segment
 	// should live in after this pass. A segment absent from the map does not
 	// move, and a segment already in the tier named does not move either.
