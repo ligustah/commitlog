@@ -5,6 +5,37 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **The leader epoch checkpoint accepted a negative format version.**
+  `readLeaderEpochOffsets` gated the version line with
+  `if version > leaderEpochFileV0`, which reads as "reject anything newer".
+  `strconv.Atoi` is signed and v0 is the first version there has ever been, so
+  the other half of that comparison was not the empty set: every negative
+  version passed, and the file was then parsed as v0. A checkpoint whose version
+  line read `-1` opened clean.
+
+  The argument against this was already written in the same function, five lines
+  below, for the epoch field — *"this is the one place a value from OUTSIDE the
+  process becomes one... the file carries no checksum, so refusing it here is
+  the only chance to notice"*. It had been applied to the epoch and not to the
+  version above it. The parse is the entire integrity check this file gets, and
+  one of its two gates was open across half the integer range.
+
+  Now exact equality, which is the right shape rather than merely a tighter one:
+  `flush` only ever writes `leaderEpochFileV0`, and tolerance for "older"
+  versions is meaningless when nothing is older than the first.
+
+  `numEntries` on the next line is also a signed `Atoi` and is deliberately left
+  alone — it is only ever compared as `numEntries != len(epochOffsets)`, a
+  negative can never equal a length, and nothing is sized from it.
+
+  Found by sweeping for version gates that accept more than one version. Three
+  of the package's four (descriptor, manifest, inspect) were already exact
+  equality; this was the one that was not.
+
 ## v0.68.1 — 2026-08-12
 
 ### Security
