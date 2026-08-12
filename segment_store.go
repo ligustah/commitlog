@@ -263,7 +263,15 @@ func (s *FileSegmentStore) Put(key string, r io.Reader, size int64) error {
 	// Rename is the commit point: an offloaded object is either fully present or
 	// absent, never half-written. It retries because on Windows a reader holding
 	// the DESTINATION open makes the rename fail outright; see renameWithRetry.
-	return renameWithRetry(tmp, path)
+	if err := renameWithRetry(tmp, path); err != nil {
+		return err
+	}
+	// And a commit point has to survive. The f.Sync above made the object's
+	// bytes durable; this makes the NAME durable, which is the half a reader
+	// looks the object up by. It matters most for the manifest, which is put
+	// through here like any other object and is what says an offload happened
+	// at all.
+	return syncDir(s.dir)
 }
 
 func (s *FileSegmentStore) ReadAt(key string, p []byte, off int64) (int, error) {

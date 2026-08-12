@@ -9,6 +9,33 @@ library from that fork onward.
 
 ### Fixed
 
+- **An atomic write made the bytes durable and stopped there.** Every file the
+  log finishes with a rename — the high watermark checkpoint, a client sidecar,
+  an object published into a `FileSegmentStore` — went through a temp file that
+  was fsynced and a rename that was not followed by an fsync of the directory
+  holding it. That makes the write atomic, which it was documented as being, and
+  leaves it undurable, which nothing said. A rename that has returned is visible
+  to every later reader in the same boot and can still be undone by a power cut;
+  POSIX makes the directory a separate fsync precisely because the bytes and the
+  name that reaches them are two different questions.
+
+  It matters wherever the rename IS the commit point, which is all three of
+  those: `SyncAll` and `Close` return to a caller that has been told the high
+  watermark is recorded, and the tier manifest — the object that says an offload
+  happened at all — is `Put` through the same path as any other object.
+
+  Now `syncDir` after the rename. It is a no-op on Windows, where the rename
+  underneath is `ReplaceFile` and NTFS journals the metadata change before
+  returning, and where a directory cannot be opened for `FlushFileBuffers`
+  anyway. On unix an `EINVAL`/`ENOTSUP` from the directory fsync is treated as
+  success: those say the filesystem never had the guarantee to give, which is
+  not a reason to fail a write that succeeded by every other measure.
+
+  Surfaced by durable_streams losing a recovery-floor sidecar in a soak. That
+  particular loss was a `SIGKILL`, which a completed rename survives — this is
+  the failure one step past it, and the one their sidecar was relying on not
+  happening.
+
 - **A sidecar name was an action, and the log took it on faith.** `PutSidecar`,
   `GetSidecar` and `RemoveSidecar` passed the client's `name` straight into
   `filepath.Join(l.Path, name)`. The contract was written down — *"the name must

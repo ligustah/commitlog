@@ -427,7 +427,15 @@ func atomicWriteFileWithin(path string, r io.Reader, budget time.Duration) error
 	deadline := time.Now().Add(budget)
 	for {
 		err = atomic_file.WriteFile(path, bytes.NewReader(data))
-		if err == nil || time.Now().After(deadline) {
+		if err == nil {
+			// The library fsyncs the temp file and then renames, which makes the
+			// BYTES durable and stops there. The name is the commit point here —
+			// every caller on this path is one where returning means the value is
+			// recorded — so the directory holding it has to be flushed too. See
+			// syncDir; it is a no-op on Windows, where the rename already is one.
+			return syncDir(filepath.Dir(path))
+		}
+		if time.Now().After(deadline) {
 			return err
 		}
 		time.Sleep(atomicWriteRetryDelay)
