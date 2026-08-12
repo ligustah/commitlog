@@ -1188,7 +1188,7 @@ run_guard "a failed checkpoint does not abort the close" commitlog.go   '	return
 # obvious of the two, which is exactly why this guard exists: nothing at the
 # call site says the checkpoint inside closeSegments is both pointless here and
 # able to fail the whole delete.
-run_guard "delete does not checkpoint a directory it is removing" commitlog.go   '	if err := l.closeSegmentsOnly(); err != nil {' '	if err := l.closeSegments(); err != nil {'   '^TestDeleteDoesNotCheckpointAndCannotBeStoppedByOne$'
+run_guard "delete does not checkpoint a directory it is removing" commitlog.go   '	closeErr := l.closeSegmentsOnly()' '	closeErr := l.closeSegments()'   '^TestDeleteDoesNotCheckpointAndCannotBeStoppedByOne$'
 
 echo
 if [ "$failures" -ne 0 ]; then
