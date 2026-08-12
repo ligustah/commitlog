@@ -37,6 +37,19 @@ library from that fork onward.
   about which prefix is contiguous. `consolidateSegments` had the same shape and
   takes the same fix.
 
+- **A truncation that failed on the way to installing its replacement stranded
+  it.** `Truncate` builds the replacement first, deliberately — until the first
+  `Delete` every failure can be returned with the log exactly as it was found —
+  and then deletes the segments above the cut. A failure in THAT loop returned
+  with the replacement built, open, and reachable by nothing: `Replace` had not
+  run, so it was neither in `l.segments` nor linked to from its source.
+
+  The same defect as the abandoned rewrites above, reached from the other side.
+  There the segment was already installed and had to be published; here it is
+  not installed yet and has to be dropped. What decides which applies is whether
+  the rename has happened, and nothing else — which is why one fix is guarded on
+  the working suffix and the other on the install.
+
 - **A rewrite that failed left its working copy open, mapped and unreachable.**
   Only the scan-failure path disposed of one; every other error return out of
   `cleanSegment` — a block write, an fsync, a tiered upload or swap — left an
