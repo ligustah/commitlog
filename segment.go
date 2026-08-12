@@ -24,6 +24,7 @@ const (
 	cleanedSuffix   = ".cleaned"
 	truncatedSuffix = ".truncated"
 	trimmedSuffix   = ".trimmed"
+	joinedSuffix    = ".joined"
 	indexSuffix     = ".index"
 )
 
@@ -2166,6 +2167,18 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 // Cleaned creates a cleaned segment for this segment.
 func (s *segment) Cleaned() (*segment, error) {
 	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, cleanedSuffix, s.codec)
+}
+
+// Joined creates the working copy a join builds its result in.
+//
+// At THIS segment's base offset, which is what makes the result installable by
+// the ordinary Replace path: the run's lowest base offset survives the join, so
+// the result is — as far as every name on disk is concerned — a rewrite of the
+// run's first segment that happens to be bigger than it was. The segments above
+// it in the run are what actually cease to exist, and they are retired by
+// SupersededBy rather than by a rename.
+func (s *segment) Joined() (*segment, error) {
+	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, joinedSuffix, s.codec)
 }
 
 // Truncated creates a truncated segment for this segment.

@@ -841,9 +841,15 @@ func (l *commitLog) resolveSegmentOverlaps() error {
 				prev.BaseOffset, s.BaseOffset, prev.BaseOffset,
 				prev.NextOffset()-1, s.BaseOffset, s.NextOffset()-1)
 		}
+		// Two things produce this shape, and the rule serves both because it keeps
+		// the SUPERSET either way: a truncation interrupted before it could remove
+		// the segment it rewrote at a higher base, and a join interrupted between
+		// the rename that installs its result and the unlink of the inputs that
+		// result now contains. The join relies on it as its commit point — see
+		// joinOne — so this is load-bearing rather than merely tidy.
 		slog.Warn("commitlog: dropping a segment whose records the previous one "+
-			"already holds; a truncation was interrupted before it could remove "+
-			"the segment it rewrote",
+			"already holds; a truncation or a join was interrupted before it "+
+			"could remove the segment it superseded",
 			slog.String("path", l.Path),
 			slog.Int64("dropped_base_offset", s.BaseOffset),
 			slog.Int64("covered_by_base_offset", prev.BaseOffset),

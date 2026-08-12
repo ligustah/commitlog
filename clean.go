@@ -251,6 +251,12 @@ type CleanSpec struct {
 	// kill window while reclamation scales to any inflow. The budget is
 	// spent in drop-density order. 0 = unbounded. At least one rewrite
 	// always proceeds.
+	//
+	// The join stage draws on it too — a join reads and writes every byte of its
+	// run, so it costs what a rewrite costs — but from a SEPARATE budget of the
+	// same size, taken after compaction has spent its own. Sharing one counter
+	// would express the ordering by starving joins on any log with compaction
+	// debt, which is a different rule than "bytes before file handles".
 	RewriteBudget time.Duration
 	// TierBudgets bounds, per tier, how long one pass may spend rewriting
 	// segments whose bytes live in that tier's store. A tier with no entry
@@ -651,5 +657,22 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int6
 	} else {
 		cleaned = consolidated
 	}
-	return cleaned, verified, nil
+	// Its own stage, after both branches, because it belongs to both: compaction
+	// and consolidation are the two arms of `if l.Compact`, and a join placed in
+	// either would only ever reach half the logs. Both accumulate segments —
+	// compaction because a rewrite only ever shrinks one, consolidation because
+	// it never moves a boundary at all.
+	//
+	// Budgeted AFTER their debt, from a budget of its own: the two arms above
+	// have already spent theirs, and the ordering that matters is the one inside
+	// this pass — a rewrite that reclaims bytes runs before a join that reclaims
+	// file handles. A shared counter would express the same order by starving the
+	// join whenever compaction had work, which is not the same thing.
+	joined, joinErr := joinSegments(cleaned, spec, newRewriteBudget(spec.maxRewrites, spec.RewriteBudget))
+	if joinErr != nil {
+		// The partial list, for the reason the two stages above give at length: a
+		// committed join has already renamed itself over its first input.
+		return joined, verified, joinErr
+	}
+	return joined, verified, nil
 }

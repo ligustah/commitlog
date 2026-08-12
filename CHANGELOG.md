@@ -7,6 +7,48 @@ library from that fork onward.
 
 ## Unreleased
 
+### Added
+
+- **Segment join: `CleanSpec.JoinBelow` and `CleanSpec.TierJoinBelow`.** A run of
+  adjacent sealed segments is replaced by one segment holding every record,
+  verbatim. Off by default; a tier absent from `TierJoinBelow` is never joined,
+  which is also how a read-only tier stays untouched.
+
+  It exists because compaction only ever SHRINKS a segment — a rewrite keeps its
+  predecessor's base offset and replaces it in place — so nothing ever merged two
+  back into one and a long-lived log converges on many small ones. The bytes are
+  fine; the count is the cost: a file set, an open handle, an index mapping and a
+  slot in every walk over the segment list, per segment, forever. durable_streams
+  reports 336-segment logs.
+
+  It is its own stage of the pass, after both arms of `if l.Compact`, because
+  compaction and consolidation are those two arms and a join in either would only
+  ever reach half the logs — while both accumulate segments. It is budgeted as a
+  rewrite, after their debt: reclaiming bytes beats reclaiming file handles.
+
+  What made this more than a rewrite is that a segment IS its base offset — file
+  stem, tier manifest key, sidecar derivation, and the reader's "which segment
+  holds offset N" search — and a join means one base offset ceases to exist. The
+  result is therefore built at the run's LOWEST base offset, which makes the
+  install the ordinary rename over the first input, and makes every other input a
+  segment strictly CONTAINED in the result. That is the state
+  `resolveSegmentOverlaps` already resolves on open, keeping the superset; it was
+  written for an interrupted truncation, and a join produces the identical shape
+  deliberately. So a crash resolves to the old set or the new single segment, and
+  never to an offset served twice — with no new mechanism.
+
+  The pass returns the spliced list rather than mutating the live one, so a run's
+  inputs all leave and its result arrives in one swap. A window naming both would
+  be observable: the replacement link a join sets is many-to-one, and
+  `LocalBytes` resolves every entry through it and sums `Position()`.
+
+  Tiered runs are planned but not yet executed — their commit point is a single
+  manifest write that adds the result and removes every input together, which is
+  a separate piece of work. `joinOne` refuses an offloaded input outright rather
+  than assuming no caller will offer one.
+
+  See `docs/segment-join.md`.
+
 ### Fixed
 
 - **The replication fetch read a tiered segment with no claim on its object.**

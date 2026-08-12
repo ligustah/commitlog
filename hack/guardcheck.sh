@@ -1337,3 +1337,45 @@ fi
 if [ "$deferred" -ne 0 ]; then
   echo "guardcheck: $deferred guard(s) NOT covered here — deferred to another platform's run."
 fi
+
+# ---- segment join ----
+
+# A join reads each input to its end and then DELETES it, so a walk that mistook
+# a read failure for end-of-data would write a prefix and unlink the file holding
+# the rest. Loudest of all the scan sites for that reason: the rewrite paths at
+# least leave the damaged bytes under the source's name, and this one collects
+# them.
+run_guard "a join read failure stops the pass" clean_join.go   '				if !errors.Is(err, io.EOF) {
+					return nil, fmt.Errorf("%w: join of segment %d: %w",' '				if false {
+					return nil, fmt.Errorf("%w: join of segment %d: %w",'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
+
+# The working-copy disposal on the join path. Anchored on `joined` so it does not
+# collide with the two identically-shaped defers in compact_cleaner.go.
+run_guard "a failed join drops its working copy" clean_join.go   '		joined.RLock()
+		working := joined.suffix != ""
+		joined.RUnlock()
+		if working {' '		joined.RLock()
+		working := joined.suffix != ""
+		joined.RUnlock()
+		if working && false {'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
+
+# An input a join did not rename over must leave WITH a link. Marked as left and
+# carrying none is the retention case — reader, skip me, those records are gone —
+# and taking that path here skips records sitting in the result. Neutralized by
+# Delete alone, which sets `left` and no link, which is exactly the wrong half.
+run_guard "a joined-away segment links to the result" clean_join.go   '		in.SupersededBy(joined)' '		in.left = true'   '^TestAJoinCarriesEveryRecordOfTheRun$'
+
+# A run never crosses a tier boundary: a join is an optimisation, and one that
+# copies bytes between stores is not one. The planner is where that is decided.
+run_guard "a join run never crosses a tier boundary" clean_join.go   '		if open && cur.tiered == tiered && cur.tier == tier && cur.bytes+size <= cap {' '		if open && cur.bytes+size <= cap {'   '^TestPlanJoinsGroupsAdjacentSegmentsWithinTheCap$'
+
+# A segment that cannot be joined ENDS the run before it rather than being
+# skipped: a run is adjacent by definition, and jumping over one would produce a
+# segment whose offset range CONTAINS records it does not hold — which
+# findSegment, bounding only from above, would resolve into and find nothing.
+run_guard "an unjoinable segment breaks the run" clean_join.go   '		if cap <= 0 || size >= cap {
+			flush()
+			continue
+		}' '		if cap <= 0 || size >= cap {
+			continue
+		}'   '^TestPlanJoinsGroupsAdjacentSegmentsWithinTheCap$'

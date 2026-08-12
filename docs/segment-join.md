@@ -1,9 +1,13 @@
 # Joining undersized segments
 
-A design document, not an implementation. It exists because the TODO it replaces
+The design behind `clean_join.go`. It exists because the TODO it replaces
 (`compact_cleaner.go`, "join segments that are below the bytes limit") read as a
 small piece of work and is not one, and because the reason it is not is worth
 writing down once rather than rediscovering.
+
+Every question this document once left open is now settled; they are recorded
+under "Settled" below, with the reasoning, because in each case the losing option
+was the more obvious one.
 
 ## The problem
 
@@ -90,74 +94,157 @@ never under a segment lock. A join has *two* inputs, so "per segment" is
 ill-defined: there is a window where A' is written but the manifest still names A
 and B, and a crash there must resolve to either the old pair or the new single —
 never to a state where an offset is claimed twice or by nothing. This is the same
-question `project_the_commit_point_decides_the_fix` keeps answering, and it is
-the hard part of this feature.
+question `project_the_commit_point_decides_the_fix` keeps answering, and it was
+expected to be the hard part of this feature.
+
+**Locally it is not, and the reason is worth keeping.** Building the result at the
+run's LOWEST base offset makes installing it the ordinary `Replace` rename over
+the first input — so the commit is one rename, exactly as for a rewrite — and
+makes every *other* input a segment whose range is strictly CONTAINED in the
+result. `resolveSegmentOverlaps` already resolves that shape on open by keeping
+the superset and deleting the duplicate; it was written for an interrupted
+truncation, and a join produces the identical shape on purpose. A crash between
+the rename and the unlinks therefore resolves to the old set or the new single
+segment, with no marker file, no new format and no new recovery rule. That makes
+it load-bearing rather than merely tidy, which the warning it logs now says.
+
+The hard part survives intact for a TIERED run: a store has no rename, so there
+the manifest write has to be the commit, adding the result and removing every
+input together.
 
 **3. Tiering.** Two segments in different tiers have no single home. A join must
 either refuse across a tier boundary, or define which tier the result lands in
 and move bytes to get it there — and moving bytes is the expensive operation
-tier budgets exist to bound. Refusing is almost certainly right: a join is an
-optimisation, and an optimisation that triggers a cross-store copy is not one.
-The same argument refuses a join where either input is in a read-only tier.
+tier budgets exist to bound. **Settled: refuse.** A join is an optimisation, and
+an optimisation that triggers a cross-store copy is not one. A read-only tier is
+refused by the same rule from the other direction — it is simply left out of
+`TierJoinBelow`, and an unconfigured tier is never joined.
+
+Worth knowing before assuming a local-only first cut would be a useful subset: in
+durable_streams, offload is bimodal. A log with no tier or no local retention
+keeps everything local; a log with both ends up with nearly everything tiered. So
+a join that handled only local segments would no-op on exactly the deployments
+that have the most segments to join.
 
 **4. Retention.** The delete cleaner removes whole segments from the oldest end,
 and `RetentionFloor` protects a lowest offset. Joining A (deletable) with B (not)
 produces a segment that is neither, and coarsens retention's granularity: the log
-can now only free memory in bigger steps. A floor on how recent a segment may be
-before it is eligible to join — the `MinAge` horizon already does this for
-compaction — is the natural guard.
+can now only free memory in bigger steps. **Settled: accepted, bounded by the
+size cap** rather than by a new horizon. A `MinAge`-style floor was the obvious
+guard and is the wrong one — it answers "how recent may an input be", when the
+thing that hurts is "how much can one undeletable segment pin", which is bytes.
+`JoinBelow` already names that number, and a joined segment is otherwise an
+ordinary segment with no join-specific retention rule.
 
 **5. Leader epochs.** The epoch cache anchors epochs at start offsets and
 `ClearEarliest` re-anchors rather than drops. A join does not remove records, so
 no anchor should move; this is the one subsystem that is probably untouched, and
-it should be *asserted* rather than assumed.
+it should be *asserted* rather than assumed. **Asserted** —
+`TestAJoinLeavesLeaderEpochsWhereTheyWere` checks both halves: every epoch's last
+offset as the cache answers it, and the epoch on every record as it reads back.
+The reason to check at all is that a join DOES change which segment an offset
+lives in, so an anchor derived from a segment boundary rather than from a record
+would move with it — silently, and only for the epochs whose first record
+happened to open a retired segment.
 
 ## Sketch
 
 Order matters more than mechanism. Every step below is chosen so a crash between
 any two resolves to the old state.
 
-1. **Select.** In the classification pass in `compact()`, after `disp[]` is
-   built, find maximal runs of *adjacent* segments where: all are
-   `keepConverged` or freshly rewritten (never `keepProtected`, never deferred),
-   the combined size is below `MaxSegmentBytes`, all share one tier, none is in a
-   read-only tier, and the newest write in the run is older than the `MinAge`
-   horizon. Adjacency is required: a gap means an unjoinable segment between them.
+1. **Select** — `planJoins`, its own stage of the pass. Find maximal runs of
+   *adjacent* sealed segments that share one tier and whose combined size stays
+   within that tier's configured cap. Adjacency is required: a gap means an
+   unjoinable segment between them, and skipping it would produce a segment whose
+   offset range contains records it does not hold. A tier with no configured cap
+   is not joined at all, which is also how a read-only tier stays untouched.
 2. **Build.** Write a new segment at the run's **lowest** base offset, into a
    temporary name, appending every record of the run in offset order. Records are
    copied verbatim — a join drops nothing, which is what keeps it independent of
    compaction's correctness.
-3. **Sync**, then build the index and key digest for the result. A join must not
-   leave a segment whose sidecars have to be rebuilt on the next open.
+3. **Sync**, then the sidecars. The index needs nothing extra — it is written as
+   the copy goes. The key digest must be rebuilt only AFTER the rename, and that
+   is a trap worth naming: a digest's path carries no working suffix, so the
+   result and the run's first input share it, and writing the digest before the
+   install would clobber the input's while the input was still the live segment.
+   It is rebuilt only for a log that already keeps digests, and it carries no
+   strip stamp — each input's stamp was verified over its own records, so
+   adopting either would extend a claim over records it never covered.
 4. **Publish.** For a local run, rename into place and splice `l.segments` under
    the segment write lock — **all inputs out and A' in, in one critical section**
    (see hazard 1b: a window with both A and B still listed double-counts in
-   `LocalBytes`). For an offloaded run, upload first and let the manifest publish
-   be the commit — one manifest write that adds A' and removes A and B together,
-   so the "claimed twice or by nothing" window never exists.
-5. **Retire.** Mark each input `SupersededBy(A')`. Queue the replaced files and
-   store objects through `pendingReclaim` exactly as a rewrite does, so a reader
-   that opened B before the join finishes on the bytes it holds.
+   `LocalBytes`). The stage does this by RETURNING the new list rather than
+   mutating the live one; the pass swaps it in once, at the end, which is the
+   single critical section. For an offloaded run, upload first and let the
+   manifest publish be the commit — one manifest write that adds A' and removes A
+   and B together, so the "claimed twice or by nothing" window never exists.
+5. **Retire.** Mark each input `SupersededBy(A')` and only then delete it: the
+   link must be in place before the close, or a reader that resolved into the
+   segment in between gets the raw `ErrSegmentClosed` the link exists to turn
+   into a redirect. Local files go through `Delete`, as every other segment
+   retirement in the package does; store objects will go through `pendingReclaim`
+   exactly as a rewrite's do, so a reader that opened B before the join finishes
+   on the bytes it holds.
 
 Budget: a join is a rewrite for costing purposes and should draw on the same
 `RewriteBudget` / `TierBudgets`, after compaction's own debt — reclaiming bytes
 beats reclaiming file handles.
 
-## What to settle before writing code
+## Settled
 
-- ~~Does anything assume `replacement` preserves the base offset?~~ **Answered —
-  see hazard 1.** No: every consumer bounds the resolved segment from above only,
-  and a join's result is a superset of its inputs. The constraint it produced is
-  a different one (1b): the slice splice must be atomic, because the link is
-  many-to-one and one public method sums over it.
-- Is `MaxSegmentBytes` the right ceiling for the *result*, or should a join stop
-  well below it so the joined segment is not immediately eligible to roll?
-- Should a join happen in `compact()` at all, or in a separate pass like
-  `consolidateSegments`, which already exists for logs without compaction and
-  would otherwise never join anything?
+- ~~Does anything assume `replacement` preserves the base offset?~~ No: every
+  consumer bounds the resolved segment from above only, and a join's result is a
+  superset of its inputs (hazard 1). The constraint it produced is a different
+  one (1b): the slice splice must be atomic, because the link is many-to-one and
+  one public method sums over it.
+
+- ~~Is `MaxSegmentBytes` the right ceiling for the result?~~ **No — the caller
+  sets its own, per tier**, as `CleanSpec.JoinBelow` / `TierJoinBelow`.
+  `MaxSegmentBytes` is the ROLLING threshold, and rolling is a property of the
+  active segment: a sealed segment is never appended to, so a joined result
+  sitting above it would not be "immediately eligible to roll" — nothing would
+  ever look. The cap is really about retention granularity (hazard 4) and the
+  cost of a later rewrite, and only the caller knows what it will tolerate there.
+
+  The same field settles hazard 4 without a new horizon. A joined segment is an
+  **ordinary** segment: no join-specific retention rule, no `MinAge` equivalent.
+  Joining a deletable segment with a non-deletable one does coarsen retention —
+  that is accepted, and the cap is what bounds how coarse it can get.
+
+- ~~In `compact()`, or a separate pass?~~ **Its own stage.** Neither existing
+  pass reaches every log: `compact()` and `consolidateSegments` are the two
+  branches of `if l.Compact`, so a join placed in either would only ever join
+  half the logs — and both accumulate segments. It runs after compaction's debt,
+  drawing on the same `RewriteBudget` / `TierBudgets`, because reclaiming bytes
+  beats reclaiming file handles.
+
+- **Triggering is caller-driven**, like everything else on `CleanSpec`: a join is
+  worth doing when load is low, and commitlog cannot see load.
+
+- **Per-tier configuration does not fall back.** `TierBudgets` falls back to
+  `RewriteBudget` for a tier it does not name; `TierJoinBelow` deliberately does
+  not, because absence is how a read-only tier stays untouched without having to
+  be named, and a fallback would join into a store the log may not write to.
 
 ## Status
 
-Not scheduled. Filed so the constraint is recorded rather than rediscovered; the
-TODO in `compact_cleaner.go` now points here in spirit, and the per-segment
-overhead this would reclaim is real but not currently hurting anything measured.
+Built for LOCAL runs; tiered runs are planned and skipped.
+
+`clean_join.go` holds all of it: `planJoins` (step 1), `joinOne` (steps 2–3 and
+5) and `joinSegments`, which is the stage `clean()` runs after both arms of `if
+l.Compact` and whose return value is the splice (step 4).
+
+The local commit point turned out to need no new mechanism, which is the one
+genuinely pleasant surprise in this feature. Building the result at the run's
+LOWEST base offset makes installing it the ordinary rename over the first input,
+and makes every other input a segment strictly CONTAINED in the result — the
+exact state `resolveSegmentOverlaps` already resolves on open, keeping the
+superset. It was written for hazard-shaped-like-a-truncation; a join produces the
+identical shape on purpose, and `TestAJoinInterruptedBeforeItsInputsAreGoneResolvesOnOpen`
+reconstructs the window to prove it.
+
+What remains is hazard 2 in its tiered form: a store has no rename, so a tiered
+run needs one manifest write that adds the result and removes every input
+together. `joinOne` refuses an offloaded input outright until that exists —
+`joinSegments` never offers it one, and the refusal is there so a later caller
+cannot wander in.
