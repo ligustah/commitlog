@@ -167,24 +167,41 @@ func planJoins(segments []*segment, spec CleanSpec) []joinRun {
 //
 // bw and sc stay owned by the caller for the reason consolidateOne gives: one
 // block writer and one decode-buffer pair serve the whole pass.
-func joinOne(inputs []*segment, bw *blockWriter, sc *blockCache) (*segment, error) {
+func joinOne(
+	inputs []*segment, bw *blockWriter, sc *blockCache, tj tierJoin,
+) (*segment, []pendingReclaim, error) {
 	first := inputs[0]
-	// Refused rather than assumed, because the failure would be quiet and awful:
-	// an offloaded segment has no local log to rename over, so Replace below
-	// would install this copy under a name the segment does not read from and
-	// retire the inputs anyway. joinSegments does not offer tiered runs — this is
-	// here so that a later caller cannot wander in before the tiered commit point
-	// exists.
-	for _, in := range inputs {
-		if in.isOffloaded() {
-			return nil, errors.Errorf("commitlog: segment %d is offloaded; "+
-				"a tiered join commits through the manifest, not a rename",
-				in.BaseOffset)
+	// A run is all-local or all-tiered — planJoins never groups across the
+	// boundary — but that is a fact about the planner, and this is the function
+	// that would corrupt a log if it stopped being true: the local install is a
+	// rename over the first input, and an offloaded segment has no local log to
+	// rename over, so a mixed run would install the result under a name nothing
+	// reads from and retire the inputs anyway.
+	tiered := first.isOffloaded()
+	for _, in := range inputs[1:] {
+		if in.isOffloaded() != tiered {
+			return nil, nil, errors.Errorf(
+				"commitlog: join run mixes local and offloaded segments (%d and %d); "+
+					"a run commits either by rename or by manifest, never both",
+				first.BaseOffset, in.BaseOffset)
+		}
+	}
+	// The tier is read once, here, and every input is in it: the run's commit is
+	// a single write to ONE tier's manifest, which is what makes it atomic.
+	var firstTier string
+	if tiered {
+		first.RLock()
+		firstTier = first.tier
+		first.RUnlock()
+		if !tj.canJoin(firstTier) {
+			return nil, nil, errors.Errorf(
+				"commitlog: segment %d is in tier %q, which this log may not join into",
+				first.BaseOffset, firstTier)
 		}
 	}
 	joined, err := first.Joined()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Disposed of on every way out until it is installed, and by the same
 	// discriminator the two rewrite paths use: Replace clears the suffix at the
@@ -225,29 +242,32 @@ func joinOne(inputs []*segment, bw *blockWriter, sc *blockCache) (*segment, erro
 				// the rewrite paths at least leave the damaged bytes under the
 				// source's name, and this one collects them.
 				if !errors.Is(err, io.EOF) {
-					return nil, fmt.Errorf("%w: join of segment %d: %w",
+					return nil, nil, fmt.Errorf("%w: join of segment %d: %w",
 						ErrSegmentUnreadable, in.BaseOffset, err)
 				}
 				break
 			}
 			if err := bw.add(ms); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
 	if err := bw.flush(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := joined.Sync(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Whether this log keeps key digests at all, read while the path still names
 	// the first input's. Rebuilding one costs a full scan of what was just
 	// written, so it is done for a log that has them and not for one that does
 	// not — a non-compacted log has never had a digest and has no use for one.
 	wantDigest := exists(digestPath(first))
+	if tiered {
+		return joinOneTiered(inputs, joined, firstTier, wantDigest, sc, tj)
+	}
 	if err := joined.Replace(first); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// ---- past the commit point ----
 	//
@@ -262,7 +282,86 @@ func joinOne(inputs []*segment, bw *blockWriter, sc *blockCache) (*segment, erro
 	if wantDigest {
 		refreshJoinedDigest(joined, sc)
 	}
-	return joined, nil
+	return joined, nil, nil
+}
+
+// joinOneTiered installs a joined run whose inputs live in a tier, and returns
+// the segment the log keeps plus the store objects the run superseded.
+//
+// The segment it returns is the run's FIRST input, not the working copy. A store
+// has no rename, so the result cannot be installed by becoming the first input
+// the way the local path does; it is installed by that segment starting to serve
+// the uploaded objects instead, exactly as a tiered rewrite does. The working
+// copy was only ever the vehicle, and the caller's deferred disposal deletes it —
+// its suffix is still set, because nothing renamed it away.
+//
+// The whole safety argument is the ORDER, and it is the tiered rewrite's order
+// with one addition:
+//
+//  1. upload the joined objects under fresh keys, which commits nothing — a
+//     crash leaves orphans the sweep recognises;
+//  2. ONE manifest write that starts naming the result and stops naming every
+//     other input. This is the commit, and nothing before it has changed what a
+//     reader sees;
+//  3. repoint the first input at the new objects, and retire the rest onto it.
+//
+// Between 2 and 3 the manifest names the result while the segments still serve
+// the inputs. That is readable rather than fatal: the objects all still exist,
+// and a crash there reopens from a manifest naming the result alone, which holds
+// every record the inputs did. There is no window in which an offset is served
+// by two entries or by none, which is what hazard 2 asks for.
+func joinOneTiered(
+	inputs []*segment, joined *segment, tier string, wantDigest bool,
+	sc *blockCache, tj tierJoin,
+) (*segment, []pendingReclaim, error) {
+	first := inputs[0]
+	meta, superseded, err := first.uploadReplacement(joined)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "upload joined segment %d", first.BaseOffset)
+	}
+	retired := make([]int64, 0, len(inputs)-1)
+	for _, in := range inputs[1:] {
+		retired = append(retired, in.BaseOffset)
+	}
+	// The commit. The entry carries the run's LOWEST base offset — the first
+	// input's — so it replaces that input's entry rather than adding a second,
+	// and the rest are retired by base offset in the same write.
+	//
+	// Both failure paths below return NO reclaim entries, and that is the whole
+	// point of where they sit. `superseded` names the first input's CURRENT
+	// objects, and they only stop being current when swapReplacement repoints the
+	// segment away from them. Handing them to the caller before that queues live
+	// bytes for deletion behind a segment that is still serving them — so the
+	// tiered rewrite appends its own reclaim list only after the swap returns,
+	// and this does the same. What a failure leaves instead is the uploaded
+	// objects, unreferenced, which is what a crashed rewrite already leaves.
+	if err := tj.commit(retired, meta.tierObject(first.BaseOffset, tier)); err != nil {
+		// Nothing has changed: the segments still serve their own objects and the
+		// manifest still names them.
+		return nil, nil, errors.Wrapf(err, "commit joined run at %d", first.BaseOffset)
+	}
+	// ---- past the commit point ----
+	if err := first.swapReplacement(joined, meta); err != nil {
+		// Reported rather than swallowed, for the reason the tiered rewrite gives:
+		// the segment did not repoint, so it is still serving what it served
+		// before, while the manifest has moved on.
+		//
+		// The pass converges it back rather than forward, which is worth knowing
+		// before trusting the manifest here. No input was retired — the loop
+		// below never ran — so all of them are still in l.segments serving their
+		// own objects, and the end-of-pass republish rebuilds from tierState and
+		// names them again. What is left over is the joined object, unreferenced:
+		// the same orphan a crashed upload leaves, at the same cost.
+		return nil, nil, errors.Wrapf(err, "repoint segment %d at its joined objects",
+			first.BaseOffset)
+	}
+	for _, in := range inputs[1:] {
+		superseded = append(superseded, in.retireIntoJoin(first)...)
+	}
+	if wantDigest {
+		refreshJoinedDigest(first, sc)
+	}
+	return first, superseded, nil
 }
 
 // joinSegments is the join stage of a clean pass: it collapses every run worth
@@ -282,28 +381,35 @@ func joinOne(inputs []*segment, bw *blockWriter, sc *blockCache) (*segment, erro
 // worth stating: reclaiming bytes beats reclaiming file handles, so a pass with
 // budget for one rewrite should spend it on the segment holding garbage rather
 // than on the two that are merely small.
-func joinSegments(segments []*segment, spec CleanSpec, budget *rewriteBudget) ([]*segment, error) {
+func joinSegments(
+	segments []*segment, spec CleanSpec, budget *rewriteBudget, tj tierJoin,
+) ([]*segment, []pendingReclaim, error) {
 	runs := planJoins(segments, spec)
 	if len(runs) == 0 {
-		return segments, nil
+		return segments, nil, nil
 	}
 	var (
-		out  = make([]*segment, 0, len(segments))
-		bw   = &blockWriter{}
-		sc   = newBlockCache() // one decode-buffer pair for the whole stage
-		next = 0               // the first segment not yet accounted for in out
+		out        = make([]*segment, 0, len(segments))
+		bw         = &blockWriter{}
+		sc         = newBlockCache() // one decode-buffer pair for the whole stage
+		next       = 0               // the first segment not yet accounted for in out
+		superseded []pendingReclaim
 	)
 	for _, r := range runs {
-		// A tiered run is planned but not executed yet: its commit point is a
-		// manifest write that adds the result and removes every input together,
-		// and until that exists a tiered run must be left exactly alone. Planned
-		// anyway so the planner has one set of rules rather than a local set and
-		// a tiered set that drift.
-		if r.tiered || !budget.allow() {
+		// A tiered run needs the log's manifest write to commit through, and it
+		// needs this log to OWN the store it would upload into. Configuration
+		// alone is not enough: leaving a read-only tier out of TierJoinBelow is
+		// how it stays untouched by default, but nothing stops a caller naming
+		// one, and absence-as-refusal only refuses the callers who did not ask.
+		if r.tiered && !tj.canJoin(r.tier) {
+			continue
+		}
+		if !budget.allow() {
 			continue
 		}
 		out = append(out, segments[next:r.first]...)
-		joined, err := joinOne(segments[r.first:r.last+1], bw, sc)
+		joined, reclaimed, err := joinOne(segments[r.first:r.last+1], bw, sc, tj)
+		superseded = append(superseded, reclaimed...)
 		if err != nil {
 			// The PARTIAL list, for the reason both rewrite stages give: a join
 			// that already committed has renamed itself over its first input and
@@ -312,13 +418,31 @@ func joinSegments(segments []*segment, spec CleanSpec, budget *rewriteBudget) ([
 			// would name closed segments and leave the results named by nothing.
 			// Everything from this run on is untouched and carries over as it
 			// stands, including the active segment.
-			return append(out, segments[r.first:]...), err
+			return append(out, segments[r.first:]...), superseded, err
 		}
 		out = append(out, joined)
 		next = r.last + 1
 		budget.note()
 	}
-	return append(out, segments[next:]...), nil
+	return append(out, segments[next:]...), superseded, nil
+}
+
+// tierJoin is what a tiered run needs from the log it belongs to: whether this
+// log may write to a tier at all, and the ONE manifest write that commits the
+// run — see commitJoinedRun for why it has to be one.
+//
+// A zero value refuses every tiered run. That is what a log with no tiers wants,
+// and what a test building nothing but local segments gets without saying so;
+// the refusal is in canJoin rather than at the call sites so there is one place
+// to be wrong about it.
+type tierJoin struct {
+	writable func(tier string) bool
+	commit   func(retired []int64, joined TierObject) error
+}
+
+// canJoin reports whether a run in this tier may be executed.
+func (t tierJoin) canJoin(tier string) bool {
+	return t.writable != nil && t.commit != nil && t.writable(tier)
 }
 
 // retireJoinedInputs disposes of the inputs a join did NOT rename over.

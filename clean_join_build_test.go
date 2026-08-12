@@ -144,7 +144,7 @@ func TestAJoinRefusesAnInputItCannotReadToTheEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	joined, err := joinOne(inputs, &blockWriter{}, newBlockCache())
+	joined, _, err := joinOne(inputs, &blockWriter{}, newBlockCache(), tierJoin{})
 	require.Nil(t, joined)
 	require.ErrorIs(t, err, ErrSegmentUnreadable,
 		"the join met unreadable bytes and called it done")
@@ -211,17 +211,21 @@ func TestAJoinSpendsTheRewriteBudget(t *testing.T) {
 	}
 }
 
-// An offloaded segment has no local log to rename over, so the rename that
-// commits a local join would install the result under a name the segment does
-// not read from — and retire the inputs anyway. The tiered commit point is a
-// manifest write, and until it exists the refusal is what keeps a caller from
-// reaching this path.
+// A run commits either by rename or by manifest, and a run holding both kinds of
+// segment can do neither. The local install is a rename over the first input;
+// an offloaded segment has no local log to rename over, so a mixed run would
+// install the result under a name nothing reads from — and retire the inputs
+// anyway.
+//
+// planJoins never groups across the boundary, so this is unreachable through the
+// pass. It is asserted here because it is a fact about the PLANNER, and joinOne
+// is the function that would corrupt a log the day that stopped being true.
 //
 // The store is attached to a real local segment rather than faked wholesale,
 // because a fake would switch off the very field under test: isOffloaded asks
 // whether `store` is set, and a test double standing in for the segment would
 // answer for it.
-func TestAJoinRefusesAnOffloadedInput(t *testing.T) {
+func TestAJoinRefusesARunThatMixesLocalAndOffloaded(t *testing.T) {
 	l, _ := joinFixture(t, 400)
 	inputs := liveSegments(l)[0:3]
 
@@ -235,9 +239,9 @@ func TestAJoinRefusesAnOffloadedInput(t *testing.T) {
 		victim.Unlock()
 	})
 
-	joined, err := joinOne(inputs, &blockWriter{}, newBlockCache())
+	joined, _, err := joinOne(inputs, &blockWriter{}, newBlockCache(), tierJoin{})
 	require.Nil(t, joined)
-	require.ErrorContains(t, err, "offloaded")
+	require.ErrorContains(t, err, "mixes local and offloaded")
 	for _, in := range inputs {
 		in.RLock()
 		left := in.left

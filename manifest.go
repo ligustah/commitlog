@@ -93,7 +93,37 @@ type tierManifest struct {
 // Caller must not hold l.mu, and must not hold the segment lock of any segment a
 // pending entry describes: tierState reads every segment under its read lock.
 func (l *commitLog) writeTierManifest(pending ...TierObject) error {
-	return l.publishTierManifests(l.Tiers, pending...)
+	return l.publishTierManifests(l.Tiers, nil, pending...)
+}
+
+// commitJoinedRun is the commit point of a tiered join: ONE manifest write that
+// starts naming the joined result and stops naming every input it replaced.
+//
+// A join is the only operation whose publish changes the SET rather than one
+// entry — it retires N base offsets and adds one — and it has to land as a
+// single write, because a manifest that named some of the inputs and the result
+// too would claim the same records twice, and one that named neither would lose
+// them. It is one write for free: publishTierManifests rebuilds a whole manifest
+// body and Puts it per tier, and a join's run never spans tiers.
+//
+// The two halves of that set reach the manifest differently, which is worth
+// stating because it looks asymmetric. The result goes in as a PENDING entry, in
+// the ordinary way and for the ordinary reason: its objects are uploaded but the
+// segment has not switched to them yet. Its base offset is the run's lowest —
+// the first input's — so it REPLACES that input rather than adding to it. The
+// remaining inputs cannot be expressed that way, since a pending entry names an
+// object and "stop naming this one" is not an object, so they are retired by
+// base offset instead.
+//
+// Retiring rather than mutating the segments first, which is the route a move
+// takes: swapTier may repoint before the commit because it repoints at objects
+// that are real and complete, and a join has nowhere to repoint an input to —
+// it is about to stop existing. Clearing their tier fields ahead of the write
+// would leave a failed publish holding segments the log still serves but no
+// longer believes are offloaded, and something would have to roll that back.
+// Everything here is pre-commit or post-commit, and nothing in between.
+func (l *commitLog) commitJoinedRun(retired []int64, joined TierObject) error {
+	return l.publishTierManifests(l.Tiers, retired, joined)
 }
 
 // writeOneTierManifest publishes ONE tier's manifest and leaves every other
@@ -118,18 +148,43 @@ func (l *commitLog) writeOneTierManifest(tier string, pending ...TierObject) err
 	if err != nil {
 		return err
 	}
-	return l.publishTierManifests([]Tier{t}, pending...)
+	return l.publishTierManifests([]Tier{t}, nil, pending...)
 }
 
 // publishTierManifests rebuilds and publishes the manifests of the given tiers,
 // skipping any this log does not own.
-func (l *commitLog) publishTierManifests(tiers []Tier, pending ...TierObject) error {
+//
+// retiring names base offsets this write stops describing, applied after the
+// pending overrides. It is the partner of pending and describes the same
+// instant — the moment of a commit, when the log's own view and the tier's
+// necessarily disagree — from the other side: pending is an object that is real
+// before its segment says so, retiring is a segment whose object stops being the
+// tier's before the segment says so. Only commitJoinedRun passes one; see there
+// for why a join cannot express it as an override.
+func (l *commitLog) publishTierManifests(tiers []Tier, retiring []int64, pending ...TierObject) error {
 	if !l.hasTier() {
 		return nil
 	}
 	objs, err := l.tierState()
 	if err != nil {
 		return err
+	}
+	// Refused rather than resolved either way. A base offset in both sets is a
+	// caller who has confused which of a join's inputs SURVIVES — the result
+	// keeps the run's lowest base offset, and that input is the one not retired
+	// — and both readings of the overlap publish a manifest that is wrong: drop
+	// the pending entry and the result is unnamed, keep it and an input the
+	// caller believes is gone is named by the result's own objects.
+	if len(retiring) > 0 && len(pending) > 0 {
+		for _, p := range pending {
+			for _, base := range retiring {
+				if p.BaseOffset == base {
+					return errors.Errorf(
+						"commitlog: tier manifest publish both adds and retires base "+
+							"offset %d", base)
+				}
+			}
+		}
 	}
 	if len(pending) > 0 {
 		override := make(map[int64]TierObject, len(pending))
@@ -149,6 +204,22 @@ func (l *commitLog) publishTierManifests(tiers []Tier, pending ...TierObject) er
 			}
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].BaseOffset < objs[j].BaseOffset })
+	}
+	// Applied after the overrides, and to the rebuilt list rather than to a
+	// tier's slice: base offsets are unique across a log, so a retiring entry
+	// needs no tier of its own to be unambiguous.
+	if len(retiring) > 0 {
+		gone := make(map[int64]bool, len(retiring))
+		for _, base := range retiring {
+			gone[base] = true
+		}
+		kept := objs[:0]
+		for _, o := range objs {
+			if !gone[o.BaseOffset] {
+				kept = append(kept, o)
+			}
+		}
+		objs = kept
 	}
 	// One manifest PER TIER, each naming only that tier's objects, because a
 	// tier that holds bytes it cannot describe is not self-contained — which is

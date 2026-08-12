@@ -5,6 +5,75 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.74.0 — 2026-08-12
+
+### Added
+
+- **Segment join now runs against a tier.** `CleanSpec.TierJoinBelow` was
+  accepted in v0.73.0 and the runs it described were planned and then skipped;
+  they are now executed. A run is refused if this log does not OWN the tier —
+  configuration is not permission, and leaving a read-only tier out of
+  `TierJoinBelow` only refuses the callers who did not ask.
+
+  A store has no rename, so the local commit point does not transfer: the join is
+  committed by a manifest write instead. That write has to be ONE write, because
+  a join changes the SET — it retires N base offsets and adds one — and a
+  manifest naming some of the inputs plus the result would claim records twice
+  while one naming neither would lose them. It is one write because
+  `publishTierManifests` rebuilds a whole manifest body and `Put`s it per tier,
+  and a run never spans tiers.
+
+  The two halves of that set reach the manifest by different routes, which is the
+  part that took the longest to get right. The result goes in as an ordinary
+  PENDING entry — its objects are uploaded but the segment has not switched to
+  them — and because the override is keyed by base offset and the result keeps
+  the run's LOWEST one, it REPLACES the first input rather than adding to it. The
+  other inputs cannot be expressed that way at all, since a pending entry names an
+  object and "stop naming this one" is not an object, so `publishTierManifests`
+  grew a retiring set to say it directly.
+
+  Retiring at publish time rather than mutating the segments first, which is the
+  route a tier MOVE takes. `swapTier` may repoint before its commit because it
+  repoints at objects that are real and complete; a join has nowhere to repoint an
+  input to, because the input is about to stop existing. Clearing their tier
+  fields ahead of the write would leave a failed publish holding segments the log
+  still serves but no longer believes are offloaded, and something would have to
+  roll that back — the obligation "the publish is the commit" exists to abolish.
+  Everything is now pre-commit or post-commit and nothing is in between.
+
+  The inputs a run absorbs are retired with a new `retireIntoJoin`, which is what
+  `Delete` does minus the deletion: `Delete` on an offloaded segment goes straight
+  to `store.Delete`, and a join holds every input's backing open until after the
+  install, so the objects it absorbs are exactly the ones something may still be
+  reading. They go on the pass's reclaim queue with the log object's backing
+  pinned, and are removed by a later `drainReclaim` once nothing holds it.
+
+  `retireIntoJoin` also clears the retired input's tier fields — post-commit,
+  which is the only point at which that is free. A pass joins several runs and a
+  segment stays in `l.segments` until the splice at the very end, so a later
+  run's commit, which rebuilds the manifest from `tierState()`, republished an
+  earlier run's retired inputs and named objects already queued for deletion.
+  Taking the segment out of the tier's view is what makes a retirement stick for
+  the rest of the pass.
+
+  A run that does NOT get through hands back nothing to reclaim, which is worth
+  saying because the opposite reads as the careful choice: the upload produced
+  those entries, so passing them on looks like not losing track of them. They
+  name the first input's *current* objects, and they only stop being current when
+  the repoint happens. `drainReclaim` deletes an entry whose backing has no
+  readers, and it is allowed to treat that as terminal only because every entry
+  was put there BY a swap — so entries from a run that never swapped are deleted
+  out from under a segment still serving them.
+
+  The test for the commit asserts on EVERY manifest the pass publishes rather
+  than the one it settles on, and in offsets rather than in keys: base offsets
+  alone cannot tell the states apart, since the result keeps the first input's, so
+  a manifest that had already retired the rest while that entry still described
+  the pre-join object would look perfectly consistent and would have lost every
+  record above it.
+
+  See `docs/segment-join.md`.
+
 ## v0.73.0 — 2026-08-12
 
 ### Added

@@ -190,7 +190,7 @@ Budget: a join is a rewrite for costing purposes and should draw on the same
 `RewriteBudget` / `TierBudgets`, after compaction's own debt — reclaiming bytes
 beats reclaiming file handles.
 
-## The tiered commit point (next)
+## The tiered commit point
 
 The local case commits with a rename. A store has no rename — `Put` overwrites
 unconditionally and cannot be made conditional — so the tiered join has to borrow
@@ -269,23 +269,35 @@ writes one, and every crash point above leaves the single manifest naming either
 all the inputs or A' — never both, never neither. The orphaned objects a crash
 leaves are unreferenced garbage, not a contested claim.
 
-Open questions this raises:
+What this settled, and how it was built:
 
 - ~~Is the manifest write atomic over a set of entries?~~ **Yes** — one whole-body
   `Put` per tier, rebuilt rather than patched, and a run never spans two tiers.
 - ~~Which base offset does the tier manifest keep?~~ **The run's lowest**, same as
   the local path, which is also what makes the pending entry a replace.
-- **What does `publishTierManifests` need to take?** A retiring set of base
-  offsets, applied to the rebuilt list after the overrides and before the grouping
-  by tier. Base offsets are unique across a log, so the set needs no tier of its
-  own. A base offset that is both pending and retiring should be REFUSED rather
-  than resolved either way: A' keeps the first input's base offset and the first
-  input is not retired, so an overlap is a caller who has confused which input
-  survives, and both readings of it publish a manifest that is wrong.
+- ~~What does `publishTierManifests` need to take?~~ **A retiring set of base
+  offsets**, applied to the rebuilt list AFTER the overrides. Base offsets are
+  unique across a log, so the set needs no tier of its own. A base offset that is
+  both pending and retiring is REFUSED rather than resolved either way: A' keeps
+  the first input's base offset and the first input is not retired, so an overlap
+  is a caller who has confused which input survives, and both readings of it
+  publish a manifest that is wrong — drop the pending entry and the result is
+  unnamed, keep it and an input the caller believes is gone is named by the
+  result's own objects.
 
   Small, and symmetric with `pending` — but it is a new way to be wrong about a
-  manifest, so it wants the treatment the pending path just got: a test that
-  watches every manifest a pass publishes, not only the one it settles on.
+  manifest, so it got the treatment the pending path had just got:
+  `TestATieredJoinCommitsInOneManifestWrite` watches every manifest a pass
+  publishes, not only the one it settles on.
+
+  That test earns its keep twice over. A pass joins several runs, and a segment
+  stays in `l.segments` until the splice at the very end — so a LATER run's
+  commit, which rebuilds the manifest from the log's own view, republished an
+  earlier run's retired inputs, naming objects already queued for reclamation.
+  That is why `retireIntoJoin` clears the input's tier fields: `tierState()` emits
+  one entry per segment with `store != nil`, so taking the segment out of the
+  tier's view is what makes the retirement stick for the rest of the pass. Doing
+  it post-commit is what keeps it safe.
 
   Between the publish (2) and the splice (4) an input is still reachable through
   `findSegment` while the manifest has stopped naming its object. That is fine —
@@ -300,11 +312,33 @@ Open questions this raises:
   existing `uploadReplacement`/`swapReplacement` pair already describes exactly
   that. Only inputs 2…N are new, which is a smaller surface than it looked.
 
-- **Does the retiring set need to reach `writeOneTierManifest` too?** A run never
-  spans tiers, so the join only ever needs one tier's manifest — but the mover is
-  the only caller of the one-tier form today, and adding a second changes what
-  that helper is for. Worth deciding deliberately rather than by whichever is
-  fewer lines.
+- ~~Does the retiring set need to reach `writeOneTierManifest` too?~~ **No.** A
+  run never spans tiers, so the join only ever needs one tier's manifest — but
+  that is an argument for the one-tier form being *sufficient*, not for it being
+  right. `writeOneTierManifest` exists because the MOVER needs two manifests
+  written in a specific order, and it refuses a name this log has no tier for
+  precisely because a silent no-op there strands a moved segment forever. A join
+  has no such ordering and no such name to get wrong, so `commitJoinedRun` goes
+  through the all-tiers form: rebuilding the other tiers' manifests from
+  `tierState` writes them back unchanged, which costs a `Put` each and keeps the
+  one-tier form the mover's alone.
+
+- **`retireJoinedInputs` cannot be reused as it stands** — hence
+  `segment.retireIntoJoin`. It calls `in.Delete()`,
+  and `Delete` on an offloaded segment goes straight to `store.Delete(storeKey)`
+  — the immediate deletion the reclaim queue exists to prevent, performed on
+  objects a scanner may still be reading. So inputs 2…N need a retire that does
+  what `Delete` does MINUS the deletion: mark the segment as having left, link it
+  to the result, invalidate the backing and the cached index entry, and hand the
+  store objects back as `pendingReclaim` with the log object's backing pinned —
+  the same three entries `uploadReplacement` builds, for the same reasons about
+  which of them need a pin. The local index file of an option-1 offloaded input
+  is the one piece with no equivalent there and has to be closed and removed.
+
+  This is the whole of the "one genuinely new mechanism" above, and it is smaller
+  than it sounded: it is `uploadReplacement`'s bookkeeping without the upload —
+  plus the tier-field clear the multi-run failure above forced, which
+  `uploadReplacement` has no need of because a rewrite's segment stays offloaded.
 
 - **The tiered path must check `tierWritable`, not just `TierJoinBelow`.** Leaving
   a read-only tier out of `TierJoinBelow` is how it stays untouched by default,
@@ -351,11 +385,14 @@ Open questions this raises:
 
 ## Status
 
-Built for LOCAL runs; tiered runs are planned and skipped.
+Built, for local and tiered runs alike.
 
 `clean_join.go` holds all of it: `planJoins` (step 1), `joinOne` (steps 2–3 and
-5) and `joinSegments`, which is the stage `clean()` runs after both arms of `if
-l.Compact` and whose return value is the splice (step 4).
+5), `joinOneTiered` for the tiered install, and `joinSegments`, which is the
+stage `clean()` runs after both arms of `if l.Compact` and whose return value is
+the splice (step 4). The manifest side is `commitJoinedRun` and the retiring set
+`publishTierManifests` grew for it; `segment.retireIntoJoin` is the one new verb
+the tiered path needed.
 
 The local commit point turned out to need no new mechanism, which is the one
 genuinely pleasant surprise in this feature. Building the result at the run's
@@ -366,8 +403,18 @@ superset. It was written for hazard-shaped-like-a-truncation; a join produces th
 identical shape on purpose, and `TestAJoinInterruptedBeforeItsInputsAreGoneResolvesOnOpen`
 reconstructs the window to prove it.
 
-What remains is hazard 2 in its tiered form: a store has no rename, so a tiered
-run needs one manifest write that adds the result and removes every input
-together. `joinOne` refuses an offloaded input outright until that exists —
-`joinSegments` never offers it one, and the refusal is there so a later caller
-cannot wander in.
+Hazard 2 in its tiered form is settled too, and it also needed less than it
+looked. A store has no rename, but `publishTierManifests` already rebuilt a whole
+manifest body and `Put` it per tier, so the one write a join's SET change needs
+was there — it only had to be able to say "and stop naming these". What it could
+not borrow was the mover's trick of mutating the segment first, because a join
+has nowhere to repoint an input to. `TestATieredJoinCommitsInOneManifestWrite`
+watches every manifest a pass publishes and, crucially, checks OFFSETS rather
+than base offsets: the result keeps the first input's base offset, so the
+half-committed state is invisible to a check that only counts entries.
+
+What `joinOne` still refuses outright is a run that MIXES local and offloaded
+segments — one commits by rename and the other by manifest, and a mixed run can
+do neither. `planJoins` never builds one; the refusal is there because that is a
+fact about the planner, and `joinOne` is what would corrupt a log the day it
+stopped being true.

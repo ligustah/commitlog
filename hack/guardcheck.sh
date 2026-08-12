@@ -1348,6 +1348,49 @@ run_guard "an unjoinable segment breaks the run" clean_join.go   '		if cap <= 0 
 			continue
 		}'   '^TestPlanJoinsGroupsAdjacentSegmentsWithinTheCap$'
 
+# Retiring a joined-away input takes it OUT of the tier, which is what stops
+# tierState reporting it. Neutralized by leaving the fields set, which looks
+# harmless -- the segment is marked left and linked, and the pass splices it away
+# at the end. It is not: a segment stays in l.segments until that splice, so the
+# NEXT run's commit rebuilds the manifest from a view that still contains this
+# one and republishes an entry for objects already queued for reclamation.
+run_guard "a retired join input leaves the tier" segment.go   '	s.store = nil
+	s.storeKey, s.indexKey, s.blocksKey = "", "", ""' '	_ = s.storeKey'   '^TestATieredJoinCommitsInOneManifestWrite$'
+
+# A joined-away tiered input's objects are QUEUED, not deleted. Neutralized into
+# the call that reads as the obvious way to retire a segment and is the one thing
+# this path must not do: Delete on an offloaded segment goes straight to
+# store.Delete, and a join holds every input's backing open until after the
+# install, so the objects it absorbs are precisely the ones something may still
+# be reading.
+run_guard "a joined-away tiered input is queued, not deleted" clean_join.go   '		superseded = append(superseded, in.retireIntoJoin(first)...)' '		in.SupersededBy(first)
+		_ = in.Delete()'   '^TestATieredJoinQueuesItsInputsObjectsRatherThanDeletingThem$'
+
+# A tiered run is refused in a store this log does not own. Neutralized by
+# dropping the ownership half and keeping the wiring half, which is the reading
+# that looks equivalent -- TierJoinBelow already has to name the tier for a run
+# to be planned. It is not equivalent: absence refuses only the callers who did
+# not ask, and this refuses the one who did.
+run_guard "a join refuses a tier this log does not own" clean_join.go   '	return t.writable != nil && t.commit != nil && t.writable(tier)' '	return t.writable != nil && t.commit != nil'   '^TestATieredJoinRefusesATierThisLogDoesNotOwn$'
+
+# The tiered commit names the JOINED extent. Neutralized to the first input's own
+# span, which is what a manifest write that retired the run's other inputs before
+# the result could cover them would publish: every entry present and consistent,
+# and every record above the first input named by nothing.
+run_guard "a tiered join commits the joined extent" clean_join.go   '	if err := tj.commit(retired, meta.tierObject(first.BaseOffset, tier)); err != nil {' '	mutantEntry := meta.tierObject(first.BaseOffset, tier)
+	mutantEntry.LastOffset = mutantEntry.FirstOffset
+	if err := tj.commit(retired, mutantEntry); err != nil {'   '^TestATieredJoinCommitsInOneManifestWrite$'
+
+# A join that could not commit hands back NO reclaim entries. Neutralized to the
+# reading that looks like careful bookkeeping -- the upload produced them, so
+# pass them on -- and is the one that deletes live data. They name the first
+# input's CURRENT objects, and they only stop being current when swapReplacement
+# repoints the segment away from them. drainReclaim's safety rests on "for a
+# superseded backing, refs can only fall", which holds only for entries a swap
+# put there; nothing swapped here, so a refcount of zero is an ordinary lull and
+# the delete lands on the object the log is reading.
+run_guard "a join that cannot commit queues nothing" clean_join.go   '		return nil, nil, errors.Wrapf(err, "commit joined run at %d", first.BaseOffset)' '		return nil, superseded, errors.Wrapf(err, "commit joined run at %d", first.BaseOffset)'   '^TestATieredJoinThatCannotCommitQueuesNothing$'
+
 # ---- tiered rewrite ----
 
 # A rewrite publishes its pending entry under the segment's OWN tier. Neutralized

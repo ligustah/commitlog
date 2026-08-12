@@ -668,7 +668,18 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int6
 	// this pass — a rewrite that reclaims bytes runs before a join that reclaims
 	// file handles. A shared counter would express the same order by starving the
 	// join whenever compaction had work, which is not the same thing.
-	joined, joinErr := joinSegments(cleaned, spec, newRewriteBudget(spec.maxRewrites, spec.RewriteBudget))
+	joined, joinSuperseded, joinErr := joinSegments(
+		cleaned, spec, newRewriteBudget(spec.maxRewrites, spec.RewriteBudget),
+		tierJoin{writable: l.tierWritable, commit: l.commitJoinedRun},
+	)
+	// Onto the cleaner's pile rather than returned separately: the pass drains
+	// that one under cleanMu and queues it AFTER the manifest republish, which is
+	// exactly the deferral a joined-away object needs. Appended even on the error
+	// path below, because the stage collapses several runs and the ones that
+	// COMMITTED before the failure have superseded objects that are this log's
+	// garbage. The failing run itself contributes nothing — a run only hands back
+	// reclaim entries once its swap has repointed the segment away from them.
+	l.compactCleaner.superseded = append(l.compactCleaner.superseded, joinSuperseded...)
 	if joinErr != nil {
 		// The partial list, for the reason the two stages above give at length: a
 		// committed join has already renamed itself over its first input.

@@ -117,6 +117,7 @@ type manifestRecorder struct {
 	SegmentStore
 	mu       sync.Mutex
 	on       bool
+	fail     int
 	captured [][]TierObject
 }
 
@@ -124,6 +125,18 @@ func (r *manifestRecorder) record(on bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.on = on
+}
+
+// failNext refuses the next n manifest publishes and no others.
+//
+// Bounded rather than latching, because a test about a failed COMMIT needs the
+// pass's end-of-pass republish to still land: that republish is what clears
+// tierManifestStale, and while it is set the reclaim queue is not drained at
+// all — which would hide, rather than prove, what the failed commit queued.
+func (r *manifestRecorder) failNext(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fail = n
 }
 
 func (r *manifestRecorder) published() [][]TierObject {
@@ -134,8 +147,15 @@ func (r *manifestRecorder) published() [][]TierObject {
 
 func (r *manifestRecorder) Put(key string, rd io.Reader, size int64) error {
 	r.mu.Lock()
-	on := r.on
+	on, refuse := r.on, false
+	if key == manifestKey && r.fail > 0 {
+		r.fail--
+		refuse = true
+	}
 	r.mu.Unlock()
+	if refuse {
+		return fmt.Errorf("commitlog: manifest publish refused by the test")
+	}
 	if key != manifestKey || !on {
 		return r.SegmentStore.Put(key, rd, size)
 	}

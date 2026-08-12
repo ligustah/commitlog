@@ -7,6 +7,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -2167,6 +2168,100 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 // Cleaned creates a cleaned segment for this segment.
 func (s *segment) Cleaned() (*segment, error) {
 	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, cleanedSuffix, s.codec)
+}
+
+// retireIntoJoin takes this OFFLOADED segment out of its tier because a join has
+// absorbed its records into joined, and hands back the store objects that
+// leaves behind.
+//
+// Delete is the obvious call here and the wrong one. On an offloaded segment it
+// goes straight to store.Delete, and the objects a join supersedes are precisely
+// the ones a scanner may still be mid-read of — the case pendingReclaim exists
+// for. So this does what Delete does MINUS the deletion: the caller queues what
+// comes back, and drainReclaim removes it on a later pass once nothing holds the
+// pin. It is uploadReplacement's bookkeeping without the upload, and the three
+// entries below carry pins on the same reasoning as the three there.
+//
+// Everything here is POST-COMMIT: the manifest that stopped naming these objects
+// has already been published, so nothing here can fail in a way that is worth
+// abandoning the pass for. The one operation that can fail — removing the local
+// index of an option-1 offloaded input — warns and carries on, leaving a file
+// that nothing reads and the next open ignores.
+//
+// The caller must have removed this segment from the published list, or be about
+// to: `left` is what stops a reader resolving into it, and `replacement` is what
+// sends one that already had to the joined segment instead.
+func (s *segment) retireIntoJoin(joined *segment) []pendingReclaim {
+	s.Lock()
+	defer s.Unlock()
+	if s.store == nil {
+		return nil
+	}
+	// Read under the same lock the invalidation happens under, exactly as
+	// uploadReplacement does: this is the backing readers are on right now, and
+	// it is the reason its object cannot be deleted yet.
+	oldBacking, _ := s.backing.(*storeBacking)
+	superseded := []pendingReclaim{{tier: s.tier, key: s.storeKey, pin: oldBacking}}
+	if s.indexKey != "" {
+		// No pin, for uploadReplacement's reason: an index object is fetched
+		// whole into indexCache rather than streamed from, so only a fetch
+		// already in flight can be reading it, and the queue's deferral covers
+		// that on its own.
+		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.indexKey})
+	}
+	if s.blocksKey != "" {
+		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.blocksKey})
+	}
+
+	// Nothing should reach these objects again. A reader that took the backing
+	// before this call keeps reading — that is what the pin is for — but no new
+	// one may, which is also what makes drainReclaim's "refs can only fall"
+	// argument hold for these entries.
+	if oldBacking != nil {
+		oldBacking.Invalidate()
+	}
+	if s.indexKey != "" && s.indexCache != nil {
+		s.indexCache.Invalidate(s.indexKey)
+	}
+
+	// An option-1 offloaded segment keeps its index on LOCAL disk. It describes
+	// records the joined segment now holds under its own index, so it is dead
+	// weight rather than a hazard.
+	if s.Index != nil {
+		name := s.Index.Name()
+		if err := s.Index.Close(); err != nil {
+			slog.Warn("commitlog: a joined-away segment's local index would not close",
+				slog.Int64("base_offset", s.BaseOffset), slog.String("err", err.Error()))
+		} else if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+			slog.Warn("commitlog: a joined-away segment's local index could not be removed",
+				slog.Int64("base_offset", s.BaseOffset), slog.String("err", err.Error()))
+		}
+		s.Index = nil
+	}
+
+	// Out of the tier, which is what stops tierState reporting it. This matters
+	// beyond tidiness and is easy to get wrong by leaving out: a segment stays in
+	// l.segments until the pass splices it at the very end, so a LATER run's
+	// commit — which rebuilds the manifest from tierState — would otherwise
+	// publish this segment again, resurrecting an entry for objects already
+	// queued for reclamation.
+	//
+	// Safe here for the reason the whole ordering exists: this is post-commit.
+	// The manifest that stopped naming these objects is already published, and
+	// clearing the fields cannot be undone by anything failing afterwards. A
+	// reader that took the backing before this call is unaffected — it holds the
+	// pin, and the backing itself is untouched.
+	s.store = nil
+	s.storeKey, s.indexKey, s.blocksKey = "", "", ""
+
+	// The body of SupersededBy, inlined because that method takes the lock this
+	// call already holds. Both halves matter: `left` stops a reader resolving
+	// into a segment whose records have moved, and the link is what sends one
+	// that already had to the joined segment rather than reporting it gone.
+	s.left = true
+	s.replacement = joined
+	segmentDepartures.Add(1)
+	return superseded
 }
 
 // Joined creates the working copy a join builds its result in.
