@@ -77,7 +77,10 @@ survivor, `findEntryByTimestampResolving` resolves a single segment. `LocalBytes
 resolves every entry and **sums** `seg.Position()`, so it would count A' once per
 input and report a log using more local bytes than it does. It is a public method
 (`interface.go:308`) with no in-repo caller, so the wrong answer would leave this
-repo silently.
+repo silently — and it does leave it. durable_streams calls it per partition in
+the broker daemon's disk-usage measurement, which is a number a host sizes storage
+from. Worth recording that the consumer is real rather than hypothetical, because
+it is what makes the splice a constraint instead of a preference.
 
 The conclusion is a design constraint, not a bug to fix later: **the swap in
 `l.segments` must replace both entries with one, atomically, under the segment

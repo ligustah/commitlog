@@ -66,11 +66,17 @@ func writeLocalBlockTable(seg *segment) error {
 // downloading the object again — the whole cost the table exists to remove — so
 // a silent fallback there buys a slow success and hides the failure. Locally the
 // bytes are already on the disk the table sits on, the table is derived data
-// that is legitimately missing for every segment sealed before this existed or
-// by a best-effort write that failed, and refusing to open a log because a file
-// it can regenerate is unreadable would be a far worse regression than a slow
-// open. Nothing is trusted that fails to verify; it is only recomputed instead
-// of refused.
+// that is legitimately missing whenever its best-effort write failed, and
+// refusing to open a log because a file it can regenerate is unreadable would be
+// a far worse regression than a slow open. Nothing is trusted that fails to
+// verify; it is only recomputed instead of refused.
+//
+// This used to be justified partly by "every segment sealed before this
+// existed", which is a compatibility argument and no longer load-bearing: the
+// library is pre-v1 with nothing to migrate, and the failed-write case is a live
+// one that keeps the branch on its own. Struck rather than left standing,
+// because a reason that only holds for old data invites deleting the branch the
+// day someone checks whether any old data exists.
 func loadLocalBlockTable(seg *segment, physSize int64) (blocks []blockRef, logical int64, ok bool) {
 	data, err := os.ReadFile(localBlockTablePath(seg))
 	if err != nil {
