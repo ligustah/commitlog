@@ -925,6 +925,20 @@ run_guard "a magic with no version is refused" inspect.go   '		if hdr[0] == bloc
 # reclaims bytes, not the compile.
 run_guard "a log cleans at open" clean.go   '	l.cleanAtOpen()' '	_ = l.cleanAtOpen'   '^TestALogCleansAtOpenWithoutWaitingForATick$'
 run_guard "a ceiling needs the auto cleaner off" clean.go   '	if _, ok := spec.Ceiling.Get(); ok && !l.DisableAutoClean {' '	if false {'   '^TestACeilingOnAnAutoCleaningLogIsRefused$'
+
+# A named tier with a budget of 0 is refused. Neutralized to `d < 0`, which is
+# unreachable and keeps `d` used so the package still builds -- a `false` here
+# orphans it and the harness reports a build error instead of an uncovered
+# guard. Without the refusal, budgetFor's fallback arm swallows the value: the
+# branch a caller reaches by saying NOTHING is also the one reached by saying 0,
+# so an explicitly-supplied budget becomes unreachable.
+run_guard "a tier budget of zero is refused" clean.go   '		if d == 0 {' '		if d < 0 {'   '^TestATierBudgetOfZeroIsRefused$'
+
+# And the refusal stays about the VALUE. Neutralized to `d >= 0`, which fires on
+# every entry -- stricter-looking and wrong, because absence from TierBudgets is
+# the documented way to ask for RewriteBudget, so a refusal this wide breaks the
+# caller who spelled the default correctly.
+run_guard "a tier budget refusal is about the value" clean.go   '		if d == 0 {' '		if d >= 0 {'   '^TestATierAbsentFromTierBudgetsStillRuns$'
 # The store's read side and its commit point are ONE window seen from two ends:
 # a publish renames over the object path, and on Windows that fails the reader's
 # open and a reader fails the publisher's rename. Guarded separately because

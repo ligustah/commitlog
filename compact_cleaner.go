@@ -317,8 +317,12 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		if b, ok := tierBudgets[tier]; ok {
 			return b
 		}
+		// Absence only. An entry of 0 does not reach here — CleanWithSpec
+		// refuses it — so this arm cannot swallow a value the caller supplied,
+		// which is the whole reason the refusal exists rather than a wider
+		// condition here.
 		d, ok := spec.TierBudgets[tier]
-		if !ok || d == 0 {
+		if !ok {
 			d = spec.RewriteBudget
 		}
 		b := newRewriteBudget(spec.maxRewrites, d)

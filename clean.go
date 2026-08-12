@@ -271,13 +271,12 @@ type CleanSpec struct {
 	// falls back to RewriteBudget, so a caller that sets nothing sees no
 	// change.
 	//
-	// An entry of 0 falls back too, and is NOT the "unbounded" that 0 means on
-	// RewriteBudget. Stated because the asymmetry is otherwise unguessable, and
-	// because zeroing a budget is what a caller reaches for to say "spend as
-	// long as it takes here" — which would be the one instruction this field
-	// exists to make impossible, since an unbounded remote rewrite is exactly
-	// the pass-consuming case below. A tier that should genuinely be unbounded
-	// wants a duration longer than any pass, not a zero.
+	// An entry of 0 is REFUSED, rather than falling back or meaning unbounded.
+	// It has two readings and this field can serve neither: unbounded is what 0
+	// means on RewriteBudget one field up, and an unbounded tiered rewrite is
+	// the pass-consuming case described below; unset is what absence from the
+	// map already says. Say unbounded with a duration longer than a pass, and
+	// unset by leaving the tier out.
 	//
 	// Separate from RewriteBudget because the two rewrites cost wildly
 	// different things. A local rewrite reads and writes local disk; a tiered
@@ -418,6 +417,29 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 			"commitlog: CleanWithSpec was given a CleanSpec.Ceiling on a log whose " +
 				"automatic cleaner is running, and the automatic pass would compact " +
 				"the records the ceiling protects; set Options.DisableAutoClean")
+	}
+	// Refused for the same reason and by the same rule: a spec that cannot be
+	// honoured fails loudly rather than being reinterpreted. Naming a tier and
+	// giving it 0 has two readings and the field can serve neither. Read as
+	// "unbounded", which is what 0 means on RewriteBudget one field up, it
+	// removes the only bound on the remote rewrite that this field exists to
+	// keep from consuming the pass. Read as "unset", it is a value the caller
+	// wrote down and the pass ignores — and map ABSENCE already says unset, so
+	// the caller who wanted that had a way to say it.
+	//
+	// Which is to say the entry is not bad input so much as input with no
+	// meaning available, and the fix a caller needs differs by which they meant.
+	// A duration longer than any pass is how you say unbounded here; deleting
+	// the key is how you say unset.
+	for tier, d := range spec.TierBudgets {
+		if d == 0 {
+			return 0, errors.Errorf(
+				"commitlog: CleanSpec.TierBudgets names tier %q with a budget of 0, "+
+					"which is neither unbounded (that is what 0 means on RewriteBudget, "+
+					"and an unbounded tiered rewrite is what this field exists to "+
+					"prevent) nor unset (absence from the map is); remove the entry, or "+
+					"give it a duration longer than a pass", tier)
+		}
 	}
 
 	verified, err := l.cleanPass(spec)
