@@ -497,6 +497,15 @@ run_guard "every refused epoch assignment logs" leader_epoch_cache.go   '	defaul
 run_guard "leader epoch parsed unsigned" leader_epoch_cache.go   '		leaderEpoch, err := strconv.ParseUint(scanner.Text(), 10, 64)'   '		signedEpoch, err := strconv.ParseInt(scanner.Text(), 10, 64)
 		leaderEpoch := uint64(signedEpoch)'   '^TestALeaderEpochCheckpointWithANegativeEpochIsRefused$'
 
+# The checkpoint's VERSION gate is exact equality, and the neutralization is the
+# form it used to have. `> leaderEpochFileV0` reads as "reject anything newer",
+# but Atoi is signed and v0 is the FIRST version, so the other half of that
+# comparison is not the empty set: every negative version passed and the file was
+# then read as v0. Same laundering as the guard above, one field over, and it
+# matters for the same reason -- this file carries no checksum, so the parse is
+# the only integrity check it gets.
+run_guard "checkpoint version is exact" leader_epoch_cache.go   '	if version != leaderEpochFileV0 {'   '	if version > leaderEpochFileV0 {'   '^TestALeaderEpochCheckpointWithANegativeVersionIsRefused$'
+
 # A store key names an object INSIDE the store. The manifest is the one place
 # keys arrive from outside, and they become an action rather than a description:
 # s.storeKey is handed to store.Delete. Neutralizing the boundary check lets a

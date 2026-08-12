@@ -312,7 +312,14 @@ func readLeaderEpochOffsets(file io.Reader) ([]*epochOffset, error) {
 	if err != nil {
 		return nil, pkgErrors.Wrap(err, "invalid file version value")
 	}
-	if version > leaderEpochFileV0 {
+	// Exact equality, not `> leaderEpochFileV0`. Atoi is SIGNED, and v0 is the
+	// first version, so "reject anything newer" also silently meant "accept
+	// anything older" — which is not the empty set here: a version line reading
+	// "-1" passed and the file was then read as v0. That is the same laundering
+	// the epoch parse below refuses, and it matters for the same reason, spelled
+	// out there: this file carries no checksum, so its parse is the only
+	// integrity check it ever gets.
+	if version != leaderEpochFileV0 {
 		return nil, fmt.Errorf("unknown version: %d", version)
 	}
 	if !scanner.Scan() {
