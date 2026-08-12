@@ -2,7 +2,6 @@
 package commitlog
 
 import (
-	"bytes"
 	"context"
 	stderrors "errors"
 	"fmt"
@@ -93,7 +92,12 @@ var ErrBlockFormat = errors.New("unsupported block format version")
 const (
 	logFileSuffix   = ".log"
 	indexFileSuffix = ".index"
-	hwFileName      = "replication-offset-checkpoint"
+	// tmpSuffix marks the in-progress half of a write that finishes with a
+	// rename. Named here rather than spelled at each site because it is also
+	// what a sidecar name must not end in: a file called "x.tmp" is one the
+	// log may replace or sweep away as its own unfinished work.
+	tmpSuffix  = ".tmp"
+	hwFileName = "replication-offset-checkpoint"
 	// maxSyncWindow caps how long a flush leader waits for others to join it.
 	// The window tracks the last flush's duration, so a single pathological
 	// fsync would otherwise park every later commit behind its outlier.
@@ -2449,32 +2453,6 @@ func (l *commitLog) checkpointHW(budget time.Duration) error {
 	}
 
 	return atomicWriteFileWithin(file, r, budget)
-}
-
-// Sidecars are small named metadata files owned by the log's CLIENT, stored
-// in the log directory next to the segments (e.g. durable_streams' recovery
-// floor checkpoint). Put writes atomically (temp + rename), so a crash never
-// leaves a torn sidecar; Get returns os.ErrNotExist-satisfying errors when
-// absent; Remove of an absent sidecar is a no-op. Names must not collide
-// with the log's own files (segments, indexes, checkpoints).
-func (l *commitLog) PutSidecar(name string, data []byte) error {
-	return AtomicWriteFileWithRetry(filepath.Join(l.Path, name), bytes.NewReader(data))
-}
-
-func (l *commitLog) GetSidecar(name string) ([]byte, error) {
-	// Paired with PutSidecar's AtomicWriteFileWithRetry: a sidecar written with
-	// a retry deserves to be read with one, and the documented contract that an
-	// absent sidecar satisfies os.ErrNotExist is preserved — ReadFileWithRetry
-	// returns that immediately rather than waiting the file out.
-	return ReadFileWithRetry(filepath.Join(l.Path, name))
-}
-
-func (l *commitLog) RemoveSidecar(name string) error {
-	err := os.Remove(filepath.Join(l.Path, name))
-	if err != nil && os.IsNotExist(err) {
-		return nil
-	}
-	return err
 }
 
 // SegmentBlockCounts reports each segment's in-memory block-index size

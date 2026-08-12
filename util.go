@@ -7,11 +7,39 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	atomic_file "github.com/natefinch/atomic"
 	pkgErrors "github.com/pkg/errors"
 )
+
+// validBareName reports whether name identifies ONE entry inside a directory,
+// rather than a path that can mean something outside it. kind names what the
+// caller calls its names, so the error says which boundary was crossed.
+//
+// It exists once and is called from two places because the names it screens are
+// ACTIONS rather than descriptions: a store key reaches store.Delete, a log
+// sidecar name reaches os.Remove and an atomic write. On both routes the only
+// thing between the name and the disk is filepath.Join, which CLEANS "../x"
+// into a path outside the directory instead of refusing it — so a name nobody
+// checks is a name that silently works. See validStoreKey and checkSidecarName
+// for why each caller's names arrive from somewhere that can send those.
+func validBareName(kind, name string) error {
+	if name == "" {
+		return pkgErrors.Errorf("%s is empty", kind)
+	}
+	if name == "." || name == ".." {
+		return pkgErrors.Errorf("%s %q is a directory reference", kind, name)
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return pkgErrors.Errorf("%s %q contains a path separator", kind, name)
+	}
+	if strings.ContainsRune(name, 0) {
+		return pkgErrors.Errorf("%s %q contains a NUL byte", kind, name)
+	}
+	return nil
+}
 
 // findSegment returns the first segment whose next assignable offset is
 // greater than the given offset. Returns nil and the index where the segment

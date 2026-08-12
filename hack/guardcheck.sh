@@ -515,8 +515,26 @@ run_guard "checkpoint version is exact" leader_epoch_cache.go   '	if version != 
 run_guard "manifest refuses a foreign key" manifest.go   '		if err := validStoreKey(o.LogKey); err != nil {'   '		if err := error(nil); err != nil {'   '^TestATierManifestNamingAKeyOutsideTheStoreIsRefused$'
 
 # The same rule one layer down, where the key becomes a path. This is the guard
-# that makes the consequence concrete rather than the policy.
-run_guard "store key stays inside the store" segment_store.go   '	if strings.ContainsAny(key, `/\`) {'   '	if false {'   '^TestAFileSegmentStoreKeyCannotReachOutsideItsDirectory$'
+# that makes the consequence concrete rather than the policy. It now lives in
+# util.go: a log sidecar name needs the identical check on a different route, and
+# one rule with two callers beats two rules that have to agree.
+run_guard "a bare name stays inside its directory" util.go   '	if strings.ContainsAny(name, `/\`) {'   '	if false {'   '^TestAFileSegmentStoreKeyCannotReachOutsideItsDirectory$'
+
+# ...which is the other caller. Same removal, different test: the store's keys
+# arrive in a manifest, the log's sidecar names arrive from the log's CLIENT, and
+# neither test would notice the check going missing for the other one.
+run_guard "a sidecar name stays inside the log" util.go   '	if strings.ContainsAny(name, `/\`) {'   '	if false {'   '^TestASidecarNameCannotReachOutsideTheLog$'
+
+# The plain-name rule is only half of it. A sidecar can be a perfectly ordinary
+# file name and still be one the LOG owns -- "00000000000000000000.index" names a
+# live index and RemoveSidecar deletes it, "replication-offset-checkpoint"
+# overwrites the high watermark, "notes.log" makes the log refuse to open at all
+# because openLog scans by suffix and fails on a stem that is not an integer.
+# This contract existed for as long as the API did, as a sentence on the
+# interface telling the caller not to do it.
+run_guard "a sidecar cannot name a log file" sidecar.go   '	for _, suffix := range logOwnedFileSuffixes {'   '	for _, suffix := range []string(nil) {'   '^TestASidecarCannotNameOneOfTheLogsOwnFiles$'
+
+run_guard "a sidecar cannot name a log checkpoint" sidecar.go   '	for _, owned := range logOwnedFileNames {'   '	for _, owned := range []string(nil) {'   '^TestASidecarCannotNameOneOfTheLogsOwnFiles$'
 
 # Nothing REFERENCES the descriptor -- it is what the store says about itself,
 # not part of what it holds -- so the reference-based garbage rule collects it

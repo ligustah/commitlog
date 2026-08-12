@@ -1,7 +1,6 @@
 package commitlog
 
 import (
-	"errors"
 	"hash/crc32"
 )
 
@@ -80,15 +79,6 @@ func (f *crcField) ReserveSize() int {
 func (f *crcField) Fill(curOffset int, buf []byte) error {
 	crc := crc32.Checksum(buf[f.StartOffset+4:curOffset], crc32cTable)
 	encoding.PutUint32(buf[f.StartOffset:], crc)
-	return nil
-}
-
-// Check the CRC digest.
-func (f *crcField) Check(curOffset int, buf []byte) error {
-	crc := crc32.Checksum(buf[f.StartOffset+4:curOffset], crc32cTable)
-	if crc != encoding.Uint32(buf[f.StartOffset:]) {
-		return errors.New("crc didn't match")
-	}
 	return nil
 }
 

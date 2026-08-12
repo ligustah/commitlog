@@ -242,7 +242,7 @@ func encodeKeyDigest(d *keyDigest) []byte {
 func writeKeyDigest(seg *segment, d *keyDigest) error {
 	data := encodeKeyDigest(d)
 	path := digestPath(seg)
-	tmp := path + ".tmp"
+	tmp := path + tmpSuffix
 	if err := os.WriteFile(tmp, data, 0666); err != nil {
 		return errors.Wrap(err, "write key digest")
 	}

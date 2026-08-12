@@ -9,6 +9,29 @@ library from that fork onward.
 
 ### Fixed
 
+- **A sidecar name was an action, and the log took it on faith.** `PutSidecar`,
+  `GetSidecar` and `RemoveSidecar` passed the client's `name` straight into
+  `filepath.Join(l.Path, name)`. The contract was written down — *"the name must
+  not collide with the log's own files"* — on the `CommitLog` interface, where it
+  is advice to the caller rather than something the log does.
+
+  `filepath.Join` CLEANS a traversal instead of refusing it, so `"../../state"`
+  named a real file outside the log directory and `RemoveSidecar` deleted it. A
+  name did not have to leave the directory to do damage either:
+  `"00000000000000000000.index"` named a live index, `"replication-offset-checkpoint"`
+  overwrote the high watermark, and `"notes.log"` made the log refuse to OPEN —
+  `openLog` scans by suffix and fails outright on a `.log` whose stem is not an
+  integer, which is the failure hardest to read backwards to its cause.
+
+  All three calls now refuse such a name with the new `ErrInvalidSidecarName`
+  rather than acting on it. The plain-name half of the rule is `validBareName`,
+  shared with `validStoreKey` — the manifest's keys had already been given this
+  exact treatment for the same reason, and one rule with two callers beats two
+  rules that have to agree.
+
+  `GetSidecar` and `RemoveSidecar` had no caller anywhere in the repo before
+  this, tests included, so nothing said what they did.
+
 - **The leader epoch checkpoint accepted a negative format version.**
   `readLeaderEpochOffsets` gated the version line with
   `if version > leaderEpochFileV0`, which reads as "reject anything newer".
@@ -35,6 +58,18 @@ library from that fork onward.
   Found by sweeping for version gates that accept more than one version. Three
   of the package's four (descriptor, manifest, inspect) were already exact
   equality; this was the one that was not.
+
+### Removed
+
+- `crcField.Check`, unexported and unreachable — no call site anywhere in the
+  package, tests and method expressions included. `staticcheck`'s `U1000` never
+  flagged it because `&crcField{}` is converted to the `pushEncoder` interface,
+  after which every exported method on the type counts as reachable; the same
+  shelter that once kept 175 dead lines of `packetEncoder` green. It also read
+  as the CRC verification path while the real one is
+  `SerializedMessage.crcMatches` and the explicit checks on the read paths.
+  Nothing outside the package could name it, so nothing outside the package
+  changes.
 
 ## v0.68.1 — 2026-08-12
 

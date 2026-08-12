@@ -39,7 +39,7 @@ func localBlockTablePath(seg *segment) string {
 // it would be the CRC rather than the design that caught it.
 func writeLocalBlockTable(seg *segment) error {
 	path := localBlockTablePath(seg)
-	tmp := path + ".tmp"
+	tmp := path + tmpSuffix
 	if err := os.WriteFile(tmp, encodeBlockTable(seg.blocks), 0666); err != nil {
 		return err
 	}

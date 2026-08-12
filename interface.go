@@ -472,7 +472,9 @@ type CommitLog interface {
 
 	// PutSidecar atomically writes a small named metadata file owned by the
 	// log's client into the log directory (e.g. a recovery checkpoint). The
-	// name must not collide with the log's own files.
+	// name must be a plain file name that does not collide with the log's own
+	// files; all three calls REFUSE one that is not, with
+	// ErrInvalidSidecarName, rather than acting on it.
 	PutSidecar(name string, data []byte) error
 
 	// GetSidecar reads a client sidecar file; the error satisfies

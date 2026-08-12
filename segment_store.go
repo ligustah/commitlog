@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -221,20 +220,11 @@ func NewFileSegmentStore(dir string) (*FileSegmentStore, error) {
 // outside the store directory is not, and nothing else on that route was ever
 // going to catch it — filepath.Join CLEANS the traversal away rather than
 // refusing it, which is what made the escape silent.
+// The rule itself lives in validBareName, which a log sidecar needs for the
+// same reason on a different route. The reasoning above is why a STORE KEY has
+// to obey it; the shared function is what obeying it means.
 func validStoreKey(key string) error {
-	if key == "" {
-		return errors.New("store key is empty")
-	}
-	if key == "." || key == ".." {
-		return errors.Errorf("store key %q is a directory reference", key)
-	}
-	if strings.ContainsAny(key, `/\`) {
-		return errors.Errorf("store key %q contains a path separator", key)
-	}
-	if strings.ContainsRune(key, 0) {
-		return errors.Errorf("store key %q contains a NUL byte", key)
-	}
-	return nil
+	return validBareName("store key", key)
 }
 
 // objectPath maps a key to a file path within dir, refusing any key that would
@@ -251,7 +241,7 @@ func (s *FileSegmentStore) Put(key string, r io.Reader, size int64) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	tmp := path + tmpSuffix
 	f, err := os.Create(tmp)
 	if err != nil {
 		return errors.Wrap(err, "create store object")
@@ -335,7 +325,7 @@ func (s *FileSegmentStore) List() ([]string, error) {
 	}
 	var keys []string
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) == ".tmp" {
+		if e.IsDir() || filepath.Ext(e.Name()) == tmpSuffix {
 			continue
 		}
 		keys = append(keys, e.Name())
