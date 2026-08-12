@@ -190,6 +190,54 @@ Budget: a join is a rewrite for costing purposes and should draw on the same
 `RewriteBudget` / `TierBudgets`, after compaction's own debt — reclaiming bytes
 beats reclaiming file handles.
 
+## The tiered commit point (next)
+
+The local case commits with a rename. A store has no rename — `Put` overwrites
+unconditionally and cannot be made conditional — so the tiered join has to borrow
+the substitute a tiered REWRITE already uses: write the new bytes to a key
+nothing is reading, and let the MANIFEST decide which object the segment reads.
+`uploadReplacement` / `swapReplacement` are that pair, split around the publish.
+
+What a join changes about it, and the whole difficulty: a rewrite's publish names
+ONE base offset before and after, so "publish per segment, never under a segment
+lock" is well defined. A join's publish retires N base offsets and adds one. So
+the manifest write must be a SET operation — add A', remove A…N — applied as one
+write, or the window between two writes is exactly the "claimed twice or by
+nothing" state hazard 2 forbids.
+
+Ordering, with what each crash leaves:
+
+1. Upload the joined log object (and its index object, for an offloaded index)
+   under fresh keys. A crash here leaves orphans nothing points at — reclaimable
+   by comparing the store's keys against the manifest, which is what a crashed
+   rewrite already leaves.
+2. ONE manifest write that adds A' and removes every input. This is the commit.
+   Before it the manifest names the inputs and the log reads them; after it the
+   manifest names A' alone. There is no state in between, which is the entire
+   requirement.
+3. Swap the in-memory segments and splice the list, exactly as the local path
+   does — `SupersededBy` on every input above the first, and the stage returns
+   the new list for the pass to publish in one critical section.
+4. Queue the superseded objects through `pendingReclaim`, AFTER the manifest, so
+   an object is only ever considered for deletion once a published manifest has
+   stopped naming it — the rule `clean()` already follows for rewrites.
+
+Open questions this raises, none of them answered yet:
+
+- **Is the manifest write actually atomic over a set of entries?** The local path
+  got its atomicity free; this one is the whole commit, so "one write" has to
+  mean one object `Put` of a whole manifest, not a read-modify-write that another
+  process can interleave with. If the manifest is per-tier and a run is
+  per-tier — which the planner guarantees — then one tier's manifest is the only
+  one that changes, which is the shape that makes this tractable.
+- **Which base offset does the tier manifest keep?** The same one the local path
+  keeps — the run's lowest — so that `TierObject.BaseOffset` and the local
+  identity never disagree.
+- **Does the reclaim pin survive the join?** A scan holds a claim on each input's
+  backing; `joinOne` already keeps every scanner open until after the install for
+  exactly this reason. The tiered path has to keep that property while the commit
+  moves from a rename to a manifest write.
+
 ## Settled
 
 - ~~Does anything assume `replacement` preserves the base offset?~~ No: every
