@@ -323,6 +323,9 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	// segment skipped for want of tier budget, its governor rewritten anyway
 	// because the local budget still had room.
 	skipped := false
+	// The failure that stopped the rewrite phase, if any. Held rather than
+	// returned from inside the loop: see the break below.
+	var rewriteErr error
 	for _, i := range order {
 		b := budget
 		tiered := segments[i].isOffloaded()
@@ -350,7 +353,30 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 		}
 		cleaned, msgsRemoved, err := c.cleanSegment(spec, segments[i], merged.drops[i], bw, sc)
 		if err != nil {
-			return nil, 0, -1, err
+			// Stop the pass, but do NOT throw away the rewrites it already
+			// installed. Each of those has been through Replace, which renames
+			// it over its source's files and closes the source: on disk the
+			// rewrite IS that base offset now, and the source is a closed
+			// segment holding files that no longer exist.
+			//
+			// Returning nil here dropped every one of them on the floor. The
+			// caller then swapped in the delete stage's list — the CLOSED
+			// sources — so the replacements were reachable only through
+			// current()'s redirect, never named by l.segments, and therefore
+			// never walked by closeSegments. Their handles and index mappings
+			// were held until the process exited, while Close reported success.
+			// durable_streams saw the far end of that on Windows: a data
+			// directory that could not be removed after a Close that returned
+			// nil, blocked by "NNN.index ... used by another process".
+			//
+			// So the assembly below runs and the partial list is returned with
+			// the error, exactly as the delete stage already hands back the
+			// segments that survived a partial retention failure. The rewrite
+			// ordering rule survives the break for the same reason it survives
+			// a spent budget: nothing is rewritten after this point, so no
+			// governor can overtake what it governs.
+			rewriteErr = err
+			break
 		}
 		b.note()
 		rewritten[i], didRewrite[i] = cleaned, true
@@ -396,6 +422,14 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	last := segments[len(segments)-1]
 	compacted = append(compacted, last)
 
+	if rewriteErr != nil {
+		// A pass that stopped part-way verified NOTHING. The floor has to cover
+		// a gap-free prefix, and the segment that failed can be anywhere in it —
+		// the rewrite phase runs in density order, not offset order, so "what
+		// was rewritten before the failure" says nothing about which prefix is
+		// contiguous. The list is still returned: it is what the log holds.
+		return compacted, removed, -1, rewriteErr
+	}
 	// Stripping applies to offsets strictly below StripBelow, so the record
 	// AT StripBelow keeps its headers; a spec without strip semantics
 	// verifies nothing.
@@ -772,6 +806,32 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	if err != nil {
 		return nil, 0, err
 	}
+	// The working copy is this function's to dispose of on every way out of it.
+	// It is an open segment with its own files and its own index mapping, and
+	// until it is installed NOTHING else can reach it — the log does not name it
+	// and the source does not link to it — so a return that leaves it behind
+	// holds a handle and a mapping until the process exits and strands its
+	// .cleaned artifacts on disk. Only the scan-failure path used to do this by
+	// hand, which left every other error return leaking one.
+	//
+	// The suffix decides whether disposal is still the right act. Past Replace's
+	// renames this same object owns the SOURCE's files under the source's names,
+	// and deleting it there would unlink the installed rewrite; Replace clears
+	// the suffix at exactly that point, and a Replace that failed before it puts
+	// the files back under the working names. So a suffix that is still set
+	// means the copy is still only a copy.
+	disposed := false
+	defer func() {
+		if disposed {
+			return
+		}
+		cleaned.RLock()
+		working := cleaned.suffix != ""
+		cleaned.RUnlock()
+		if working {
+			cleaned.Delete() // nolint: errcheck — best effort on a failure path
+		}
+	}()
 	bw.reset(cleaned)
 	var (
 		ss = newSegmentScannerCache(seg, sc)
@@ -797,10 +857,9 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 			// The rewrite is about to REPLACE this segment, so a scan that
 			// stopped early would install a copy missing everything past the
 			// damage and then delete the original — silently, reporting success.
-			// The partial copy is thrown away and the source left exactly as it
-			// is.
+			// The partial copy is thrown away (by the deferred disposal above)
+			// and the source left exactly as it is.
 			if !errors.Is(err, io.EOF) {
-				cleaned.Delete()
 				return nil, 0, fmt.Errorf("%w: rewrite of segment %d: %w",
 					ErrSegmentUnreadable, seg.BaseOffset, err)
 			}
@@ -858,6 +917,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 
 	if cleaned.IsEmpty() {
 		// If the new segment is empty, remove it along with the old one.
+		disposed = true
 		return nil, removed, cleanupEmptySegment(cleaned, seg)
 	}
 	// After either outcome the segment's digest is refreshed with a strip
@@ -880,6 +940,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	// prove it without the scan this pass just paid. (Consolidation passes
 	// are exempt: their value IS the rewrite.)
 	if removed == 0 && stripped == 0 && !consolidating {
+		disposed = true
 		if err := cleaned.Delete(); err != nil {
 			return nil, 0, err
 		}
@@ -911,6 +972,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 			return nil, removed, err
 		}
 		c.superseded = append(c.superseded, reclaim...)
+		disposed = true
 		if err := cleaned.Delete(); err != nil { // the local vehicle is done
 			return nil, removed, err
 		}
@@ -967,14 +1029,19 @@ func consolidateSegments(segments []*segment, maxRewrites int, budgetDur time.Du
 	budget := newRewriteBudget(maxRewrites, budgetDur)
 	bw := &blockWriter{}
 	sc := newBlockCache() // one decode-buffer pair for the whole pass
-	for _, seg := range segments[:len(segments)-1] {
+	for i, seg := range segments[:len(segments)-1] {
 		if !seg.needsBlockConsolidation() || !budget.allow() {
 			out = append(out, seg)
 			continue
 		}
 		cleaned, err := consolidateOne(seg, bw, sc)
 		if err != nil {
-			return nil, err
+			// The same rule the compaction loop follows, for the same reason: a
+			// rewrite this pass already installed has renamed itself over its
+			// source and closed it, so returning nil would leave it named by
+			// nothing and closed by nobody. Everything from this segment on is
+			// untouched and carries over as it stands, including the active one.
+			return append(out, segments[i:]...), err
 		}
 		out = append(out, cleaned)
 		budget.note()

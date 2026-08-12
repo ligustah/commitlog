@@ -1190,6 +1190,25 @@ run_guard "a failed checkpoint does not abort the close" commitlog.go   '	return
 # able to fail the whole delete.
 run_guard "delete does not checkpoint a directory it is removing" commitlog.go   '	closeErr := l.closeSegmentsOnly()' '	closeErr := l.closeSegments()'   '^TestDeleteDoesNotCheckpointAndCannotBeStoppedByOne$'
 
+# A failed pass keeps the rewrites it already installed. The neutralization is
+# the return that was there, and it is kept alongside the assignment so the
+# variable below stays used and the mutation compiles. What it restores is a
+# pass that abandons segments whose files are already renamed over their
+# sources': named by nothing, so closed by nobody.
+run_guard "a failed pass keeps the rewrites it installed" compact_cleaner.go   '			rewriteErr = err
+			break' '			rewriteErr = err
+			return nil, 0, -1, err'   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
+
+# The other half, at the call site: the partial list has to be the one that gets
+# swapped in. Neutralized by the line it replaced, which republished the delete
+# stage's segments -- the CLOSED sources of every rewrite this pass installed.
+run_guard "a partial compaction result is published" clean.go   '			return compacted, -1, err' '			return cleaned, -1, err'   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
+
+# A rewrite that failed disposes of its working copy. Neutralized by keeping the
+# suffix check and never acting on it, which is the state every error path but
+# the scan one was in: an open, mapped .cleaned segment nothing can reach.
+run_guard "a failed rewrite drops its working copy" compact_cleaner.go   '		if working {' '		if working && false {'   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

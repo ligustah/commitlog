@@ -582,9 +582,20 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int6
 		spec.ceiling = spec.Ceiling.Or(l.HighWatermark())
 		compacted, v, err := l.compactCleaner.CompactSpec(spec, cleaned)
 		if err != nil {
-			// Keep the delete stage's result: its removals are already on
-			// disk regardless of the compaction failure.
-			return cleaned, -1, err
+			if compacted == nil {
+				// The pass failed before it rewrote anything (loading the
+				// digests, or the merge). Keep the delete stage's result: its
+				// removals are already on disk regardless.
+				return cleaned, -1, err
+			}
+			// It failed part-way, and what it hands back is the list it got as
+			// far as: rewrites where they landed, sources everywhere else. That
+			// is what the log is HOLDING — a rewrite has already renamed itself
+			// over its source's files — so it is what the caller must swap in.
+			// Returning the delete stage's list instead republished the closed
+			// sources and left the replacements named by nothing, which is how
+			// a Close that reported success left an index mapped.
+			return compacted, -1, err
 		}
 		cleaned, verified = compacted, v
 	} else if consolidated, err := consolidateSegments(cleaned, spec.maxRewrites, spec.RewriteBudget); err != nil {
