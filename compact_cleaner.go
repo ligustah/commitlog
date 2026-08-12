@@ -44,6 +44,16 @@ type compactCleaner struct {
 	// backing over the old key and is entitled to finish. Each entry carries
 	// that backing, and the log queues them for a later pass to reclaim once
 	// nothing holds it — see pendingReclaim and commitLog.drainReclaim.
+	//
+	// A field rather than a return value, unlike movePlaced which hands its
+	// entries straight back. The difference is WHERE they are consumed: these
+	// are produced four calls down (cleanSegment) and must not be queued until
+	// cleanPass has republished the manifest, which is four calls up — so a
+	// return value would thread one more result through cleanSegment, compact,
+	// CompactSpec and clean, none of which has any use for it. Safe because a
+	// pass holds cleanMu for its whole length, which is also why cleanPass
+	// clears this before and after its own call rather than trusting it to be
+	// empty.
 	superseded []pendingReclaim
 }
 
