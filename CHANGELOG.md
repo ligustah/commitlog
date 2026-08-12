@@ -5,6 +5,47 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.75.0 — 2026-08-13
+
+### Changed
+
+- **A `CleanSpec.TierBudgets` entry of 0 is now refused.** It used to fall back
+  to `RewriteBudget`, silently — `budgetFor` read `!ok || d == 0`, so the arm a
+  caller reaches by saying NOTHING was also the arm reached by saying 0, and a
+  value the caller wrote down became unreachable.
+
+  Refused rather than given a meaning, because both available meanings are wrong
+  here. Read as "unbounded", which is what 0 means on `RewriteBudget` one field
+  up, it removes the only bound on the remote rewrite that this field exists to
+  keep from consuming a pass. Read as "unset", it duplicates what absence from
+  the map already says. The entry is less bad input than input with no meaning
+  available, so the error names both readings and how to spell each: a duration
+  longer than a pass for unbounded, no entry at all for unset.
+
+  It lands in `CleanWithSpec` beside the `Ceiling`/`DisableAutoClean` refusal and
+  by the same rule — a spec that cannot be honoured fails loudly rather than
+  being reinterpreted into one that can. `Clean()` routes through
+  `CleanWithSpec`, so there is no path around it, and `budgetFor`'s arm narrows
+  to `!ok`, where it can no longer swallow a supplied value.
+
+  Breaking only for a caller that passes 0 today and expects the fallback. No
+  such caller is known: durable_streams fills every tier with a positive
+  duration on purpose, which is what its own `tierBudgets` doc says it is for.
+
+### Fixed
+
+- **`CleanSpec.RewriteBudget` documented a guarantee it does not provide.** It
+  said a pass "always finishes inside a short-lived process's kill window". It
+  bounds a STAGE. One pass builds a fresh budget for local rewrites, one per
+  tier, and one for the join stage, so a compacted log with two tiers can spend
+  4×`RewriteBudget` before the pass returns.
+
+  No behaviour changed and none should: a single shared counter would starve
+  whatever ran last, which is exactly what the per-tier split and the join's own
+  budget exist to prevent. The worst case is bounded and knowable, and dividing
+  it is the caller's job — but only if the doc admits there is something to
+  divide.
+
 ## v0.74.0 — 2026-08-12
 
 > **Correction.** The annotated tag for this release claims the tiered *rewrite*
