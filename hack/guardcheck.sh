@@ -439,6 +439,7 @@ run_guard "truncation carries segments rolled under it" commitlog.go   '	if len(
 run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 	for i := idx + 1; i < len(snapshot); i++ {
 		if err := snapshot[i].Delete(); err != nil {
+			dropReplacement()
 			return err
 		}
 		deleted++
@@ -446,6 +447,7 @@ run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 	l.mu.Lock()
 	for i := idx + 1; i < len(snapshot); i++ {
 		if err := snapshot[i].Delete(); err != nil {
+			dropReplacement()
 			l.mu.Unlock()
 			return err
 		}
