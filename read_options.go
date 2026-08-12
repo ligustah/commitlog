@@ -1,6 +1,10 @@
 package commitlog
 
-import "github.com/pkg/errors"
+import (
+	"bytes"
+
+	"github.com/pkg/errors"
+)
 
 // Reader construction takes functional options rather than a spec struct
 // because the zero value of a read setting is MEANINGFUL: offset 0 is a real
@@ -129,9 +133,6 @@ func (l *commitLog) resolve(opts []ReadOption) (readSpec, error) {
 			s.offset = 0
 		}
 	}
-	if !s.untilSet {
-		s.until = -1
-	}
 	if s.untilSet && s.until < s.offset {
 		return s, errors.Errorf(
 			"commitlog: Until(%d) is below From(%d) — the range is empty", s.until, s.offset)
@@ -167,17 +168,5 @@ func (s *readSpec) matchesPrefix(msg SerializedMessage) bool {
 	if key == nil {
 		return false // unkeyed: nothing a prefix could match
 	}
-	return hasPrefix(key, s.keyPrefix)
-}
-
-func hasPrefix(b, prefix []byte) bool {
-	if len(prefix) > len(b) {
-		return false
-	}
-	for i := range prefix {
-		if b[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
+	return bytes.HasPrefix(key, s.keyPrefix)
 }

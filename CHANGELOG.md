@@ -5,6 +5,42 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.72.3 — 2026-08-12
+
+### Fixed
+
+- **A committed reader that could not locate the high watermark parked forever
+  instead of reporting it.** `readLoop` re-locates the watermark whenever it
+  reaches the one it holds, and wrote that lookup as
+  `hwSeg, hwPos, err := getHWPos(...)`. All three names are new in that scope, so
+  the `err` it tested was not the function's named return — the `break` under it
+  left the loop with the outer `err` still nil, and `Read` returned `(n, nil)`.
+
+  A caller cannot see that, because `n` is not what it reads: `readMessage`
+  ignores the byte count and parses `headersBuf`, which still holds the PREVIOUS
+  record's header — valid, CRC-checked, describing a payload already served. So
+  the reader asked for that payload, agreed with the watermark on the way back,
+  and waited. The symptom was a follower hanging on a healthy log; the reason,
+  most often `ErrSegmentReplaced` from a compaction swap racing the lookup, was
+  discarded one frame earlier. It is the one error this reader knows how to
+  retry.
+
+  The three inline copies of that block are now one `syncHW`. They had drifted
+  in a second way too: only two honoured `noWait`, so a bounded read that reached
+  the watermark through the third waited for an advance it was built not to wait
+  for.
+
+### Changed
+
+- `bytesCompare` and `hasPrefix`, hand-rolled in the key-prefix filter, are now
+  `bytes.Compare` and `bytes.HasPrefix` — the same answers from assembly, on the
+  path every filtered record is tested against.
+- Two conditions in the read path that could not be false are gone: an `until`
+  default re-applied over the literal that already set it, and a `hw != -1` guard
+  below a branch that returns for every `hw == -1`. The second read as though an
+  unset watermark still reached the code under it, which is the exact state its
+  own comment describes as impossible.
+
 ## v0.72.2 — 2026-08-12
 
 ### Fixed

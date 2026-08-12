@@ -1,6 +1,7 @@
 package commitlog
 
 import (
+	"bytes"
 	"sort"
 
 	"github.com/pkg/errors"
@@ -156,10 +157,10 @@ func digestHits(d *keyDigest, spec readSpec, from, bound int64) ([]int64, error)
 		// Sorted by key, so once past the prefix range nothing later re-enters
 		// it. The section streams, so keys BELOW the prefix are still decoded
 		// on the way in — it can stop early, never start late.
-		if end != nil && bytesCompare(it.key, end) >= 0 {
+		if end != nil && bytes.Compare(it.key, end) >= 0 {
 			break
 		}
-		if !hasPrefix(it.key, spec.keyPrefix) {
+		if !bytes.HasPrefix(it.key, spec.keyPrefix) {
 			continue
 		}
 		if spec.skipSuperseded {
@@ -232,26 +233,4 @@ func (p *prefixSource) fetch(seg *segment, hits []int64) ([]prefixQueued, error)
 		out = append(out, rec)
 	}
 	return out, nil
-}
-
-func bytesCompare(a, b []byte) int {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
-	for i := 0; i < n; i++ {
-		switch {
-		case a[i] < b[i]:
-			return -1
-		case a[i] > b[i]:
-			return 1
-		}
-	}
-	switch {
-	case len(a) < len(b):
-		return -1
-	case len(a) > len(b):
-		return 1
-	}
-	return 0
 }

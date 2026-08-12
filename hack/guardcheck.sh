@@ -1217,6 +1217,20 @@ run_guard "a failed rewrite drops its working copy" compact_cleaner.go   '		if w
 run_guard "a failed truncate drops its replacement" commitlog.go   '		if err := snapshot[i].Delete(); err != nil {
 			dropReplacement()' '		if err := snapshot[i].Delete(); err != nil {'   '^TestAFailedTruncateDropsTheReplacementItBuilt$'
 
+# A committed reader reports a watermark it cannot locate. Neutralized into the
+# shape the three inline copies had: the error is dropped and the caller carries
+# on with the watermark it already held. Nothing looks wrong from inside -- the
+# damage is that readMessage then re-parses the caller's buffer, which still
+# holds the previous header, and parks on a payload already served. The test can
+# only end by deadline in that state, which is why it carries one.
+run_guard "a committed read reports a watermark it cannot find" reader.go   '	hwSeg, hwPos, err := getHWPos(segments, r.hw)
+	if err != nil {
+		return nil, err
+	}' '	hwSeg, hwPos, err := getHWPos(segments, r.hw)
+	if err != nil {
+		return segments, nil
+	}'   '^TestACommittedReadReportsALostWatermarkRatherThanCorruption$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

@@ -477,26 +477,13 @@ func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error)
 	segments := r.cl.Segments()
 
 	if r.seg == nil {
+		// Fixed BEFORE the watermark moves: this reader has served everything up
+		// to r.hw, so the record it owes next is r.hw+1 whatever syncHW finds.
 		offset := r.hw + 1
-		hw := r.cl.HighWatermark()
-		for hw == r.hw {
-			if r.noWait {
-				return 0, io.EOF
-			}
-			err = r.waitForHW(ctx, hw)
-			if err != nil {
-				return
-			}
-			hw = r.cl.HighWatermark()
-		}
-		r.hw = hw
-		segments = r.cl.Segments()
-		hwSeg, hwPos, err := getHWPos(segments, r.hw)
+		segments, err = r.syncHW(ctx)
 		if err != nil {
 			return 0, err
 		}
-		r.hwSeg = hwSeg
-		r.hwPos = hwPos
 		r.seg, _ = findSegment(segments, offset)
 		if r.seg == nil {
 			return 0, ErrSegmentNotFound
@@ -516,7 +503,6 @@ func (r *committedReader) readLoop(
 	ctx context.Context, p []byte, segments []*segment) (n int, err error) {
 
 	var readSize int
-LOOP:
 	for {
 		lim := int64(len(p[n:]))
 		// A nil hwSeg is not "the watermark is elsewhere", it is "this reader
@@ -530,26 +516,10 @@ LOOP:
 		}
 		if lim <= 0 {
 			// HW boundary reached — sync.
-			hw := r.cl.HighWatermark()
-			for hw == r.hw {
-				if r.noWait {
-					err = io.EOF
-					break LOOP
-				}
-				err = r.waitForHW(ctx, hw)
-				if err != nil {
-					break LOOP
-				}
-				hw = r.cl.HighWatermark()
-			}
-			r.hw = hw
-			segments = r.cl.Segments()
-			hwSeg, hwPos, err := getHWPos(segments, r.hw)
+			segments, err = r.syncHW(ctx)
 			if err != nil {
 				break
 			}
-			r.hwPos = hwPos
-			r.hwSeg = hwSeg
 			continue
 		}
 
@@ -606,25 +576,57 @@ LOOP:
 		}
 
 		// We hit the HW, so sync the latest.
-		hw := r.cl.HighWatermark()
-		for hw == r.hw {
-			err = r.waitForHW(ctx, hw)
-			if err != nil {
-				break LOOP
-			}
-			hw = r.cl.HighWatermark()
-		}
-		r.hw = hw
-		segments = r.cl.Segments()
-		hwSeg, hwPos, err := getHWPos(segments, r.hw)
+		segments, err = r.syncHW(ctx)
 		if err != nil {
 			break
 		}
-		r.hwPos = hwPos
-		r.hwSeg = hwSeg
 	}
 
 	return n, err
+}
+
+// syncHW advances this reader to the log's current high watermark and re-locates
+// it, returning the segment snapshot the caller should keep walking. It waits
+// for the watermark to move unless the reader was told not to.
+//
+// Three copies of this used to sit inline, in Read and twice in readLoop, and
+// they had drifted apart in two ways that both mattered.
+//
+// Only two honoured noWait, so a bounded read that reached the watermark through
+// the third parked for an advance it had been built not to wait for.
+//
+// And two of them wrote `hwSeg, hwPos, err := getHWPos(...)`. All three names are
+// new in that scope, so the err being tested was NOT readLoop's named return —
+// the `break` under it left the loop with the outer err still nil, and the read
+// returned (n, nil). That is not a survivable way to fail here: readMessage
+// ignores n and parses headersBuf, which still holds the PREVIOUS record's header
+// — valid, CRC-checked, describing a payload already served — so the reader asked
+// for that payload, agreed with the watermark on the way back, and parked. A
+// follower hanging forever on a healthy log, with the actual reason (most often
+// ErrSegmentReplaced, the one error the reader knows how to retry) discarded a
+// frame earlier.
+func (r *committedReader) syncHW(ctx context.Context) ([]*segment, error) {
+	hw := r.cl.HighWatermark()
+	for hw == r.hw {
+		if r.noWait {
+			return nil, io.EOF
+		}
+		if err := r.waitForHW(ctx, hw); err != nil {
+			return nil, err
+		}
+		hw = r.cl.HighWatermark()
+	}
+	r.hw = hw
+	// Re-snapshotted AFTER the wait: the append that moved the watermark may have
+	// rolled a segment, and a snapshot taken before it cannot hold the one the
+	// watermark now lives in.
+	segments := r.cl.Segments()
+	hwSeg, hwPos, err := getHWPos(segments, r.hw)
+	if err != nil {
+		return nil, err
+	}
+	r.hwSeg, r.hwPos = hwSeg, hwPos
+	return segments, nil
 }
 
 func (r *committedReader) waitForHW(ctx context.Context, hw int64) error {
@@ -658,9 +660,7 @@ func (r *committedReader) waitForHW(ctx context.Context, hw int64) error {
 func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader, error) {
 	var (
 		hw       = l.HighWatermark()
-		hwPos    = int64(-1)
 		segments = l.Segments()
-		hwSeg    *segment
 	)
 
 	// If offset exceeds HW, wait for the next message. This also covers the
@@ -682,24 +682,27 @@ func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader
 	// end of it — surfacing as "no segment to consume", and able to serve
 	// uncommitted records before it got there.
 	if hw == -1 || offset > hw || l.OldestOffset() == -1 {
+		// Unpositioned, and it says so here rather than through a var block's
+		// zero values: no segment, no located watermark, and a byte position that
+		// cannot be mistaken for one. Read resolves all three on first use.
 		return &committedReader{
 			cl:     l,
 			seg:    nil,
 			pos:    -1,
-			hwSeg:  hwSeg,
-			hwPos:  hwPos,
+			hwSeg:  nil,
+			hwPos:  -1,
 			hw:     hw,
 			noWait: noWait,
 		}, nil
 	}
 
-	if hw != -1 {
-		seg, hwPosition, err := getHWPos(segments, hw)
-		if err != nil {
-			return nil, err
-		}
-		hwPos = hwPosition
-		hwSeg = seg
+	// Unconditional: the branch above returns for every hw == -1, so the guard
+	// this used to carry could not be false. It read as though an unset watermark
+	// still reached here, which is exactly the state described above as the one
+	// that must not.
+	hwSeg, hwPos, err := getHWPos(segments, hw)
+	if err != nil {
+		return nil, err
 	}
 
 	position := int64(0)
