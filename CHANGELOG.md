@@ -5,6 +5,61 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.72.6 — 2026-08-12
+
+### Fixed
+
+- **A damaged segment silently destroyed every record past the damage on
+  non-compacted logs.** `consolidateOne` walks a sealed segment, copies every
+  record into a working copy, and `Replace` then renames that copy over the
+  source's files and closes the source. It drove the walk with
+
+  ```go
+  for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
+  ```
+
+  which cannot tell `io.EOF` from a read failure. Both simply end the loop, and
+  what comes after the loop is the install — so a segment that could not be read
+  to its end was replaced by a PREFIX, the file holding the rest was deleted, and
+  the pass returned `nil`. The red test lost 1273 records (offsets 6365–7637) to
+  a `Clean()` that reported success.
+
+  This is the default configuration, not a corner. `consolidateSegments` is the
+  `else` branch of `if l.Compact` in `clean.go`, so it is the pass every
+  non-compacted log runs on every automatic clean tick. The compaction path has
+  had the `io.EOF` check since `ErrSegmentUnreadable` was introduced, and
+  `TestDamageInOneSegmentDoesNotKillTheProcess` covers all three paths that had
+  it — with `Compact: true`, which is exactly why it never reached this one.
+
+  That test is also, by construction, blind to this failure: it measures survival
+  by reading sequentially from the oldest offset, and a sequential read stops AT
+  the damaged frame either way. Deleting the damaged bytes is what lets the
+  reader walk on into the next segment, so the broken behaviour scores BETTER on
+  that measure than the fixed one. The new test asserts on the victim segment's
+  extent and an indexed seek to its last record instead.
+
+- **A failed consolidation left its working copy open, mapped and unreachable.**
+  Every error return from `consolidateOne` abandoned an open `.cleaned` segment
+  that nothing names and nothing can close — a file handle and an index mapping
+  held until the process exits, plus stray artifacts on disk. `cleanSegment` has
+  carried the suffix-checked disposal for this since v0.71.2; its sibling never
+  got it.
+
+- **A failed consolidation pass discarded the rewrites it had already
+  installed.** `clean.go` answered a consolidation failure with `return cleaned,
+  -1, err` — the delete stage's list — throwing away the partial list
+  `consolidateSegments` hands back. Every rewrite the pass installed was then
+  named by nothing: absent from `l.segments`, so never walked by
+  `closeSegments`, while `current()`'s redirect kept reads working and hid it.
+  The only symptom is an index mapped until exit and a data directory that will
+  not remove.
+
+  v0.71.2 fixed this shape on the compaction path and its changelog entry states
+  that "`consolidateSegments` had the same shape and takes the same fix". Half of
+  that fix shipped: `consolidateSegments` returns the partial list, and the call
+  site kept discarding it. The half that shipped was the half nothing could
+  observe.
+
 ## v0.72.5 — 2026-08-12
 
 ### Fixed

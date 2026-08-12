@@ -606,7 +606,20 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int6
 		// soak). The consolidation-only pass rewrites records
 		// VERBATIM — content, offsets and epochs untouched — into
 		// cleanBlockTarget-sized blocks, budgeted like compaction rewrites.
-		return cleaned, -1, err
+		//
+		// The PARTIAL list, for the reason the compaction branch above gives:
+		// consolidateSegments stops at the failure and hands back rewrites where
+		// they landed and sources everywhere else, and a rewrite has already
+		// renamed itself over its source's files. Returning the delete stage's
+		// list instead republishes the closed sources and leaves the replacements
+		// named by nothing — reads keep working through current()'s redirect, so
+		// the only symptom is an index mapped until the process exits and a data
+		// directory that will not remove.
+		//
+		// consolidateSegments grew its half of this fix when the compaction path
+		// did; this call site kept discarding the result, so the half that
+		// shipped was the half nothing could observe.
+		return consolidated, -1, err
 	} else {
 		cleaned = consolidated
 	}

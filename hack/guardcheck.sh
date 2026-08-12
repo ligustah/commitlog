@@ -1216,7 +1216,51 @@ run_guard "a partial compaction result is published" clean.go   '			return compa
 # A rewrite that failed disposes of its working copy. Neutralized by keeping the
 # suffix check and never acting on it, which is the state every error path but
 # the scan one was in: an open, mapped .cleaned segment nothing can reach.
-run_guard "a failed rewrite drops its working copy" compact_cleaner.go   '		if working {' '		if working && false {'   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
+#
+# Anchored on the disposed check above it, not on the bare condition:
+# consolidateOne grew the same disposal, so `if working {` now matches twice and
+# an ambiguous anchor is a SKIP rather than a failure.
+run_guard "a failed rewrite drops its working copy" compact_cleaner.go   '		if disposed {
+			return
+		}
+		cleaned.RLock()
+		working := cleaned.suffix != ""
+		cleaned.RUnlock()
+		if working {' '		if disposed {
+			return
+		}
+		cleaned.RLock()
+		working := cleaned.suffix != ""
+		cleaned.RUnlock()
+		if working && false {'   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
+
+# The consolidation pass must tell io.EOF from a read failure. Neutralized into
+# the loop it replaced -- `for ms, _, err := ss.Scan(); err == nil; ...` -- which
+# ends on either, and what follows the loop is the install. That is a truncated
+# copy renamed over a segment whose original still held the records, with the
+# pass returning nil. Reached on the DEFAULT config: this is the else-branch of
+# `if l.Compact`.
+run_guard "a consolidation read failure stops the pass" compact_cleaner.go   '			if !errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("%w: consolidation of segment %d: %w",' '			if false {
+				return nil, fmt.Errorf("%w: consolidation of segment %d: %w",'   '^TestConsolidationRefusesASegmentItCannotReadToTheEnd$'
+
+# The same partial-result duty as the compaction branch, at the consolidation
+# call site. Neutralized by the line that was there, which republished the delete
+# stage's list and left every rewrite this pass installed named by nothing.
+run_guard "a partial consolidation result is published" clean.go   '		return consolidated, -1, err' '		return cleaned, -1, err'   '^TestConsolidationRefusesASegmentItCannotReadToTheEnd$'
+
+# And the working-copy disposal on that path, which had none at all: every error
+# return left an open, mapped .cleaned segment behind. Anchored on the defer so
+# it does not collide with cleanSegment's copy above.
+run_guard "a failed consolidation drops its working copy" compact_cleaner.go   '	defer func() {
+		cleaned.RLock()
+		working := cleaned.suffix != ""
+		cleaned.RUnlock()
+		if working {' '	defer func() {
+		cleaned.RLock()
+		working := cleaned.suffix != ""
+		cleaned.RUnlock()
+		if working && false {'   '^TestConsolidationRefusesASegmentItCannotReadToTheEnd$'
 
 # The same duty on the truncation path, where the replacement is NOT yet
 # installed and so has to be dropped rather than published. Neutralized by the

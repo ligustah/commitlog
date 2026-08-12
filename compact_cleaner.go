@@ -1080,6 +1080,21 @@ func consolidateOne(seg *segment, bw *blockWriter, sc *blockCache) (*segment, er
 	if err != nil {
 		return nil, err
 	}
+	// The working copy is this function's to dispose of on every way out, for the
+	// reason cleanSegment states at length: until it is installed nothing else can
+	// reach it, so a return that leaves it behind holds a handle and an index
+	// mapping until the process exits and strands .cleaned artifacts on disk. The
+	// suffix is the discriminator — Replace clears it at the moment the copy stops
+	// being a copy and starts being the segment, so a suffix still set means
+	// deleting it unlinks nothing anyone can reach.
+	defer func() {
+		cleaned.RLock()
+		working := cleaned.suffix != ""
+		cleaned.RUnlock()
+		if working {
+			cleaned.Delete() // nolint: errcheck — best effort on a failure path
+		}
+	}()
 	bw.reset(cleaned)
 	ss := newSegmentScannerCache(seg, sc)
 	// Deliberately still AFTER Replace, which is where the inline defer put it
@@ -1089,7 +1104,31 @@ func consolidateOne(seg *segment, bw *blockWriter, sc *blockCache) (*segment, er
 	// release to the iteration is this function's point — moving it earlier
 	// within the iteration is a commit-point change, and a separate question.
 	defer ss.Close() // nolint: errcheck — read-only
-	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan() {
+	for {
+		ms, _, err := ss.Scan()
+		if err != nil {
+			// The same duty cleanSegment carries, and for the same reason: Replace
+			// below renames this copy over the source's files and closes the
+			// source, so a walk that stopped early installs a PREFIX and deletes
+			// the file that held the rest. The loop this replaced was
+			//
+			//	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan()
+			//
+			// which cannot tell io.EOF from a read failure — both simply end it,
+			// and what comes after it is the install. A damaged segment therefore
+			// lost every record past the damage and the pass returned nil.
+			//
+			// Reached on the DEFAULT configuration: this pass is the else-branch
+			// of `if l.Compact`, so it is what every non-compacted log runs on
+			// every automatic clean tick. The compaction path had the check from
+			// the start, which is why no test caught this one — they all set
+			// Compact: true to get there.
+			if !errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("%w: consolidation of segment %d: %w",
+					ErrSegmentUnreadable, seg.BaseOffset, err)
+			}
+			break
+		}
 		if err := bw.add(ms); err != nil {
 			return nil, err
 		}
