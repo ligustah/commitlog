@@ -536,6 +536,14 @@ run_guard "a sidecar cannot name a log file" sidecar.go   '	for _, suffix := ran
 
 run_guard "a sidecar cannot name a log checkpoint" sidecar.go   '	for _, owned := range logOwnedFileNames {'   '	for _, owned := range []string(nil) {'   '^TestASidecarCannotNameOneOfTheLogsOwnFiles$'
 
+# Same two removals against the test that derives its names from a real log
+# directory instead of from the list. Registered separately because the point of
+# that test is that it does NOT read the list, and a test which cannot notice the
+# list being emptied would have been proving nothing about it.
+run_guard "the derived name list is not vacuous" sidecar.go   '	for _, suffix := range logOwnedFileSuffixes {'   '	for _, suffix := range []string(nil) {'   '^TestEveryFileTheLogWritesIsRefusedAsASidecarName$'
+
+run_guard "the derived checkpoint list is not vacuous" sidecar.go   '	for _, owned := range logOwnedFileNames {'   '	for _, owned := range []string(nil) {'   '^TestEveryFileTheLogWritesIsRefusedAsASidecarName$'
+
 # Nothing REFERENCES the descriptor -- it is what the store says about itself,
 # not part of what it holds -- so the reference-based garbage rule collects it
 # unless told otherwise, and the log then refuses its own next open.

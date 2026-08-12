@@ -1,10 +1,12 @@
 package commitlog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/ligustah/commitlog/compress"
 	"github.com/stretchr/testify/require"
 )
 
@@ -96,6 +98,69 @@ func TestASidecarCannotNameOneOfTheLogsOwnFiles(t *testing.T) {
 	reopened, err := New(Options{Name: "own", Path: dir, MaxSegmentBytes: 1 << 20})
 	require.NoError(t, err, "the log did not reopen after the refused names")
 	require.NoError(t, reopened.Close())
+}
+
+// The list of names the log owns is derived from a real log directory, not from
+// the list the code keeps.
+//
+// logOwnedFileNames and logOwnedFileSuffixes are an enumeration, and an
+// enumeration rots: the log gains a new kind of file, nobody thinks about the
+// sidecar rule, and a client can name the new file from that day on. The two
+// tests above cannot see that happen — they check the names the list already
+// has. This one exercises the log until its directory is full of its own work
+// and then requires that EVERY entry in it is refused, so the thing under test
+// is what the log actually writes.
+func TestEveryFileTheLogWritesIsRefusedAsASidecarName(t *testing.T) {
+	dir := tempDir(t)
+	l, err := New(Options{
+		Path:            dir,
+		Name:            "derived",
+		MaxSegmentBytes: 8 << 10,
+		Compact:         true,
+		Compression:     compress.Zstd,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = l.Close() })
+
+	// Enough to roll several segments, so the sealed ones carry their derived
+	// files (key digests, block tables) and not only a log and an index.
+	for i := range 2000 {
+		_, err := l.Append([]*Message{{
+			Key:   []byte(fmt.Sprintf("key-%04d", i%50)),
+			Value: []byte(fmt.Sprintf("value-%04d-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", i)),
+		}})
+		require.NoError(t, err)
+	}
+	l.SetHighWatermark(l.NewestOffset())
+	require.NoError(t, l.NewLeaderEpoch(7))
+	require.NoError(t, l.Clean())
+	require.NoError(t, l.SyncAll())
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+
+	var (
+		present  = map[string]bool{}
+		suffixes = map[string]bool{}
+	)
+	for _, e := range entries {
+		name := e.Name()
+		present[name] = true
+		if ext := filepath.Ext(name); ext != "" {
+			suffixes[ext] = true
+		}
+		require.ErrorIs(t, checkSidecarName(name), ErrInvalidSidecarName,
+			"the log writes %q into its own directory and a client may name it", name)
+	}
+
+	// What the fixture actually reached, stated rather than assumed. A log that
+	// stopped writing one of these would leave the loop above passing on a
+	// directory that no longer contains the file it was meant to prove refused.
+	for _, want := range []string{hwFileName, leaderEpochFileName, descriptorFileName} {
+		require.True(t, present[want], "the fixture never wrote %s, so nothing here refused it", want)
+	}
+	require.GreaterOrEqual(t, len(suffixes), 3,
+		"only %v in the log directory; the fixture is too thin to say much about suffixes", suffixes)
 }
 
 // The ordinary case still works, end to end. GetSidecar and RemoveSidecar had
