@@ -152,9 +152,17 @@ jobs:
       # repo does not share, and turning it on would mean either a large
       # reformat or an exclusion list that has to be maintained. Three families
       # that only ever fire on something real keeps a green here meaningful.
+      #
+      # The pin tracks the TOOLCHAIN, not just our taste in versions. staticcheck
+      # reads the compiler's export data, and Go 1.27 emits format version 4
+      # while v0.7.0 tops out at 2 — so the move to go1.27rc2 turned this step
+      # into "internal error in importing internal/byteorder ... please report an
+      # issue" for every stdlib package, which reads like a staticcheck bug and
+      # is not one. v0.8.0-rc.1 is the release that understands 1.27, so an rc
+      # toolchain gets an rc analyzer; both drop their suffix together at GA.
       - name: staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.0-rc.1
           "$(go env GOPATH)/bin/staticcheck" -checks 'U1000,S1*,SA*' ./...
       # Not the comment-style opinion declined just above. ST1020 asks whether a
       # doc comment is well-formed; this asks whether it is attached to the right
