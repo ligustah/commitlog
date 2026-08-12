@@ -1306,38 +1306,6 @@ run_guard "a header read stops at the header" reader.go   '	hdr := headersBuf[:m
 # vouched for.
 run_guard "a metadata header parse is bounds-checked" message_set.go   '	if n < 0 || c.n+n < c.n || c.n+n > int64(len(c.buf)) {' '	if false {'   '^TestMetadataReadRefusesACorruptRecordRatherThanPanicking$'
 
-echo
-if [ "$failures" -ne 0 ]; then
-  echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
-  exit 1
-fi
-# A run that checked nothing prints the same green as one that checked
-# everything, and this is the mode where that is likely: GUARDCHECK_SET=platform
-# exists to check the guards no other runner can, so if it finds none, either
-# they moved off this OS or the job is on the wrong runner. Either way its green
-# would be covering for guards nobody is checking at all.
-if [ "$set_sel" = "platform" ] && [ "$checked" -eq 0 ]; then
-  echo "guardcheck: GUARDCHECK_SET=platform ran NO guards on $goos — this run proves nothing."
-  exit 1
-fi
-# The same hole, reached the other way. The filter is a plain substring match,
-# so a caller who reaches for a regex — "the old table|the local table" — selects
-# nothing, and an empty selection printed the header, no summary, and exit 0.
-# Indistinguishable from a run that checked every guard it was asked for. Count
-# the deferred ones as selected: a filter naming only a windows guard on linux
-# picked something out, it just isn't checkable here, and the deferral line
-# already says so.
-if [ -n "$filter" ] && [ $((checked + deferred)) -eq 0 ]; then
-  echo "guardcheck: no guard name contains '$filter' — the filter is a substring, not a regex."
-  exit 1
-fi
-if [ "$checked" -gt 0 ]; then
-  echo "guardcheck: all $checked guards covered."
-fi
-if [ "$deferred" -ne 0 ]; then
-  echo "guardcheck: $deferred guard(s) NOT covered here — deferred to another platform's run."
-fi
-
 # ---- segment join ----
 
 # A join reads each input to its end and then DELETES it, so a walk that mistook
@@ -1346,7 +1314,7 @@ fi
 # least leave the damaged bytes under the source's name, and this one collects
 # them.
 run_guard "a join read failure stops the pass" clean_join.go   '				if !errors.Is(err, io.EOF) {
-					return nil, fmt.Errorf("%w: join of segment %d: %w",' '				if false {
+					return nil, fmt.Errorf("%w: join of segment %d: %w",' '				if false && !errors.Is(err, io.EOF) {
 					return nil, fmt.Errorf("%w: join of segment %d: %w",'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
 
 # The working-copy disposal on the join path. Anchored on `joined` so it does not
@@ -1379,3 +1347,59 @@ run_guard "an unjoinable segment breaks the run" clean_join.go   '		if cap <= 0 
 		}' '		if cap <= 0 || size >= cap {
 			continue
 		}'   '^TestPlanJoinsGroupsAdjacentSegmentsWithinTheCap$'
+
+echo
+if [ "$failures" -ne 0 ]; then
+  echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
+  exit 1
+fi
+# A run that checked nothing prints the same green as one that checked
+# everything, and this is the mode where that is likely: GUARDCHECK_SET=platform
+# exists to check the guards no other runner can, so if it finds none, either
+# they moved off this OS or the job is on the wrong runner. Either way its green
+# would be covering for guards nobody is checking at all.
+if [ "$set_sel" = "platform" ] && [ "$checked" -eq 0 ]; then
+  echo "guardcheck: GUARDCHECK_SET=platform ran NO guards on $goos — this run proves nothing."
+  exit 1
+fi
+# The same hole, reached the other way. The filter is a plain substring match,
+# so a caller who reaches for a regex — "the old table|the local table" — selects
+# nothing, and an empty selection printed the header, no summary, and exit 0.
+# Indistinguishable from a run that checked every guard it was asked for. Count
+# the deferred ones as selected: a filter naming only a windows guard on linux
+# picked something out, it just isn't checkable here, and the deferral line
+# already says so.
+if [ -n "$filter" ] && [ $((checked + deferred)) -eq 0 ]; then
+  echo "guardcheck: no guard name contains '$filter' — the filter is a substring, not a regex."
+  exit 1
+fi
+# The same hole a third time, and the one that actually bit: a guard appended to
+# the END of this file, after the summary block, never runs. It is not skipped
+# loudly — it is not reached at all, so it is absent from $checked, absent from
+# $failures, and the run exits green having proved nothing about it. Five join
+# guards were added that way, and one of them was BROKEN; both this script and
+# the CI job that runs it reported success.
+#
+# So the script counts its own declarations and requires that every one of them
+# was reached. Self-maintaining on purpose: a count written down by hand is one
+# more thing to forget to bump, and forgetting would fail exactly the runs that
+# were fine.
+#
+# Counted across every form that declares one — run_guard, run_guard_windows and
+# run_guard_pair — because counting only the plain one gets a number SMALLER than
+# the guards that ran, which fails every healthy run instead of the broken one.
+# Skipped for a filtered run, which selects a subset by design, and for
+# GUARDCHECK_SET=platform, which skips every guard with no platform requirement
+# and is already covered by its own check above.
+declared=$(grep -cE '^run_guard(_windows|_pair)? ' "$0")
+if [ -z "$filter" ] && [ "$set_sel" != "platform" ] && [ $((checked + deferred)) -ne "$declared" ]; then
+  echo "guardcheck: $declared guards are declared but $((checked + deferred)) ran."
+  echo "A run_guard line below the summary block never executes — move it up."
+  exit 1
+fi
+if [ "$checked" -gt 0 ]; then
+  echo "guardcheck: all $checked guards covered."
+fi
+if [ "$deferred" -ne 0 ]; then
+  echo "guardcheck: $deferred guard(s) NOT covered here — deferred to another platform's run."
+fi
