@@ -5,6 +5,30 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.72.5 — 2026-08-12
+
+### Fixed
+
+- **A corrupt record crashed the caller's process through
+  `ReadMessageMetadata`.** Its own doc promised the opposite — "a record
+  corrupted on disk is returned here as data, where `ReadMessage` refuses it" —
+  but the bytes went to `parseHeadersAfterValue`, which indexed the payload with
+  no bounds check anywhere: key length at `buf[6:10]`, then
+  `buf[keyEnd:keyEnd+4]`, then a loop of `buf[n:n+size]`. A key length of `1<<20`
+  in a 51-byte record indexed straight off the end. `buf[5]`, for the attributes
+  byte, was unchecked too.
+
+  Nothing upstream stands in the way, and that is the point: this path skips the
+  payload CRC deliberately (it is a metadata scan — LSO rebuild reads every
+  record in the log through it), and the frame header's CRC covers the record's
+  identity, not its contents. So the length fields that decide how far parsing
+  reaches are precisely the fields nothing verifies.
+
+  The parse is now bounds-checked end to end and returns `ErrCorruptRecord`,
+  matching what the sequential path has done since v0.42.0. Every `Raw` handed
+  out has therefore survived a checked parse, which is what makes a later
+  `Raw.Headers()` — the same walk, unchecked — safe on it.
+
 ## v0.72.4 — 2026-08-12
 
 ### Fixed

@@ -1246,6 +1246,13 @@ run_guard "a header read stops at the header" reader.go   '	hdr := headersBuf[:m
 	if _, err := reader.Read(ctx, hdr); err != nil {' '	hdr := headersBuf[:msgSetHeaderLen]
 	if _, err := reader.Read(ctx, headersBuf); err != nil {'   '^TestAnOversizedHeaderBufferReadsOnlyTheHeader$'
 
+# The metadata path's header parse is bounds-checked. Neutralized by handing back
+# the buffer's own length as the limit, which is what an unchecked walk amounts
+# to: every take succeeds, and the slice expression underneath does the panicking
+# instead. This is the one parse in the package running on bytes no checksum has
+# vouched for.
+run_guard "a metadata header parse is bounds-checked" message_set.go   '	if n < 0 || c.n+n < c.n || c.n+n > int64(len(c.buf)) {' '	if false {'   '^TestMetadataReadRefusesACorruptRecordRatherThanPanicking$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

@@ -929,12 +929,31 @@ func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byt
 		return MessageMetadata{}, payloadBuf, pkgErrors.Wrap(err, "failed to read message payload")
 	}
 	payloadBuf = buf
+	// Nothing has vouched for these bytes. This path skips the payload CRC by
+	// design, and the frame header's CRC covers the record's identity rather than
+	// its contents — so the length fields below are unverified, and the parse has
+	// to be the thing that refuses them. Both checks used to be absent: a short
+	// frame indexed buf[5] off the end, and a damaged key length took
+	// parseHeadersAfterValue past it.
+	if len(buf) < 6 {
+		return MessageMetadata{}, payloadBuf, pkgErrors.Wrapf(ErrCorruptRecord,
+			"record at offset %d: frame claims %d bytes, too short to hold a record",
+			offset, len(buf))
+	}
+	headers, err := parseHeadersAfterValue(buf)
+	if err != nil {
+		return MessageMetadata{}, payloadBuf, pkgErrors.Wrapf(ErrCorruptRecord,
+			"record at offset %d: header parse %v", offset, err)
+	}
+	// Every Raw handed out here has therefore survived a bounds-checked parse,
+	// which is what makes a later Raw.Headers() — the same walk, unchecked — safe
+	// on it.
 	return MessageMetadata{
 		Offset:      offset,
 		Timestamp:   timestamp,
 		LeaderEpoch: leaderEpoch,
 		Attributes:  int8(buf[5]),
-		Headers:     parseHeadersAfterValue(buf),
+		Headers:     headers,
 		Raw:         SerializedMessage(buf),
 	}, payloadBuf, nil
 }

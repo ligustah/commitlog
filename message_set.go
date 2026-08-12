@@ -157,37 +157,87 @@ type MessageMetadata struct {
 	Raw SerializedMessage
 }
 
+// payloadCursor is a bounds-checked walk over a record's payload. Every read
+// goes through take, and the first one that would leave the buffer latches an
+// error that the rest of the walk then propagates — so a parse can be written
+// straight through without a length check between every field.
+type payloadCursor struct {
+	buf []byte
+	n   int64
+	err error
+}
+
+func (c *payloadCursor) take(n int64) []byte {
+	if c.err != nil {
+		return nil
+	}
+	// The overflow arm is not decoration: these lengths come off the wire, and
+	// c.n+n on a large one wraps to a value that passes a naive bounds check.
+	if n < 0 || c.n+n < c.n || c.n+n > int64(len(c.buf)) {
+		c.err = errors.Errorf(
+			"wants %d bytes at position %d of a %d-byte record", n, c.n, len(c.buf))
+		return nil
+	}
+	b := c.buf[c.n : c.n+n]
+	c.n += n
+	return b
+}
+
+func (c *payloadCursor) uint16() uint16 {
+	b := c.take(2)
+	if b == nil {
+		return 0
+	}
+	return encoding.Uint16(b)
+}
+
+func (c *payloadCursor) uint32() uint32 {
+	b := c.take(4)
+	if b == nil {
+		return 0
+	}
+	return encoding.Uint32(b)
+}
+
 // parseHeadersAfterValue skips CRC, magic, attributes, key, and value to
 // extract message headers from the raw serialized form.
-func parseHeadersAfterValue(buf []byte) map[string][]byte {
-	// Key length at offset 6
-	keyLen := int32(encoding.Uint32(buf[6:10]))
-	keyEnd := int32(10)
-	if keyLen != -1 {
-		keyEnd += keyLen
+//
+// Every index is checked, because this is the one parse in the package that runs
+// on bytes no checksum has vouched for. ReadMessageMetadata does not validate the
+// payload CRC — that is the trade it exists to make — and the frame header's CRC
+// covers the record's IDENTITY, not its contents. So the length fields that
+// decide how far this reaches are exactly the fields nothing verifies, and an
+// unchecked index here is a panic in the caller's process on a single flipped
+// bit. It was exactly that: a key length of 1<<20 in a 51-byte record indexed
+// straight off the end.
+func parseHeadersAfterValue(buf []byte) (map[string][]byte, error) {
+	c := &payloadCursor{buf: buf, n: 6}
+	// Key then value: a 4-byte length, -1 for absent, followed by that many
+	// bytes. Anything else negative is a damaged length, not an absent field.
+	for range 2 {
+		size := int32(c.uint32())
+		switch {
+		case size == -1:
+		case size < 0:
+			return nil, errors.Errorf("declares a length of %d", size)
+		default:
+			c.take(int64(size))
+		}
 	}
-	// Value length at keyEnd
-	valLen := int32(encoding.Uint32(buf[keyEnd : keyEnd+4]))
-	valEnd := keyEnd + 4
-	if valLen != -1 {
-		valEnd += valLen
-	}
-	n := valEnd
-	numHeaders := encoding.Uint16(buf[n:])
-	n += 2
+	numHeaders := c.uint16()
 	headers := make(map[string][]byte, numHeaders)
-	for i := uint16(0); i < numHeaders; i++ {
-		keySize := encoding.Uint16(buf[n:])
-		n += 2
-		key := string(buf[n : n+int32(keySize)])
-		n += int32(keySize)
-		valueSize := encoding.Uint32(buf[n:])
-		n += 4
-		value := buf[n : n+int32(valueSize)]
-		n += int32(valueSize)
-		headers[key] = value
+	for range int(numHeaders) {
+		key := c.take(int64(c.uint16()))
+		value := c.take(int64(c.uint32()))
+		if c.err != nil {
+			break
+		}
+		headers[string(key)] = value
 	}
-	return headers
+	if c.err != nil {
+		return nil, c.err
+	}
+	return headers, nil
 }
 
 func (ms messageSet) Offset() int64 {
