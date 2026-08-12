@@ -1231,6 +1231,14 @@ run_guard "a committed read reports a watermark it cannot find" reader.go   '	hw
 		return segments, nil
 	}'   '^TestACommittedReadReportsALostWatermarkRatherThanCorruption$'
 
+# A header read takes the header, not the whole buffer it was handed. Neutralized
+# back to reading headersBuf entire, which is what turns a buffer bigger than a
+# header into a stream off by the difference -- and then reports the healthy
+# record that follows as corrupt.
+run_guard "a header read stops at the header" reader.go   '	hdr := headersBuf[:msgSetHeaderLen]
+	if _, err := reader.Read(ctx, hdr); err != nil {' '	hdr := headersBuf[:msgSetHeaderLen]
+	if _, err := reader.Read(ctx, headersBuf); err != nil {'   '^TestAnOversizedHeaderBufferReadsOnlyTheHeader$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."

@@ -29,8 +29,11 @@ const (
 	msgSetHeaderLen = 32
 )
 
-// HeaderBufferLen is the capacity the headersBuf argument to
-// Reader.ReadMessage and Reader.ReadMessageMetadata must have.
+// HeaderBufferLen is the LENGTH the headersBuf argument to Reader.ReadMessage
+// and Reader.ReadMessageMetadata must have at least. Capacity does not do: the
+// header is read into the slice, so make([]byte, 0, HeaderBufferLen) is refused.
+// Longer is accepted and behaves identically — only the first HeaderBufferLen
+// bytes are written.
 //
 // Exported because it was previously a bare "28" in a doc comment, and a
 // consumer duly wrote make([]byte, 28) against it. A number copied out of prose

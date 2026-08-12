@@ -150,8 +150,10 @@ func (l *commitLog) newRecoveryReader(offset int64) (*Reader, error) {
 // offset, timestamp, and leader epoch. This may return uncommitted messages if
 // the reader was created with the uncommitted flag set to true.
 //
-// ReadMessage should not be called concurrently, and the headersBuf slice
-// must have a capacity of at least HeaderBufferLen.
+// ReadMessage should not be called concurrently, and headersBuf must have a
+// LENGTH of at least HeaderBufferLen — capacity is not enough, since the header
+// is read into the slice itself. A longer buffer is fine and reads the same:
+// only the first HeaderBufferLen bytes are filled.
 //
 // The bundled-return form this used to ask for as a TODO exists, as
 // ReadMessageMetadata — added beside this rather than replacing it, which is the
@@ -265,8 +267,9 @@ func (r *Reader) specAt(offset int64) readSpec {
 }
 
 // ReadMessageMetadata reads a single message and returns its metadata — offset,
-// attributes, and headers. headersBuf must have a capacity of at least
-// HeaderBufferLen. The payloadBuf slice is reused across calls; callers should
+// attributes, and headers. headersBuf must have a LENGTH of at least
+// HeaderBufferLen; a longer one is fine and only its first HeaderBufferLen bytes
+// are filled. The payloadBuf slice is reused across calls; callers should
 // pass the returned slice back on the next call to avoid per-message
 // allocations.
 //
@@ -808,7 +811,18 @@ func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (
 			"commitlog: headersBuf is %d bytes, need at least HeaderBufferLen (%d)",
 			len(headersBuf), msgSetHeaderLen)
 	}
-	if _, err := reader.Read(ctx, headersBuf); err != nil {
+	// Exactly the header, never the whole slice. The doc asks for a buffer of AT
+	// LEAST HeaderBufferLen and the readers below fill whatever they are handed,
+	// so reading headersBuf entire consumed the front of the PAYLOAD on any
+	// buffer bigger than a header, and the next frame then began mid-record.
+	//
+	// The symptom of that is the log calling itself corrupt: the following header
+	// fails its CRC on data that is perfectly intact. Silent, and reached by a
+	// caller doing exactly what the doc invited — the mirror of the too-SMALL
+	// buffer durable_streams reported, which at least panicked where you could
+	// see it.
+	hdr := headersBuf[:msgSetHeaderLen]
+	if _, err := reader.Read(ctx, hdr); err != nil {
 		return nil, 0, 0, 0, pkgErrors.Wrap(err, "failed to read message headers")
 	}
 	// Verify the header before trusting anything in it. offset, timestamp, leader
@@ -820,15 +834,15 @@ func readMessage(ctx context.Context, reader contextReader, headersBuf []byte) (
 	// Checked before `size` is used, because size is one of the fields being
 	// verified: trusting it first is how a corrupt length becomes a bad
 	// allocation.
-	if want, got := storedHeaderCrc(headersBuf), headerCrc(headersBuf); want != got {
+	if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got {
 		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,
 			"frame header failed CRC: expected 0x%08x, got 0x%08x", want, got)
 	}
 	var (
-		offset      = int64(encoding.Uint64(headersBuf[offsetPos:]))
-		timestamp   = int64(encoding.Uint64(headersBuf[timestampPos:]))
-		leaderEpoch = encoding.Uint64(headersBuf[leaderEpochPos:])
-		size        = encoding.Uint32(headersBuf[sizePos:])
+		offset      = int64(encoding.Uint64(hdr[offsetPos:]))
+		timestamp   = int64(encoding.Uint64(hdr[timestampPos:]))
+		leaderEpoch = encoding.Uint64(hdr[leaderEpochPos:])
+		size        = encoding.Uint32(hdr[sizePos:])
 	)
 	buf, err := readPayload(ctx, reader, int(size), nil)
 	if err != nil {
@@ -883,7 +897,10 @@ func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byt
 			"commitlog: headersBuf is %d bytes, need at least HeaderBufferLen (%d)",
 			len(hdrBuf), msgSetHeaderLen)
 	}
-	if _, err := reader.Read(ctx, hdrBuf); err != nil {
+	// See readMessage: exactly the header, or an oversized buffer eats the front
+	// of the payload and desynchronises the stream.
+	hdr := hdrBuf[:msgSetHeaderLen]
+	if _, err := reader.Read(ctx, hdr); err != nil {
 		return MessageMetadata{}, payloadBuf, pkgErrors.Wrap(err, "failed to read message headers")
 	}
 	// Verify the header before trusting anything in it. offset, timestamp, leader
@@ -895,15 +912,15 @@ func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byt
 	// Checked before `size` is used, because size is one of the fields being
 	// verified: trusting it first is how a corrupt length becomes a bad
 	// allocation.
-	if want, got := storedHeaderCrc(hdrBuf), headerCrc(hdrBuf); want != got {
+	if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got {
 		return MessageMetadata{}, payloadBuf, pkgErrors.Wrapf(ErrCorruptRecord,
 			"frame header failed CRC: expected 0x%08x, got 0x%08x", want, got)
 	}
 	var (
-		offset      = int64(encoding.Uint64(hdrBuf[offsetPos:]))
-		timestamp   = int64(encoding.Uint64(hdrBuf[timestampPos:]))
-		leaderEpoch = encoding.Uint64(hdrBuf[leaderEpochPos:])
-		size        = encoding.Uint32(hdrBuf[sizePos:])
+		offset      = int64(encoding.Uint64(hdr[offsetPos:]))
+		timestamp   = int64(encoding.Uint64(hdr[timestampPos:]))
+		leaderEpoch = encoding.Uint64(hdr[leaderEpochPos:])
+		size        = encoding.Uint32(hdr[sizePos:])
 	)
 	// Chunked for the same reason as readMessage: an unchecksummed size field
 	// must not turn a torn frame into a 4GiB allocation. See maxPayloadChunk.

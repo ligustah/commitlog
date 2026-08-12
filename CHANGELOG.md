@@ -5,6 +5,32 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.72.4 — 2026-08-12
+
+### Fixed
+
+- **A `headersBuf` longer than a header made the log report itself corrupt.**
+  `ReadMessage` and `ReadMessageMetadata` document the buffer as needing "at
+  least `HeaderBufferLen`", and both then read the WHOLE slice — the readers
+  under them fill however many bytes they are handed. So a 64-byte buffer
+  consumed a 32-byte header plus the first 32 bytes of the record's payload, the
+  next frame began mid-record, and its header failed the CRC. `ErrCorruptRecord`,
+  on intact data, reached by a caller doing exactly what the doc invited.
+
+  Both paths now read `headersBuf[:HeaderBufferLen]`, so "at least" is true as
+  written and a longer buffer behaves identically.
+
+  This is the mirror of the too-SMALL buffer durable_streams reported against
+  v0.41.0 — 24 sites passing 28 bytes, every one panicking. That direction was
+  loud enough to be found in a day. This one is silent, and the doc recommended
+  it.
+
+### Changed
+
+- `HeaderBufferLen`'s doc said *capacity* where all three call sites check
+  *length*, so `make([]byte, 0, HeaderBufferLen)` satisfied the documentation and
+  was refused by the code. All three now say length, and say that longer is fine.
+
 ## v0.72.3 — 2026-08-12
 
 ### Fixed
