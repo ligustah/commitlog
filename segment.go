@@ -80,17 +80,27 @@ type segment struct {
 	waiters        map[interface{}]chan struct{}
 	sealed         bool
 	closed         bool
-	replaced       bool
+	// left marks a segment that has LEFT the log: superseded by a rewrite
+	// (Replace) or by a differently named successor (SupersededBy), or removed
+	// outright (Delete). Distinct from closed, which a segment can also be while
+	// its files are intact and it is still the one the log publishes.
+	//
+	// One flag and not two, because nothing has ever asked which of those it was.
+	// This was `replaced` and `gone`, and every read site tested them together as
+	// `replaced || gone` — no site anywhere tested either alone. current() says
+	// why outright: the cases are told apart by the LINK, not by the flags, so a
+	// reader with a replacement follows it and a reader without one skips to the
+	// next segment, and neither question is answered by which flag was set.
+	// cleanupEmptySegment had already collapsed the distinction in practice,
+	// setting `replaced` with no replacement link — which is what `gone` meant.
+	// Guarded by the segment lock.
+	left bool
 	// blocksWalked is how many blocks the last scanBlocks resolved by walking the
 	// header chain — one read each. Zero for a segment that loaded its block
 	// table from the sidecar instead, which is the whole point of persisting it:
 	// see BenchmarkReopenWalksEveryBlockHeader for what the walk costs. Guarded
 	// by the segment lock.
 	blocksWalked int
-	// gone marks a segment whose files have been removed (Delete). Distinct from
-	// closed, which a segment can also be while its files are intact. See
-	// current(). Guarded by the segment lock.
-	gone bool
 	// replacement is the segment that superseded this one, set by Replace. See
 	// current(): it exists because a compaction pass closes each source segment
 	// as it rewrites it but does not publish the rewritten list until the whole
@@ -1517,12 +1527,12 @@ func (s *segment) ReadAt(p []byte, off int64) (n int, err error) {
 // are not reentrant in the presence of a waiting writer).
 func (s *segment) readAtLocked(p []byte, off int64) (n int, err error) {
 	if s.closed {
-		// gone counts as replaced: both mean this segment has left the log and
-		// the caller should re-resolve against the current one, which is what
-		// the reader does with ErrSegmentReplaced. Only ErrSegmentClosed says
-		// "this handle is shut" — a claim about the segment, not about the log —
-		// and a reader has nowhere to go with it.
-		if s.replaced || s.gone {
+		// A segment that has left the log tells the caller to re-resolve against
+		// the current one, which is what the reader does with ErrSegmentReplaced —
+		// whether it left by being rewritten or by being deleted. Only
+		// ErrSegmentClosed says "this handle is shut" — a claim about the segment,
+		// not about the log — and a reader has nowhere to go with it.
+		if s.left {
 			return 0, ErrSegmentReplaced
 		}
 		return 0, ErrSegmentClosed
@@ -1648,12 +1658,12 @@ func (s *segment) scanReadAt(c *blockCache, st *scanStream, p []byte, off int64)
 	s.RLock()
 	defer s.RUnlock()
 	if s.closed {
-		// gone counts as replaced: both mean this segment has left the log and
-		// the caller should re-resolve against the current one, which is what
-		// the reader does with ErrSegmentReplaced. Only ErrSegmentClosed says
-		// "this handle is shut" — a claim about the segment, not about the log —
-		// and a reader has nowhere to go with it.
-		if s.replaced || s.gone {
+		// A segment that has left the log tells the caller to re-resolve against
+		// the current one, which is what the reader does with ErrSegmentReplaced —
+		// whether it left by being rewritten or by being deleted. Only
+		// ErrSegmentClosed says "this handle is shut" — a claim about the segment,
+		// not about the log — and a reader has nowhere to go with it.
+		if s.left {
 			return 0, ErrSegmentReplaced
 		}
 		return 0, ErrSegmentClosed
@@ -2265,9 +2275,10 @@ func (s *segment) Replace(old *segment) error {
 		// reports ErrSegmentClosed until the process restarts — which is bad,
 		// and still the best of the three states available.
 		//
-		// It is tempting to mark old `gone` instead, so current() lets readers
-		// skip past it rather than erroring. That is worse, not better: `gone`
-		// means the records legitimately no longer exist, and here they exist —
+		// It is tempting to mark old `left` here anyway, WITHOUT the replacement
+		// link below, so current() lets readers skip past it rather than
+		// erroring. That is worse, not better: an unlinked departure means the
+		// records legitimately no longer exist, and here they exist —
 		// complete and rewritten — in the very files this failed to open. A
 		// reader told to skip them silently loses records that are sitting on
 		// disk, and silent loss beats loud failure only for the person reading
@@ -2283,7 +2294,7 @@ func (s *segment) Replace(old *segment) error {
 	// at a replacement whose positions and index had not been built — so a
 	// failure below handed every reader a half-open segment instead of the loud
 	// error above.
-	old.replaced = true
+	old.left = true
 	old.replacement = s
 	segmentDepartures.Add(1)
 	return nil
@@ -2291,7 +2302,7 @@ func (s *segment) Replace(old *segment) error {
 
 // segmentDepartures counts segments that have LEFT the log — superseded by a
 // replacement (Replace, SupersededBy) or removed outright (Delete). That is the
-// same union readAtLocked and current() test as `replaced || gone`, and it is
+// same union readAtLocked and current() test as `left`, and it is
 // the right unit here for the same reason: what a mid-pass reader can trip over
 // is a segment that is no longer the one the published list names, and how it
 // stopped being that is not the hazard.
@@ -2308,7 +2319,7 @@ func (s *segment) Replace(old *segment) error {
 // nothing about the property under test. This counts the event itself.
 //
 // Counted once per segment: the delete path skips a segment already marked
-// replaced, so cleanupEmptySegment — which marks and then deletes the same
+// `left`, so cleanupEmptySegment — which marks and then deletes the same
 // segment — does not report two departures for one.
 var segmentDepartures atomic.Int64
 
@@ -2367,16 +2378,17 @@ func (s *segment) reopenLocked() error {
 // is a differently NAMED file, so there is nothing to rename over — and
 // TruncateBefore, which is the only caller in that position, deleted the source
 // without ever recording the link. A reader already resolved into it then read
-// a gone segment with no replacement, which is the retention case: skip to the
-// NEXT segment. So it skipped the surviving records sitting in the trim, which
-// were exactly the ones the caller had asked to keep.
+// a departed segment with no replacement, which is the retention case: skip to
+// the NEXT segment. So it skipped the surviving records sitting in the trim,
+// which were exactly the ones the caller had asked to keep.
 //
-// The distinction current() draws is by the LINK, not the flags. Anything that
-// deletes a segment whose records did not all go with it owes this call.
+// The distinction current() draws is by the LINK, not the flag — which is why
+// there is only one flag. Anything that deletes a segment whose records did not
+// all go with it owes this call.
 func (s *segment) SupersededBy(next *segment) {
 	s.Lock()
 	defer s.Unlock()
-	s.replaced = true
+	s.left = true
 	s.replacement = next
 	segmentDepartures.Add(1)
 }
@@ -2401,17 +2413,20 @@ const replacementDepth = 64
 // Read against a maintaining log failing at random with "segment has been
 // closed".
 //
-// The cases are told apart by the link, not by the flags: a replacement is a
-// redirect, and anything else that is gone — deleted by retention, or rewritten
-// to nothing — reports ok=false so findSegment moves on to the next segment,
-// which is what a reader already does after retention has run to completion.
+// The cases are told apart by the link, not by the flag: a replacement is a
+// redirect, and a segment that left with no link — deleted by retention, or
+// rewritten to nothing — reports ok=false so findSegment moves on to the next
+// segment, which is what a reader already does after retention has run to
+// completion. That is why one flag is enough to serve both: `left` says the
+// published list no longer names this segment, and `replacement` says where to
+// go instead, if anywhere.
 func (s *segment) current() (*segment, bool) {
 	for range replacementDepth {
 		s.RLock()
-		next, gone := s.replacement, s.replaced || s.gone
+		next, left := s.replacement, s.left
 		s.RUnlock()
 		if next == nil {
-			return s, !gone
+			return s, !left
 		}
 		s = next
 	}
@@ -2438,7 +2453,7 @@ func (s *segment) findEntry(offset int64) (*entry, error) {
 	// had already swapped or deleted came back as ErrSegmentClosed — which a
 	// reader can do nothing with, where ErrSegmentReplaced sends it to the
 	// segment list for the live one.
-	if s.replaced || s.gone {
+	if s.left {
 		return nil, ErrSegmentReplaced
 	}
 	if s.blockMode {
@@ -2494,7 +2509,7 @@ func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
 	// had already swapped or deleted came back as ErrSegmentClosed — which a
 	// reader can do nothing with, where ErrSegmentReplaced sends it to the
 	// segment list for the live one.
-	if s.replaced || s.gone {
+	if s.left {
 		return nil, ErrSegmentReplaced
 	}
 	if s.blockMode {
@@ -2672,7 +2687,8 @@ func (s *segment) Delete() error {
 	//
 	// Its error is captured rather than returned, so that the flag below is set
 	// whatever the close reported. Returning here left the segment published and
-	// neither closed nor gone — and its records are being collected either way,
+	// neither closed nor marked as having left — and its records are being
+	// collected either way,
 	// so a close that failed does not make them readable again. A reader
 	// resolving into it then got a raw error for offsets retention had lawfully
 	// collected, which is the exact case the flag exists to turn into a skip.
@@ -2685,20 +2701,24 @@ func (s *segment) Delete() error {
 	// rather than at the cleaner because every path that deletes a segment owes
 	// this, including the ones that do it outside a pass.
 	//
-	// Closing and marking gone are ONE step, under one hold of the lock. Closing
-	// first and marking at the end left a window where the segment was closed but
-	// not yet gone, and a reader that resolved into it there got the raw
+	// Closing and marking are ONE step, under one hold of the lock. Closing first
+	// and marking at the end left a window where the segment was closed but not
+	// yet marked, and a reader that resolved into it there got the raw
 	// ErrSegmentClosed the flag exists to turn into a redirect. Marking before the
 	// removal below can only mean a segment whose files survive a failed delete is
 	// skipped rather than errored on — and it is closed either way, so skipping is
 	// the better of the two answers.
-	// Only when it has not already left by the other route. cleanupEmptySegment
-	// marks a segment replaced and then deletes it, and one segment leaving the
-	// log once should be one departure.
-	if !s.replaced {
+	//
+	// The count is taken only when it has not already left by the other route.
+	// cleanupEmptySegment marks a segment and then deletes it, and one segment
+	// leaving the log once should be one departure. Reading the same flag it is
+	// about to set is what makes that hold under one field: with two flags this
+	// had to name the OTHER one, which was correct only as long as nobody added a
+	// third way to leave.
+	if !s.left {
 		segmentDepartures.Add(1)
 	}
-	s.gone = true
+	s.left = true
 	if closeErr != nil {
 		return closeErr
 	}

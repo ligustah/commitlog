@@ -1127,10 +1127,12 @@ func cleanupEmptySegment(new, old *segment) error {
 	if err := new.Delete(); err != nil {
 		return err
 	}
-	// Also delete the old segment since it's been compacted. Set the replaced
-	// flag since this is in the read path. Its digest goes with it.
+	// Also delete the old segment since it's been compacted. Mark it as having
+	// left the log first, since this is in the read path. No replacement link:
+	// every record in it was superseded, so there is nowhere to redirect a reader
+	// to and current() should have it skipped. Its digest goes with it.
 	old.Lock()
-	old.replaced = true
+	old.left = true
 	old.Unlock()
 	removeKeyDigest(old)
 	return old.Delete()

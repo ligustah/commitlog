@@ -28,9 +28,9 @@ library from that fork onward.
   All three now wait on `segmentDepartures`, a new counter following the existing
   `segmentScans` precedent for a package-level counter tests assert on. It counts
   a segment LEAVING the log — superseded by a replacement (`Replace`,
-  `SupersededBy`) or removed outright (`Delete`) — which is the same union
-  `readAtLocked` and `current()` test as `replaced || gone`. Counted once per
-  segment: the delete path skips one already marked replaced, so
+  `SupersededBy`) or removed outright (`Delete`) — which is exactly the condition
+  `readAtLocked` and `current()` test (see the flag merge below). Counted once per
+  segment: the delete path skips one that has already left, so
   `cleanupEmptySegment`, which marks and then deletes, reports one departure
   rather than two. The post-hoc `writes > 500` assertion is replaced by the
   departure count itself.
@@ -40,7 +40,7 @@ library from that fork onward.
   the whole of `TestOpeningAReaderWhileRetentionDeletesSegments` and it could only
   ever time out. Targeted runs of the two tests the change was aimed at passed;
   the full suite is what reached the third. The union is the fix, for the same
-  reason `current()` draws its distinction by the link rather than the flags.
+  reason `current()` draws its distinction by the link rather than the flag.
 
   Three hundred departures, calibrated against both directions of getting it
   wrong. Replacements alone are front-loaded and then asymptotic — three arrive in
@@ -60,6 +60,34 @@ library from that fork onward.
 
   Neither reader test had ever failed. They carried the identical gate and were
   one slow runner away.
+
+### Changed
+
+- **`segment.replaced` and `segment.gone` merged into one `segment.left` flag.**
+  Internal; no public surface moves. The two fields recorded how a segment left
+  the log — rewritten over versus files removed — and nothing ever asked. Every
+  read site tested them together as `replaced || gone`; no site anywhere tested
+  either alone.
+
+  `current()` already said why: the cases are told apart by the LINK, not by the
+  flags. A departed segment with a `replacement` is a redirect and a reader
+  follows it; one without is a skip. Which flag was set answers neither question.
+  `cleanupEmptySegment` had already collapsed the distinction in practice — it
+  set `replaced` on a segment with no replacement, which is precisely what `gone`
+  meant — so the two names had stopped describing the two states anyway.
+
+  The counter added above is what made this concrete: it had to count the union
+  to be correct, and a counter of one flag alone was a bug (see the retention
+  case above). One flag also removes a latent trap in `Delete`, which guards its
+  count with "has this segment already left by the *other* route" — correct only
+  for as long as there are exactly two routes. It now reads the same flag it is
+  about to set.
+
+  What is lost is a human-readable distinction in a debugger. The merged field's
+  doc records both origins, and `replacement` still distinguishes them where it
+  matters. `Replace`'s failed-reopen path is unchanged: it deliberately sets
+  *neither* flag, so a rewrite that could not be reopened stays loudly closed
+  rather than silently skipped over records that are sitting on disk.
 
 ## v0.68.0 — 2026-08-12
 
