@@ -5,6 +5,56 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **Two processes could open the same log directory, and both would write into
+  it.** Nothing in the package locked anything on disk — no `flock`, no
+  `LockFileEx`, no `O_EXCL` — so the only exclusion the log had was
+  `appendMu`, which is a claim over one process's memory. Every offset the log
+  hands out is computed from state that lives there: the active segment's
+  `Position` and `NextOffset`. A second process opens the same directory, builds
+  its own copy of that state from the same files, and is then correct about a
+  log that is no longer the one on disk.
+
+  Both writers append at their own believed position into the same file, each
+  overwriting frames the other just wrote. Both see every append succeed. The
+  damage only surfaces on the way back out, as `failed to read message headers`
+  and zero readable records — which is how durable_streams found it.
+
+  Nothing in the format can detect that after the fact: the frames are
+  individually well-formed, and what is wrong is that two of them were written
+  to one span of the file. So the exclusion has to happen before the second
+  writer exists. `New` now takes an exclusive claim on the directory and holds
+  it for the life of the log; a second open returns the new `ErrLogLocked`.
+  `Close` and `Delete` give it back.
+
+  `ErrLogLocked` is its own sentinel because the two things a caller might do
+  about it are opposite. A directory held by a peer that is still running is a
+  configuration mistake — two brokers pointed at one data dir — and retrying
+  makes it worse. A directory held by a process that has just died releases on
+  its own, and there retrying is exactly right. Only the caller can tell those
+  apart, so the log names the condition instead of guessing.
+
+  Implemented with `flock(LOCK_EX|LOCK_NB)` on unix and a `CreateFile` share
+  mode of zero on Windows — stdlib only, no new dependency, and on both
+  platforms the OS drops the claim when the holder dies by any means, including
+  a kill. That is the property this has over a lock file whose mere existence
+  means "locked": a crashed process leaves the directory openable rather than
+  needing an operator to clear litter.
+
+  This is the LOCAL counterpart to the single-writer contract the `CommitLog`
+  interface already stated for tiers, and the failure here is far worse. Two
+  writers on a shared store produce a duplicate object and cost storage. Two
+  writers on a shared directory destroy the log.
+
+  Checked before building: an unconditional lock does not break the five sqlcdc
+  tools that call `New` on a data directory (`buscheck`, `dslayout`,
+  `offsetkeys`, `streamkeys`, `walstat`). Every one of them opens a
+  `dslayout.Snapshot` copy with a `release()`, never the live directory — so no
+  read-only open mode is needed.
+
 ## v0.70.0 — 2026-08-12
 
 ### Removed

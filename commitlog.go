@@ -151,6 +151,11 @@ type commitLog struct {
 	// name absent from the map is writable.
 	tierMu       sync.RWMutex
 	tierReadOnly map[string]bool
+	// dirLock is this log's exclusive claim on its directory, held from New
+	// until Close or Delete. Not guarded by l.mu: it is set once before the log
+	// is handed out and released once by whichever of Close/Delete runs first,
+	// both of which already serialise on stopBackgroundLoops.
+	dirLock *dirLock
 	// reclaim holds store objects a rewrite superseded, waiting for the readers
 	// still on them to finish. Drained at the start of a clean pass.
 	reclaim []pendingReclaim
@@ -389,7 +394,12 @@ type Options struct {
 
 // New creates a new CommitLog and starts a background goroutine which
 // periodically checkpoints the high watermark to disk.
-func New(opts Options) (CommitLog, error) {
+// New opens the log at opts.Path, taking an EXCLUSIVE claim on that directory
+// for the life of the returned log: a second open of a directory another live
+// process holds fails with ErrLogLocked rather than succeeding into a log the
+// two of them then corrupt. See lockLogDir for what the two writers do to each
+// other and why nothing after open time can detect it.
+func New(opts Options) (_ CommitLog, err error) {
 	if opts.Path == "" {
 		return nil, errors.New("path is empty")
 	}
@@ -494,6 +504,29 @@ func New(opts Options) (CommitLog, error) {
 	compactCleaner.cache = opts.RemoteIndexCache
 
 	path, _ := filepath.Abs(opts.Path)
+
+	// The directory has to exist before it can be claimed, and it has to be
+	// claimed before anything else in this function reads or writes a file in
+	// it. newLeaderEpochCache on the next line is already one of those, which is
+	// why the MkdirAll happens here and not only in init() below.
+	if err := os.MkdirAll(path, 0755); err != nil {
+		return nil, errors.Wrap(err, "mkdir failed")
+	}
+	lock, err := lockLogDir(path)
+	if err != nil {
+		return nil, err
+	}
+	// Every failure from here to the successful return has to give the lock
+	// back, or a caller that retries after one meets its own dead process. The
+	// deferred release is keyed on the named return so it fires on the error
+	// paths and not on the one that succeeds -- which must keep the lock, since
+	// holding it for the life of the log is the point.
+	defer func() {
+		if err != nil {
+			_ = lock.release()
+		}
+	}()
+
 	epochCache, err := newLeaderEpochCache(opts.Name, path)
 	if err != nil {
 		return nil, err
@@ -511,6 +544,7 @@ func New(opts Options) (CommitLog, error) {
 		// log's very first append as already durable and skip its flush.
 		syncDurable:  -1,
 		tierReadOnly: readOnlyTiers(opts.Tiers),
+		dirLock:      lock,
 	}
 	// Set here rather than passed to newCompactCleaner because it closes over the
 	// log the cleaner belongs to, which does not exist until this line.
@@ -1539,7 +1573,12 @@ func (l *commitLog) Close() error {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.closeSegments()
+	// The directory claim outlives the segments and is given back last, so no
+	// window exists where this process has stopped holding the directory but
+	// still has a segment file open. A second process taking the lock in that
+	// window would be exactly the two-writer state the lock exists to prevent.
+	err := l.closeSegments()
+	return stderrors.Join(err, l.dirLock.release())
 }
 
 // Delete closes the log and removes all data associated with it from the
@@ -1557,6 +1596,15 @@ func (l *commitLog) Delete() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.closeSegments(); err != nil {
+		return err
+	}
+	// Before removeLogDir, not after: on Windows the lock handle is opened with
+	// no sharing, so the lock file cannot be removed while it is held, and a
+	// Delete that left it open would fail to empty the directory. Releasing here
+	// is safe because the segments are already closed — there is nothing left
+	// for a second process to race into, and the directory is about to stop
+	// existing.
+	if err := l.dirLock.release(); err != nil {
 		return err
 	}
 	// Not removeAllWithRetry: the descriptor has to go last, or a delete that

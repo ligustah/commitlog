@@ -27,6 +27,7 @@ var logOwnedFileNames = []string{
 	hwFileName,
 	leaderEpochFileName,
 	descriptorFileName,
+	lockFileName,
 }
 
 // logOwnedFileSuffixes are the suffixes the log's own files carry. A sidecar

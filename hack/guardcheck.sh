@@ -1147,6 +1147,29 @@ run_guard "the descriptor is read before anything is copied" copy_tier.go   '	de
 # what notices.
 run_guard "the high watermark only moves forward" commitlog.go   '	if hw > l.hw {' '	if true {'   '^TestTheHighWatermarkNeverGoesBackwards$'
 
+# Two processes on one directory each keep their own tail and index and write
+# over each other's frames. The neutralization hands back an UNHELD dirLock --
+# zero value, held=false -- so release() stays a no-op and every other line in
+# New and Close is unchanged. What goes away is only the claim itself.
+run_guard "a live log directory is claimed" commitlog.go   '	lock, err := lockLogDir(path)' '	lock, err := &dirLock{}, error(nil)'   '^TestASecondOpenOfALiveLogDirectoryIsRefused$'
+
+# A lock that outlived its log would make every clean shutdown leave a directory
+# nothing could reopen until the process exited. The neutralization keeps the
+# Join so err stays used, and drops only the release.
+run_guard "closing gives the directory back" commitlog.go   '	return stderrors.Join(err, l.dirLock.release())' '	return stderrors.Join(err, error(nil))'   '^TestClosingALogReleasesItsDirectory$'
+
+# Windows only, and the asymmetry is the whole reason it is a separate guard:
+# the lock handle is opened with no sharing, so a Delete that has not released
+# it cannot remove the lock file and leaves the directory standing. On unix
+# flock does not stop an unlink, so the same removal succeeds either way and the
+# test cannot see the difference -- it would pass with the guard removed, which
+# is a guard that proves nothing.
+run_guard_windows "delete releases before it removes" commitlog.go   '	if err := l.dirLock.release(); err != nil {
+		return err
+	}' '	if false {
+		return nil
+	}'   '^TestDeleteRemovesTheLockFileWithTheDirectory$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
