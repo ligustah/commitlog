@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.71.0 — 2026-08-12
 
 ### Fixed
 
