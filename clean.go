@@ -245,23 +245,39 @@ type CleanSpec struct {
 	// maxRewrites is an unexported deterministic rewrite cap for tests;
 	// production callers bound passes by RewriteBudget.
 	maxRewrites int
-	// RewriteBudget bounds how long one pass may spend REWRITING segments
+	// RewriteBudget bounds how long one STAGE may spend REWRITING segments
 	// (digest skips stay free): once exceeded, remaining debt defers to the
-	// next pass, so a pass always finishes inside a short-lived process's
-	// kill window while reclamation scales to any inflow. The budget is
-	// spent in drop-density order. 0 = unbounded. At least one rewrite
-	// always proceeds.
+	// next pass, so reclamation scales to any inflow. The budget is spent in
+	// drop-density order. 0 = unbounded. At least one rewrite always proceeds.
 	//
-	// The join stage draws on it too — a join reads and writes every byte of its
-	// run, so it costs what a rewrite costs — but from a SEPARATE budget of the
-	// same size, taken after compaction has spent its own. Sharing one counter
-	// would express the ordering by starving joins on any log with compaction
-	// debt, which is a different rule than "bytes before file handles".
+	// A stage, not a pass, and the difference is a multiple rather than a
+	// rounding error — size it accordingly. A pass runs the local rewrite stage,
+	// one tiered rewrite stage PER TIER (see TierBudgets, which falls back to
+	// this value for a tier it does not name), and the join stage, and each takes
+	// a budget of its own. A compacted log with two tiers can therefore spend
+	// 4×RewriteBudget before a pass returns.
+	//
+	// That is deliberate at every step and still worth stating plainly, because
+	// the number a caller reaches for is a process kill window, and a kill window
+	// is a property of the PASS. Sharing one counter would express each ordering
+	// by starving whatever ran last: one slow remote rewrite would consume the
+	// pass and local debt would grow untouched, and any log with compaction debt
+	// would never join. Those are different rules than "the cheap tier is not
+	// charged for the expensive one" and "bytes before file handles". The
+	// worst case is bounded and knowable, so it is the caller's to divide.
 	RewriteBudget time.Duration
 	// TierBudgets bounds, per tier, how long one pass may spend rewriting
 	// segments whose bytes live in that tier's store. A tier with no entry
 	// falls back to RewriteBudget, so a caller that sets nothing sees no
 	// change.
+	//
+	// An entry of 0 falls back too, and is NOT the "unbounded" that 0 means on
+	// RewriteBudget. Stated because the asymmetry is otherwise unguessable, and
+	// because zeroing a budget is what a caller reaches for to say "spend as
+	// long as it takes here" — which would be the one instruction this field
+	// exists to make impossible, since an unbounded remote rewrite is exactly
+	// the pass-consuming case below. A tier that should genuinely be unbounded
+	// wants a duration longer than any pass, not a zero.
 	//
 	// Separate from RewriteBudget because the two rewrites cost wildly
 	// different things. A local rewrite reads and writes local disk; a tiered
