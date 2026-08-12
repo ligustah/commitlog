@@ -1550,7 +1550,29 @@ func (l *commitLog) closeSegments() error {
 	// holds files open in it. A checkpoint failure opened precisely that
 	// window, and a second process taking the lock inside it is the two-writer
 	// state the lock exists to prevent.
-	errs := []error{l.checkpointHW(waitedOnRetryBudget)}
+	return stderrors.Join(l.checkpointHW(waitedOnRetryBudget), l.closeSegmentsOnly())
+}
+
+// closeSegmentsOnly closes every segment WITHOUT checkpointing the high
+// watermark. The caller must hold l.mu. Idempotent, like closeSegments.
+//
+// Delete is the caller that wants this. A checkpoint is a note about where to
+// resume a log that still exists; writing one into a directory that is about to
+// be removed is work whose only possible outcomes are wasted or harmful. Delete
+// already said so about the background loop — it sets l.deleted first precisely
+// "so the checkpoint loop skips writing to a directory about to be removed" —
+// and then called closeSegments, which wrote that same checkpoint synchronously
+// on the way out.
+//
+// That contradiction had teeth once the checkpoint stopped aborting the close:
+// its error now reaches Delete's caller, where an early return skips both the
+// lock release and the removal. A best-effort write nobody wanted could leave
+// the log closed, the directory locked for the life of the process, and the
+// files still on disk. sqlcdc reported it against real failed deletes.
+func (l *commitLog) closeSegmentsOnly() error {
+	if l.segmentsClosed {
+		return nil
+	}
 	// Close EVERY segment before reporting any failure — the same rule
 	// closeSegment holds over its two halves, one level up and for the same
 	// reason. Returning at the first error left every LATER segment open, and
@@ -1560,6 +1582,7 @@ func (l *commitLog) closeSegments() error {
 	// file handles and index mmaps for the life of the process — and on Windows
 	// a mapped index cannot be unlinked, so the directory could not be removed
 	// either.
+	var errs []error
 	for _, segment := range l.segments {
 		if err := segment.Close(); err != nil {
 			errs = append(errs, err)
@@ -1606,7 +1629,18 @@ func (l *commitLog) Delete() error {
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := l.closeSegments(); err != nil {
+	// closeSegmentsOnly, not closeSegments: this log is being removed, so the
+	// high-watermark checkpoint is a note about where to resume something that
+	// will not exist. Writing it is at best wasted and at worst fatal to the
+	// delete — its error would return here, before the release and the removal.
+	// See closeSegmentsOnly.
+	//
+	// A segment that genuinely fails to close DOES stop the delete here, and
+	// keeps the lock: the files are still open, removing them would fail on
+	// Windows anyway, and holding the claim keeps anyone else out of a
+	// half-deleted directory. closeSegmentsOnly is idempotent, so a caller that
+	// retries Delete skips straight to the release and the removal.
+	if err := l.closeSegmentsOnly(); err != nil {
 		return err
 	}
 	// Before removeLogDir, not after: on Windows the lock handle is opened with

@@ -1175,10 +1175,16 @@ run_guard_windows "delete releases before it removes" commitlog.go   '	if err :=
 # broke Close's release invariant, since the lock goes back either way -- so
 # the window between "let go of the directory" and "still holding files open
 # in it" existed for as long as this early return did.
-run_guard "a failed checkpoint does not abort the close" commitlog.go   '	errs := []error{l.checkpointHW(waitedOnRetryBudget)}' '	var errs []error
-	if err := l.checkpointHW(waitedOnRetryBudget); err != nil {
+run_guard "a failed checkpoint does not abort the close" commitlog.go   '	return stderrors.Join(l.checkpointHW(waitedOnRetryBudget), l.closeSegmentsOnly())' '	if err := l.checkpointHW(waitedOnRetryBudget); err != nil {
 		return err
-	}'   '^TestAFailedCheckpointStillClosesTheLogAndReleasesTheDirectory$'
+	}
+	return l.closeSegmentsOnly()'   '^TestAFailedCheckpointStillClosesTheLogAndReleasesTheDirectory$'
+
+# The neutralization is the call Delete used to make. It reads like the more
+# obvious of the two, which is exactly why this guard exists: nothing at the
+# call site says the checkpoint inside closeSegments is both pointless here and
+# able to fail the whole delete.
+run_guard "delete does not checkpoint a directory it is removing" commitlog.go   '	if err := l.closeSegmentsOnly(); err != nil {' '	if err := l.closeSegments(); err != nil {'   '^TestDeleteDoesNotCheckpointAndCannotBeStoppedByOne$'
 
 echo
 if [ "$failures" -ne 0 ]; then
