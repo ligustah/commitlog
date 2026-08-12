@@ -908,7 +908,7 @@ run_guard "a ceiling needs the auto cleaner off" clean.go   '	if _, ok := spec.C
 # byte-identical to Stream's, and apply_edit refuses an ambiguous match rather
 # than neutralizing whichever it finds first.
 run_guard_windows "store read retries a held object" segment_store.go   $'\tf, err := openWithRetry(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound' $'\tf, err := os.Open(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound'   '^TestAStoreReadRetriesThroughAHeldObject$'
-run_guard_windows "store publish retries a held dest" segment_store.go   '	return renameWithRetry(tmp, path)' '	return os.Rename(tmp, path)'   '^TestAStorePublishRetriesThroughAHeldDestination$'
+run_guard_windows "store publish retries a held dest" segment_store.go   '	if err := renameWithRetry(tmp, path); err != nil {' '	if err := os.Rename(tmp, path); err != nil {'   '^TestAStorePublishRetriesThroughAHeldDestination$'
 
 # A version 3 manifest names the tier of every object. Neutralized to `if false`
 # rather than deleting the loop: what must fail is the refusal, not the compile,
