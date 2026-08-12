@@ -132,18 +132,46 @@ func openWhileMaintaining(t *testing.T, opts Options) {
 		}()
 	}
 
-	// Gate on the WRITES as well as the opens. Opening a reader is far cheaper
-	// than appending, so a run bounded by opens alone finishes while the log is
-	// still one segment long — nothing has been superseded, no pass replaces
-	// anything, and the window this test exists to enter never opens. The first
-	// draft did exactly that: three thousand opens against thirteen records.
-	deadline := time.After(60 * time.Second)
-	for bad.Load() == nil && (writes.Load() < 1000 || opens.Load() < 3000) {
+	// Gate on DEPARTURES, not on the writes. Opening a reader is far cheaper than
+	// appending, so a run bounded by opens alone finishes while the log is still
+	// one segment long — nothing has left it, no pass has moved anything, and the
+	// window this test exists to enter never opens. The first draft did exactly
+	// that: three thousand opens against thirteen records.
+	//
+	// A write count is a THROUGHPUT PROXY for that condition, and it puts machine
+	// speed in the verdict: the identical gate in
+	// TestTimestampLookupsWhileCompactionReplacesSegments failed CI on a runner
+	// roughly 2.2x slower than usual, reaching 799 of its 1000 writes inside the
+	// 60s deadline while its probes ran to 898x their own threshold. This helper
+	// had the same gate and simply had not drawn the short straw yet.
+	//
+	// DEPARTURES and not supersessions, because this helper serves BOTH mutators.
+	// Retention deletes a segment and links it to nothing — its own doc above says
+	// so — so a counter of replacements sits at zero for the whole retention run
+	// and the gate can only ever time out. What both cases have in common is a
+	// segment leaving the published list, which is what segmentDepartures counts
+	// and what a reader mid-pass can trip over.
+	//
+	// Three hundred is calibrated, not picked: it puts these runs at 3-8s with
+	// ~950-2000 appends, so the hammering the old 60-second gate bought is kept
+	// while what ENDS the run is progress rather than the clock. See the note in
+	// the timestamp test for why the figure is this large — deletions are far more
+	// frequent than replacements, and a budget of 10 finished in under a second.
+	const wantDepartures = 300
+	departedAtStart := segmentDepartures.Load()
+	departed := func() int64 { return segmentDepartures.Load() - departedAtStart }
+	// A LIVENESS backstop for a log where maintenance has stopped moving segments
+	// altogether, not a performance assertion — conflating the two is what the old
+	// gate did. It costs nothing in the passing case, so it sits far enough out
+	// that no merely slow machine can reach it.
+	deadline := time.After(5 * time.Minute)
+	for bad.Load() == nil && (departed() < wantDepartures || opens.Load() < 3000) {
 		select {
 		case <-deadline:
 			close(stop)
 			wg.Wait()
-			t.Fatalf("too slow: writes=%d opens=%d", writes.Load(), opens.Load())
+			t.Fatalf("too few maintenance windows opened: departures=%d writes=%d opens=%d",
+				departed(), writes.Load(), opens.Load())
 		default:
 		}
 		time.Sleep(time.Millisecond)
@@ -154,9 +182,14 @@ func openWhileMaintaining(t *testing.T, opts Options) {
 	if v := bad.Load(); v != nil {
 		t.Fatal(v.(string))
 	}
-	t.Logf("writes=%d cleans=%d opens=%d", writes.Load(), cleans.Load(), opens.Load())
+	t.Logf("writes=%d cleans=%d opens=%d departures=%d",
+		writes.Load(), cleans.Load(), opens.Load(), departed())
 	require.Positive(t, cleans.Load(), "no compaction pass ran")
 	require.Greater(t, opens.Load(), int64(1000), "not enough readers were opened to race anything")
-	require.Greater(t, writes.Load(), int64(500),
-		"too little was written for a pass to have superseded anything")
+	// Was `writes > 500`, justified as "too little was written for a pass to have
+	// superseded anything" — a guess at the number, made when nothing counted the
+	// thing it was guessing at. Asserting the count itself drops both the slack
+	// and the machine-speed dependency.
+	require.GreaterOrEqual(t, departed(), int64(wantDepartures),
+		"no segment left the log, so the window under test never opened")
 }

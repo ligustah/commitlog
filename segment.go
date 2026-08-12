@@ -2285,8 +2285,32 @@ func (s *segment) Replace(old *segment) error {
 	// error above.
 	old.replaced = true
 	old.replacement = s
+	segmentDepartures.Add(1)
 	return nil
 }
+
+// segmentDepartures counts segments that have LEFT the log — superseded by a
+// replacement (Replace, SupersededBy) or removed outright (Delete). That is the
+// same union readAtLocked and current() test as `replaced || gone`, and it is
+// the right unit here for the same reason: what a mid-pass reader can trip over
+// is a segment that is no longer the one the published list names, and how it
+// stopped being that is not the hazard.
+//
+// Tests assert on it to prove a pass actually moved something underneath them,
+// which is the precondition every "read while maintenance runs" test needs and
+// cannot otherwise observe: a pass mutates segments in place and does not
+// publish the surviving list until it ends, so a test walking l.segments sees
+// neither the sources nor the results while the window is open.
+//
+// It exists because the alternative proxy is a throughput one. Gating such a
+// test on "N appends happened" makes machine speed decide pass/fail — a slow
+// runner falls short of N inside the deadline and reports a failure that says
+// nothing about the property under test. This counts the event itself.
+//
+// Counted once per segment: the delete path skips a segment already marked
+// replaced, so cleanupEmptySegment — which marks and then deletes the same
+// segment — does not report two departures for one.
+var segmentDepartures atomic.Int64
 
 // openBackingWithRetry opens a segment's log, waiting out the window in which
 // the handle that was just closed on it has not been released yet.
@@ -2354,6 +2378,7 @@ func (s *segment) SupersededBy(next *segment) {
 	defer s.Unlock()
 	s.replaced = true
 	s.replacement = next
+	segmentDepartures.Add(1)
 }
 
 // replacementDepth bounds how far current() follows the chain. A stale pointer
@@ -2667,6 +2692,12 @@ func (s *segment) Delete() error {
 	// removal below can only mean a segment whose files survive a failed delete is
 	// skipped rather than errored on — and it is closed either way, so skipping is
 	// the better of the two answers.
+	// Only when it has not already left by the other route. cleanupEmptySegment
+	// marks a segment replaced and then deletes it, and one segment leaving the
+	// log once should be one departure.
+	if !s.replaced {
+		segmentDepartures.Add(1)
+	}
 	s.gone = true
 	if closeErr != nil {
 		return closeErr

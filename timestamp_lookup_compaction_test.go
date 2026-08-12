@@ -127,17 +127,50 @@ func TestTimestampLookupsWhileCompactionReplacesSegments(t *testing.T) {
 		}()
 	}
 
-	// Gate on the WRITES as well as the probes: a lookup is far cheaper than an
-	// append, so a run bounded by probes alone finishes while the log is still
-	// one segment long — nothing superseded, no pass replacing anything, and the
-	// window never opens.
-	deadline := time.After(60 * time.Second)
-	for bad.Load() == nil && (writes.Load() < 1000 || probes.Load() < 3000) {
+	// Gate on DEPARTURES, not on a write count. A run bounded by probes alone
+	// finishes while the log is still one segment long — nothing superseded, no
+	// pass replacing anything, and the window never opens — so something has to
+	// hold the test open until it does. A write count is a THROUGHPUT PROXY for
+	// that, and it made machine speed decide the verdict: CI on a runner ~2.2x
+	// slower than usual (1058s for this package against a 450-500s band) reached
+	// 799 of 1000 writes inside a 60s deadline and failed, while probes ran to
+	// 2,693,442 — 898x their own threshold. Nothing about that verdict concerned
+	// the property under test.
+	//
+	// segmentDepartures counts the event the window is made of, so this waits
+	// for the window to have opened rather than for the machine to be fast. On a
+	// slower machine the same 300 windows simply take longer to accumulate: the
+	// exercise stays constant and only the wall clock moves.
+	//
+	// Three hundred is calibrated against two measurements, and both mattered.
+	//
+	// REPLACEMENTS alone are front-loaded and then asymptotic — 3 within the first
+	// half-second, but only 19-26 after 140 seconds, as each Clean() pass slows
+	// over a longer segment list. A budget of 100 counting only those was simply
+	// unreachable and timed out. So a departure counter that ignored deletions
+	// could not be given a large budget at all.
+	//
+	// Counting DELETIONS too (which is what a mid-pass reader trips over just the
+	// same) changes the supply completely: departures then arrive fast enough that
+	// 10 finished in under a second — far less hammering than the 60-second gate
+	// this replaces, and a weaker test for it. 300 puts the run at 4-8s with ~1300
+	// appends, keeping the exercise while letting PROGRESS end the run.
+	const wantDepartures = 300
+	departedAtStart := segmentDepartures.Load()
+	departed := func() int64 { return segmentDepartures.Load() - departedAtStart }
+	// Five minutes for a run that takes seconds. The deadline is a LIVENESS
+	// backstop for a log where maintenance has stopped moving segments at all,
+	// not a performance assertion — that confusion is what the old gate was.
+	// Costing nothing in the passing case, it should sit far enough out that no
+	// merely slow machine can reach it.
+	deadline := time.After(5 * time.Minute)
+	for bad.Load() == nil && (departed() < wantDepartures || probes.Load() < 3000) {
 		select {
 		case <-deadline:
 			close(stop)
 			wg.Wait()
-			t.Fatalf("too slow: writes=%d probes=%d", writes.Load(), probes.Load())
+			t.Fatalf("too few maintenance windows opened: departures=%d writes=%d probes=%d",
+				departed(), writes.Load(), probes.Load())
 		default:
 		}
 		time.Sleep(time.Millisecond)
@@ -148,9 +181,15 @@ func TestTimestampLookupsWhileCompactionReplacesSegments(t *testing.T) {
 	if v := bad.Load(); v != nil {
 		t.Fatal(v.(string))
 	}
-	t.Logf("writes=%d cleans=%d probes=%d", writes.Load(), cleans.Load(), probes.Load())
+	t.Logf("writes=%d cleans=%d probes=%d departures=%d",
+		writes.Load(), cleans.Load(), probes.Load(), departed())
 	require.Positive(t, cleans.Load(), "no compaction pass ran")
 	require.Greater(t, probes.Load(), int64(1000), "not enough lookups to race anything")
-	require.Greater(t, writes.Load(), int64(500),
-		"too little was written for a pass to have superseded anything")
+	// Was `writes > 500`, justified as "too little was written for a pass to have
+	// superseded anything" — a guess at this number, made when nothing counted
+	// it. The guess is measurably wrong in the generous direction: 64 writes
+	// produced 3 departures here. Asserting the count itself removes both the
+	// slack and the machine-speed dependency the proxy carried.
+	require.GreaterOrEqual(t, departed(), int64(wantDepartures),
+		"no segment left the log, so the window under test never opened")
 }

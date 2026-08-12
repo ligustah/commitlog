@@ -5,6 +5,62 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **Three maintenance-race tests paced on machine speed rather than on progress.**
+  `TestTimestampLookupsWhileCompactionReplacesSegments`,
+  `TestOpeningAReaderWhileCompactionReplacesSegments` and
+  `TestOpeningAReaderWhileRetentionDeletesSegments` (the last two share one
+  helper) each held themselves open until `writes >= 1000` against a hard
+  60-second deadline, then asserted `writes > 500` afterwards. Both numbers were
+  proxies for one condition — that a pass had actually moved a segment, so the
+  window under test existed — and neither measured it.
+
+  The timestamp one failed CI on the v0.68.0 tag: `too slow: writes=799
+  probes=2693442`. The runner was about 2.2x slower than usual (1058s for this
+  package, against a 447-499s band and 429s locally), so the writer reached 80% of
+  a fixed target on a machine at 45% speed. Its probes meanwhile ran to 898x
+  *their* threshold, which is how lopsided the two guesses were. A re-run of the
+  same commit took 480s and passed.
+
+  All three now wait on `segmentDepartures`, a new counter following the existing
+  `segmentScans` precedent for a package-level counter tests assert on. It counts
+  a segment LEAVING the log — superseded by a replacement (`Replace`,
+  `SupersededBy`) or removed outright (`Delete`) — which is the same union
+  `readAtLocked` and `current()` test as `replaced || gone`. Counted once per
+  segment: the delete path skips one already marked replaced, so
+  `cleanupEmptySegment`, which marks and then deletes, reports one departure
+  rather than two. The post-hoc `writes > 500` assertion is replaced by the
+  departure count itself.
+
+  Counting only *replacements* was the first attempt and it was wrong. Retention
+  deletes a segment and links it to nothing, so that counter stayed at zero for
+  the whole of `TestOpeningAReaderWhileRetentionDeletesSegments` and it could only
+  ever time out. Targeted runs of the two tests the change was aimed at passed;
+  the full suite is what reached the third. The union is the fix, for the same
+  reason `current()` draws its distinction by the link rather than the flags.
+
+  Three hundred departures, calibrated against both directions of getting it
+  wrong. Replacements alone are front-loaded and then asymptotic — three arrive in
+  the first half-second, but only 19-26 after 140 seconds, as each pass slows over
+  a longer segment list — so a budget of 100 on that counter was unreachable.
+  Counting deletions too changes the supply completely, and a budget of 10 then
+  finished in under a second, which is far *less* hammering than the 60-second
+  gate it replaces. 300 puts each run at 3-8 seconds with 940-2030 appends, above
+  the old write gate, with progress rather than the clock ending the run. Both
+  measurements are recorded in the tests so the next reader does not re-derive
+  them.
+
+  The deadline moves from 60 seconds to 5 minutes and is re-labelled as what it
+  should always have been: a liveness backstop for a log where maintenance has
+  stopped moving segments at all, not a performance assertion. Conflating those
+  two is what made the old gate fail.
+
+  Neither reader test had ever failed. They carried the identical gate and were
+  one slow runner away.
+
 ## v0.68.0 — 2026-08-12
 
 ### Removed
