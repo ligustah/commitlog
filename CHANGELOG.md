@@ -7,6 +7,26 @@ library from that fork onward.
 
 ## Unreleased
 
+### Security
+
+- **`github.com/klauspost/compress` v1.19.1 → v1.19.2.** Not a routine bump: the
+  release fixes an *out-of-bounds write in zstd's unsafe `decodeSync`*, and
+  `decodeSync` is the path behind `Decoder.DecodeAll`, which `compress/codec.go`
+  calls on every zstd-compressed block this log reads. Two commits ride with it
+  ("re-enable unsafe decodeSync memory copies", "fold the unsafe-copy margin into
+  the space check"), which is the shape of a fix first mitigated by disabling the
+  fast path and then properly closed.
+
+  Also in the release and relevant here: a zstd ARM64 assembly fix where locals
+  overwrote the saved link register, and new huff0 ARM64 assembly for
+  `Decompress4X`/`1X`. CI is amd64, so neither is exercised there, but any arm64
+  consumer of this log is on that code.
+
+  The four dictionary fixes in the same release are *not* reachable — the codec
+  constructs its encoder and decoder with no dictionary options at all. Recorded
+  so it does not have to be re-derived. `s2` and `flate` are untouched by this
+  release.
+
 ### Fixed
 
 - **Three maintenance-race tests paced on machine speed rather than on progress.**

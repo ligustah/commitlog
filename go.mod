@@ -11,7 +11,7 @@ retract v0.43.6
 require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/golang/snappy v1.0.0
-	github.com/klauspost/compress v1.19.1
+	github.com/klauspost/compress v1.19.2
 	github.com/natefinch/atomic v1.0.1
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.11.1
