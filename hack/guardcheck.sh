@@ -512,7 +512,11 @@ run_guard "checkpoint version is exact" leader_epoch_cache.go   '	if version != 
 # epoch 0, which is a real epoch, and on a log whose first recorded epoch is 1
 # that answer is offset 0 -- an instruction to delete everything. durable_streams
 # lost a node and 450 committed records to exactly that.
-run_guard "an unknown epoch probe is refused" commitlog.go   '	if !known {'   '	if false {'   '^TestAnUnknownLeaderEpochProbeIsRefused$'
+#
+# `&& false` rather than `if false`, because the neutralized branch still has to
+# COMPILE: dropping the read of `known` leaves it declared and unused, which is
+# a build failure and reads as a harness error rather than as a missing guard.
+run_guard "an unknown epoch probe is refused" commitlog.go   '	if !known {'   '	if !known && false {'   '^TestAnUnknownLeaderEpochProbeIsRefused$'
 
 # A store key names an object INSIDE the store. The manifest is the one place
 # keys arrive from outside, and they become an action rather than a description:
