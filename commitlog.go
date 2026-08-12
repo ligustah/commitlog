@@ -1790,15 +1790,30 @@ func (l *commitLog) Truncate(offset int64) error {
 	// exactly the mid-pass state current() is written for: it answers ok=false
 	// and findSegment moves on, which is what a reader does once a pass has
 	// finished anyway.
+	// A failure below returns with the replacement built but not yet installed,
+	// and until Replace renames it over its source NOTHING can reach it: it is
+	// not in l.segments and the source does not link to it, so its handle and
+	// its index mapping would be held for the life of the process and its
+	// .truncated files left on disk. The scan above already disposes of it on
+	// every one of its own failures; these two returns are the ones that did
+	// not. Deleting is safe precisely because Replace has not run — the copy
+	// still owns only its own suffixed files.
+	dropReplacement := func() {
+		if newSegment != nil {
+			_ = newSegment.Delete()
+		}
+	}
 	deleted := 0
 	for i := idx + 1; i < len(snapshot); i++ {
 		if err := snapshot[i].Delete(); err != nil {
+			dropReplacement()
 			return err
 		}
 		deleted++
 	}
 	if !replace {
 		if err := seg.Delete(); err != nil {
+			dropReplacement()
 			return err
 		}
 		deleted++

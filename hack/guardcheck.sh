@@ -1209,6 +1209,12 @@ run_guard "a partial compaction result is published" clean.go   '			return compa
 # the scan one was in: an open, mapped .cleaned segment nothing can reach.
 run_guard "a failed rewrite drops its working copy" compact_cleaner.go   '		if working {' '		if working && false {'   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
 
+# The same duty on the truncation path, where the replacement is NOT yet
+# installed and so has to be dropped rather than published. Neutralized by the
+# bare return that was there, which left it open, mapped and named by nothing.
+run_guard "a failed truncate drops its replacement" commitlog.go   '		if err := snapshot[i].Delete(); err != nil {
+			dropReplacement()' '		if err := snapshot[i].Delete(); err != nil {'   '^TestAFailedTruncateDropsTheReplacementItBuilt$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
