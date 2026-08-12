@@ -182,7 +182,6 @@ func (l *leaderEpochCache) ClearEarliest(offset int64) error {
 			leaderEpoch: earliest[len(earliest)-1].leaderEpoch,
 			startOffset: offset,
 		}}, l.epochOffsets...)
-		removed--
 	}
 	err := l.flush()
 	return pkgErrors.Wrap(err, "failed to flush epoch offsets")
