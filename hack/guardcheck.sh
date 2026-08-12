@@ -675,6 +675,24 @@ run_guard "append stamps under the append lock" commitlog.go   '	now := timestam
 	now := timestamp()
 	l.appendMu.Lock()'   '^TestAnAppendStampsItsTimeUnderTheAppendLock$'
 
+# The stamp is written back onto the CALLER'S Message, which is the surprising
+# direction and the one nothing asserted until v0.70.0. The neutralization stamps
+# a COPY instead: every on-disk assertion stays green -- the frames still carry
+# the append clock -- and only the write-back goes. That is the point of doing it
+# this way rather than deleting the stamp outright, which would take the disk
+# tests down with it and prove nothing about who owns the struct.
+run_guard "an append stamps the caller's message" commitlog.go   '	for _, m := range msgs {
+		if m.Timestamp == 0 {
+			m.Timestamp = now
+		}
+	}'   '	for i, m := range msgs {
+		if m.Timestamp == 0 {
+			stamped := *m
+			stamped.Timestamp = now
+			msgs[i] = &stamped
+		}
+	}'   '^TestAppendStampsTheCallersMessage$'
+
 # Zero is a real ceiling -- "compact nothing" -- and the caller that passes it is
 # a transactional one whose oldest open transaction begins at offset 0. The
 # neutralization is the sentinel this field used to be, reintroduced inside

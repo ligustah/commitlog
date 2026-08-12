@@ -24,10 +24,6 @@ import (
 // ErrSegmentNotFound is returned if the segment could not be found.
 var ErrSegmentNotFound = errors.New("segment not found")
 
-// ErrIncorrectOffset is returned if the offset is incorrect. This is used in case Optimistic
-// Concurrency Control is activated.
-var ErrIncorrectOffset = errors.New("incorrect offset")
-
 // ErrTimestampBeforeLog reports that a timestamp lookup asked for a point
 // EARLIER than anything the log still holds — so there is no offset at or
 // before it, and none is coming: retention only moves that boundary forward.
@@ -367,7 +363,6 @@ type Options struct {
 	CleanRewriteBudget   time.Duration
 	CleanerInterval      time.Duration // Frequency to enforce retention policy
 	HWCheckpointInterval time.Duration // Frequency to checkpoint HW to disk
-	ConcurrencyControl   bool          // Optimistic Concurrency Control
 	// Compression selects the block-compression codec for newly created
 	// segments. The zero value (compress.None) disables compression and is
 	// byte-for-byte compatible with logs written before compression existed;
@@ -873,7 +868,7 @@ func (l *commitLog) Append(msgs []*Message) ([]int64, error) {
 		segment          = l.activeSegment()
 		basePosition     = segment.Position()
 		baseOffset       = segment.NextOffset()
-		ms, entries, err = newMessageSetFromProto(baseOffset, basePosition, msgs, l.IsConcurrencyControlEnabled())
+		ms, entries, err = newMessageSetFromProto(baseOffset, basePosition, msgs)
 	)
 	if err != nil {
 		return nil, err
@@ -2133,11 +2128,6 @@ func (l *commitLog) SetReadonly(readonly bool) {
 // IsReadonly indicates if the log is in readonly mode.
 func (l *commitLog) IsReadonly() bool {
 	return atomic.LoadInt32(&l.readonly) == 1
-}
-
-// IsConcurrencyControlEnabled indicates if the log should check for concurrency before appending messages
-func (l *commitLog) IsConcurrencyControlEnabled() bool {
-	return l.Options.ConcurrencyControl
 }
 
 // checkAndPerformSplitLocked is checkAndPerformSplit for callers that do NOT

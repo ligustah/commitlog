@@ -31,14 +31,14 @@ func TestAFailedReplaceLeavesTheSourceReadable(t *testing.T) {
 	source, err := newSegment(dir, 0, 1<<20, true, "", compress.None)
 	require.NoError(t, err)
 	ms, entries, err := newMessageSetFromProto(0, 0,
-		[]*Message{{Value: []byte("original")}}, false)
+		[]*Message{{Value: []byte("original")}})
 	require.NoError(t, err)
 	require.NoError(t, source.WriteMessageSet(ms, entries))
 
 	rewrite, err := newWorkingSegment(dir, 0, 1<<20, cleanedSuffix, compress.None)
 	require.NoError(t, err)
 	rms, rentries, err := newMessageSetFromProto(0, 0,
-		[]*Message{{Value: []byte("rewritten")}}, false)
+		[]*Message{{Value: []byte("rewritten")}})
 	require.NoError(t, err)
 	require.NoError(t, rewrite.WriteMessageSet(rms, rentries))
 

@@ -13,7 +13,7 @@ import (
 func oneMessageSet(t *testing.T, seg *segment) ([]byte, []*entry) {
 	t.Helper()
 	ms, entries, err := newMessageSetFromProto(seg.NextOffset(), seg.Position(),
-		[]*Message{{Value: []byte("v")}}, false)
+		[]*Message{{Value: []byte("v")}})
 	require.NoError(t, err)
 	return ms, entries
 }

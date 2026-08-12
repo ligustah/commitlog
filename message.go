@@ -28,12 +28,24 @@ type Message struct {
 	Value      []byte
 	Headers    map[string][]byte
 
-	// Transient fields: carried alongside a message in memory, not written by
-	// Encode. Each one is filled in by the log on the way out — the offset and
-	// timestamp the record was stamped with, and the epoch that stamped them.
+	// Framing fields: carried alongside a message in memory rather than written
+	// by Encode, because the log frames them itself. Both are INPUT to Append —
+	// a caller stamping its own timestamp and epoch — and only one of them is
+	// ever written back:
+	//
+	//   - Timestamp: a zero one is filled in with the append's clock reading,
+	//     ON THE CALLER'S Message, so a caller that leaves it zero can read the
+	//     stamp back afterwards. A non-zero one is used as given.
+	//   - LeaderEpoch: read only. Nothing writes it back.
+	//
+	// Offsets are NOT here. They come from Append's return value, and there used
+	// to be an Offset field that looked like it carried them: it was the
+	// caller's expected offset for an optimistic-concurrency check that no
+	// caller ever enabled, nothing in the log ever wrote it, and it sat in a
+	// block whose doc claimed the log filled these in on the way out. Removed in
+	// v0.70.0 — see CHANGELOG.md.
 	Timestamp   int64
 	LeaderEpoch uint64
-	Offset      int64
 }
 
 // Encode the Message into the packetEncoder.

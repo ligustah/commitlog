@@ -23,7 +23,7 @@ func TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail(t *testing.T) {
 	defer cleanup()
 	defer l.Close() // nolint: errcheck
 
-	seed, _, err := newMessageSetFromProto(0, 0, msgs, false)
+	seed, _, err := newMessageSetFromProto(0, 0, msgs)
 	require.NoError(t, err)
 	offs, err := l.AppendMessageSet(seed)
 	require.NoError(t, err)
@@ -32,14 +32,14 @@ func TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail(t *testing.T) {
 
 	// Starting exactly AT the tail: the first frame names a record the log
 	// already holds. This is the shape a replica was observed writing twice.
-	atTail, _, err := newMessageSetFromProto(tail, 0, msgs, false)
+	atTail, _, err := newMessageSetFromProto(tail, 0, msgs)
 	require.NoError(t, err)
 	_, err = l.AppendMessageSet(atTail)
 	require.ErrorIs(t, err, ErrMessageSetRefused)
 	require.EqualValues(t, tail, l.NewestOffset(), "a refused set was written anyway")
 
 	// And below it.
-	below, _, err := newMessageSetFromProto(0, 0, msgs, false)
+	below, _, err := newMessageSetFromProto(0, 0, msgs)
 	require.NoError(t, err)
 	_, err = l.AppendMessageSet(below)
 	require.ErrorIs(t, err, ErrMessageSetRefused)
@@ -57,16 +57,16 @@ func TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail(t *testing.T) {
 	// concatenated out of order start above the tail and then walk backwards.
 	// The index is binary-searched, so a set that does not ascend leaves a
 	// segment whose seek and scan disagree about which record an offset names.
-	high, _, err := newMessageSetFromProto(tail+20, 0, msgs, false)
+	high, _, err := newMessageSetFromProto(tail+20, 0, msgs)
 	require.NoError(t, err)
-	low, _, err := newMessageSetFromProto(tail+10, 0, msgs, false)
+	low, _, err := newMessageSetFromProto(tail+10, 0, msgs)
 	require.NoError(t, err)
 	_, err = l.AppendMessageSet(append(append([]byte{}, high...), low...))
 	require.ErrorIs(t, err, ErrMessageSetRefused)
 	require.EqualValues(t, tail, l.NewestOffset(), "a refused set was written anyway")
 
 	// The control: a gap ABOVE the tail is legitimate and must still append.
-	gap, _, err := newMessageSetFromProto(tail+10, 0, msgs, false)
+	gap, _, err := newMessageSetFromProto(tail+10, 0, msgs)
 	require.NoError(t, err)
 	got, err := l.AppendMessageSet(gap)
 	require.NoError(t, err,
@@ -86,7 +86,7 @@ func TestASegmentsTailNeverMovesBackwards(t *testing.T) {
 	defer cleanup()
 	defer l.Close() // nolint: errcheck
 
-	seed, _, err := newMessageSetFromProto(0, 0, msgs, false)
+	seed, _, err := newMessageSetFromProto(0, 0, msgs)
 	require.NoError(t, err)
 	_, err = l.AppendMessageSet(seed)
 	require.NoError(t, err)
@@ -102,7 +102,7 @@ func TestASegmentsTailNeverMovesBackwards(t *testing.T) {
 	// already is, an assignment writes the value it already held, and the test
 	// passes against the bug. guardcheck caught this fixture doing that.
 	require.Greater(t, len(msgs), 2, "the fixture needs room to end below the tail")
-	regressing, entries, err := newMessageSetFromProto(0, seg.Position(), msgs[:2], false)
+	regressing, entries, err := newMessageSetFromProto(0, seg.Position(), msgs[:2])
 	require.NoError(t, err)
 	require.Less(t, entries[len(entries)-1].Offset, before-1,
 		"the set must end below the tail or it has no opinion about the direction")

@@ -313,6 +313,20 @@ type CommitLog interface {
 
 	// LatestOffsetBeforeTimestamp returns the latest offset whose timestamp is
 	// less than or equal to the given timestamp.
+	//
+	// It has no caller today — durable_streams' own log interface declares only
+	// the After direction, for seek-by-time on a subscription — and that is
+	// recorded here so a caller survey does not have to rediscover it and guess
+	// what the silence means. It is the other half of a pair, not a stray: the
+	// two answer different questions on a log with holes, and only this one can
+	// answer "the last record that existed as of T", which is the shape a
+	// point-in-time restore or an as-of read needs. Compaction and retention
+	// both create the case where no record sits exactly at T, and the After
+	// lookup lands past it.
+	//
+	// Kept for that reason rather than for a caller. See the v0.70.0 sweep in
+	// CHANGELOG.md, which removed a neighbouring zero-caller feature and left
+	// this one, and Options.ConcurrencyControl there for what the difference was.
 	LatestOffsetBeforeTimestamp(timestamp int64) (int64, error)
 
 	// SetHighWatermark sets the high watermark on the log. All messages up to
@@ -472,9 +486,6 @@ type CommitLog interface {
 
 	// IsReadonly indicates if the log is in readonly mode.
 	IsReadonly() bool
-
-	// IsConcurrencyControlEnabled indicates if the log should check for concurrency before appending messages
-	IsConcurrencyControlEnabled() bool
 
 	// PutSidecar atomically writes a small named metadata file owned by the
 	// log's client into the log directory (e.g. a recovery checkpoint). The

@@ -5,6 +5,66 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Removed
+
+- **Optimistic concurrency control, which nothing enabled and which could not
+  have worked.** Breaking, and the whole feature goes: `Options.
+  ConcurrencyControl`, `IsConcurrencyControlEnabled()` off the `CommitLog`
+  interface, the exported `ErrIncorrectOffset`, both checks it added to the
+  append encode path, and `Message.Offset`.
+
+  It offered a compare-and-swap append: set `Message.Offset` to the offset you
+  expect this record to land at, and the log refuses with `ErrIncorrectOffset`
+  if it would land elsewhere. Inherited from the liftbridge fork.
+
+  Nothing turned it on — not one caller in this repo, in durable_streams, in
+  gocdc or in sqlcdc, and not one test. Every call site passed the flag as a
+  literal `false`. That alone would not settle it: the v0.68.0 sweep learned
+  that a capability whose only consumers are tests is still a capability. What
+  settles it is that turning it on would have broken ordinary appends. The
+  "don't check me" sentinel was `Offset == -1` while the zero value of the
+  field is `0`, so a caller that filled in a `Message` the normal way had every
+  record past the first segment position compared against `0` and refused. The
+  feature had no working configuration to protect.
+
+  `Message.Offset` goes with it. It was the input to that check, it was the only
+  reader, and nothing in the log ever wrote it — while it sat in a block of
+  fields documented as ones "filled in by the log on the way out". A caller that
+  believed the doc and read it back after `Append` got `0`. Offsets come from
+  `Append`'s return value and always did.
+
+### Documentation
+
+- **`Message`'s framing fields say which way each one travels.** The block they
+  sit in claimed all three were "filled in by the log on the way out". None of
+  that was true of `Offset`, which is now gone, and it was never true of
+  `LeaderEpoch`, which the log reads and never writes. The one field that really
+  is written back is `Timestamp`: a zero one is stamped with the append's clock
+  reading **on the caller's own `Message`**, so a caller that leaves it zero can
+  read the stamp back off the struct it passed in.
+
+  That write-back had no test — `TestAppendStampsMissingTimestamps` covers what
+  lands on disk, which a version stamping a copy would satisfy just as well. It
+  has one now, plus a guard whose neutralization stamps a copy: every on-disk
+  assertion stays green and only the write-back goes, so the test is pinned to
+  the claim rather than to the stamping.
+
+- **`LatestOffsetBeforeTimestamp` says why it has no caller.** The same sweep
+  found it with zero callers in every checkout, which is what
+  `ConcurrencyControl` looked like — so the difference is now written on the
+  method instead of left for the next sweep to re-derive. It is half of a pair
+  whose other half durable_streams uses, it works, its bugs have been worth
+  fixing six times in this changelog, and it answers a question the After
+  direction cannot: *the last record that existed as of T*, which is what an
+  as-of read wants on a log where compaction and retention leave no record
+  sitting exactly at T.
+
+  The rule the two cases give: zero callers puts a thing on the shortlist and
+  never on the chopping block. What decided `ConcurrencyControl` was not the
+  count but that it had no working configuration.
+
 ## v0.69.0 — 2026-08-12
 
 ### Changed

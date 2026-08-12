@@ -150,7 +150,7 @@ func TestSegmentCloseWindows(t *testing.T) {
 	require.NoError(t, err)
 
 	ms, entries, err := newMessageSetFromProto(0, 0,
-		[]*Message{{Value: []byte("hello windows")}}, false)
+		[]*Message{{Value: []byte("hello windows")}})
 	require.NoError(t, err)
 	require.NoError(t, s.WriteMessageSet(ms, entries))
 

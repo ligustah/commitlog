@@ -80,7 +80,7 @@ func TestInstallingARewriteDropsTheReplacedBlockTable(t *testing.T) {
 	source, err := newSegment(dir, 0, 1<<20, true, "", compress.Snappy)
 	require.NoError(t, err)
 	ms, entries, err := newMessageSetFromProto(0, 0,
-		[]*Message{{Value: []byte("original")}}, false)
+		[]*Message{{Value: []byte("original")}})
 	require.NoError(t, err)
 	require.NoError(t, source.WriteMessageSet(ms, entries))
 	source.Seal()
@@ -91,7 +91,7 @@ func TestInstallingARewriteDropsTheReplacedBlockTable(t *testing.T) {
 	rewrite, err := newWorkingSegment(dir, 0, 1<<20, cleanedSuffix, compress.Snappy)
 	require.NoError(t, err)
 	rms, rentries, err := newMessageSetFromProto(0, 0,
-		[]*Message{{Value: []byte("rewritten and a good deal longer")}}, false)
+		[]*Message{{Value: []byte("rewritten and a good deal longer")}})
 	require.NoError(t, err)
 	require.NoError(t, rewrite.WriteMessageSet(rms, rentries))
 

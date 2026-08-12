@@ -41,7 +41,7 @@ func incompressibleMsg(t *testing.T) []*Message {
 // writeSet appends msgs as one message set (one block) to seg and returns the
 // raw message-set bytes, i.e. the logical bytes the block must decode back to.
 func writeSet(t *testing.T, seg *segment, msgs []*Message) []byte {
-	ms, entries, err := newMessageSetFromProto(seg.NextOffset(), seg.Position(), msgs, false)
+	ms, entries, err := newMessageSetFromProto(seg.NextOffset(), seg.Position(), msgs)
 	require.NoError(t, err)
 	require.NoError(t, seg.WriteMessageSet(ms, entries))
 	return ms

@@ -197,7 +197,7 @@ func TestDeleteCleanerAge(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		segs[i] = createSegment(t, dir, int64(i), 20)
 		ms, entries, err := newMessageSetFromProto(int64(i), 0,
-			[]*Message{{Timestamp: int64(i * 10)}}, false)
+			[]*Message{{Timestamp: int64(i * 10)}})
 		require.NoError(t, err)
 		require.NoError(t, segs[i].WriteMessageSet(ms, entries))
 	}
@@ -229,7 +229,7 @@ func TestDeleteCleanerMessagesBelowAgeLimit(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		expected[i] = createSegment(t, dir, int64(i), 20)
 		ms, entries, err := newMessageSetFromProto(int64(i), 0,
-			[]*Message{{Timestamp: int64(i * 10)}}, false)
+			[]*Message{{Timestamp: int64(i * 10)}})
 		require.NoError(t, err)
 		require.NoError(t, expected[i].WriteMessageSet(ms, entries))
 	}
@@ -299,7 +299,7 @@ func writeToSegment(t *testing.T, seg *segment, offset int64, data []byte) {
 				LeaderEpoch: 42,
 				Value:       data,
 			},
-		}, false)
+		})
 	require.NoError(t, err)
 	require.NoError(t, seg.WriteMessageSet(ms, entries))
 }

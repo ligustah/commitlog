@@ -22,7 +22,7 @@ func twoTierSegs(t *testing.T) []*segment {
 	for i := range 4 {
 		s := createSegment(t, dir, int64(i*10), 4096)
 		ms, entries, err := newMessageSetFromProto(int64(i*10), 0,
-			[]*Message{{Value: []byte("0123456789")}}, false)
+			[]*Message{{Value: []byte("0123456789")}})
 		require.NoError(t, err)
 		require.NoError(t, s.WriteMessageSet(ms, entries))
 		segs = append(segs, s)
@@ -165,7 +165,7 @@ func TestTheFloorIsSpentAcrossTiersNotPerTier(t *testing.T) {
 	for i := range 4 {
 		s := createSegment(t, dir, int64(i*10), 4096)
 		ms, entries, err := newMessageSetFromProto(int64(i*10), 0,
-			[]*Message{{Value: []byte("0123456789")}}, false)
+			[]*Message{{Value: []byte("0123456789")}})
 		require.NoError(t, err)
 		require.NoError(t, s.WriteMessageSet(ms, entries))
 		segs = append(segs, s)

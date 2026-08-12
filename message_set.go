@@ -79,15 +79,8 @@ func entriesForMessageSet(basePos int64, ms []byte) []*entry {
 	return entries
 }
 
-func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message, concurrencyControl bool) (
+func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message) (
 	messageSet, []*entry, error) {
-
-	// When concurrency control is enabled, messages shall be processed on by one
-	if concurrencyControl && len(msgs) > 1 {
-		return nil, nil, errors.Errorf(
-			"commitlog: concurrency control processes one message at a time, got a batch of %d",
-			len(msgs))
-	}
 
 	var (
 		buf     = new(bytes.Buffer)
@@ -104,13 +97,6 @@ func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message, concurre
 			relPos = int64(n)
 			offset = int64(i) + baseOffset
 		)
-
-		// Check expected offset for concurrency in case of Optimistic Concurrency Control
-		if concurrencyControl && m.Offset != -1 {
-			if offset != m.Offset {
-				return nil, nil, ErrIncorrectOffset
-			}
-		}
 
 		if err := binary.Write(buf, encoding, uint64(offset)); err != nil {
 			return nil, nil, err
