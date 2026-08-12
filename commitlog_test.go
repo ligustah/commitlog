@@ -1093,6 +1093,22 @@ func remove(t require.TestingT, path string) {
 	require.NoError(t, os.RemoveAll(path))
 }
 
+// abandonDirLock models what a crash does to the directory claim, and NOTHING
+// else: the OS releases the lock when the process dies, while the handles and
+// whatever never made it out of memory stay exactly as they were.
+//
+// It exists for the reopen-without-close tests, which need a second log on a
+// directory the first has not given up. Closing the first would give the lock
+// back too, but it would also flush — and the unflushed state is the entire
+// case those tests exist to cover, so a Close makes them vacuous. Releasing
+// only the lock is the narrowest stand-in that keeps the case intact.
+//
+// The release is idempotent, so the deferred Close in those tests stays correct.
+func abandonDirLock(t testing.TB, l CommitLog) {
+	t.Helper()
+	require.NoError(t, l.(*commitLog).dirLock.release())
+}
+
 // lastOffsetForEpoch probes for a KNOWN epoch and requires the log to answer.
 //
 // The tests that use it are about the offsets, not about the probe's shape, and

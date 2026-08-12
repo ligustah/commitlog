@@ -49,7 +49,10 @@ func readFrom(t *testing.T, l CommitLog) map[int64]string {
 // and the distinction matters enough to keep it in the name and the comment.
 //
 // The log is deliberately not closed before reopening, since Close flushes and
-// would hide exactly the case of interest.
+// would hide exactly the case of interest. What IS given up before the reopen
+// is the directory lock, and only that: see abandonDirLock. A crash releases
+// the OS lock and flushes nothing, so releasing the lock by hand is what makes
+// this a stand-in for a crash rather than a configuration the log now refuses.
 //
 // The cost of that stand-in is that neither log can then shut down cleanly on
 // Windows Ã¢â‚¬â€ closing an index truncates it, which fails while any other mapping
@@ -73,6 +76,7 @@ func TestSyncedLogReopensCompleteWithoutClose(t *testing.T) {
 	require.NoError(t, l.Sync(l.NewestOffset()), "the durability barrier")
 
 	// Reopen from the bytes on disk, without closing the original.
+	abandonDirLock(t, l)
 	l2, err := New(Options{Path: dir, MaxSegmentBytes: 256})
 	require.NoError(t, err)
 	t.Cleanup(func() { l2.Close(); l.Close() }) // nolint: errcheck Ã¢â‚¬â€ see above
@@ -108,6 +112,8 @@ func TestRecordsAppendedAfterASyncSurviveReopen(t *testing.T) {
 	l.SetHighWatermark(second[0])
 	require.NoError(t, l.Sync(l.NewestOffset()))
 
+	// Same stand-in for a crash as above: the lock goes, the flush does not.
+	abandonDirLock(t, l)
 	l2, err := New(Options{Path: dir, MaxSegmentBytes: 1 << 20})
 	require.NoError(t, err)
 	t.Cleanup(func() { l2.Close(); l.Close() }) // nolint: errcheck Ã¢â‚¬â€ see above
