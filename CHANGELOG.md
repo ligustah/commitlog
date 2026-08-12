@@ -5,6 +5,46 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.72.2 — 2026-08-12
+
+### Fixed
+
+- **A compaction pass that failed part-way abandoned every rewrite it had
+  already installed, and each one held a file handle and an index mapping for
+  the life of the process.** Reported by durable_streams as a `Log.Close()` that
+  returned nil while a segment index stayed mapped: on Windows the data
+  directory then could not be removed, blocked by `00000000000000000160.index:
+  The process cannot access the file because it is being used by another
+  process`. Every close in their test was asserted and every one was nil.
+
+  Installing a rewrite means `Replace`: the rewrite's files are renamed OVER the
+  source's and the source is closed, so from that moment the rewrite is what
+  that base offset IS on disk. The pass answered any later failure with
+  `return nil, 0, -1, err`, and the caller swapped in the delete stage's list —
+  the closed sources. Every rewrite already installed was then named by nothing:
+  absent from `l.segments`, so `closeSegments` never walked it.
+
+  Nothing noticed because reads kept working. `current()` redirects through the
+  source's replacement link, so the log went on serving the right records out of
+  a segment its own list did not name — which is exactly how a leak this loud
+  stayed invisible to everything but a directory removal.
+
+  The pass now stops and returns the partial list — rewrites where they landed,
+  sources everywhere else — as the delete stage already does for the segments
+  that survive a partial retention failure. Its verified floor is forced to -1:
+  a floor must cover a gap-free prefix, and the rewrite phase spends its budget
+  in drop-density order, so "what was rewritten before the failure" says nothing
+  about which prefix is contiguous. `consolidateSegments` had the same shape and
+  takes the same fix.
+
+- **A rewrite that failed left its working copy open, mapped and unreachable.**
+  Only the scan-failure path disposed of one; every other error return out of
+  `cleanSegment` — a block write, an fsync, a tiered upload or swap — left an
+  open `.cleaned` segment that nothing named, plus its artifacts on disk. It is
+  now dropped by a deferred disposal guarded on the working suffix, because past
+  `Replace`'s renames that same object owns the SOURCE's files under the
+  source's names and deleting it there would unlink the installed rewrite.
+
 ## v0.72.1 — 2026-08-12
 
 ### Fixed
