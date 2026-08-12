@@ -60,6 +60,7 @@ func TestConsolidationRefusesASegmentItCannotReadToTheEnd(t *testing.T) {
 	l.mu.RLock()
 	require.Greater(t, len(l.segments), 3, "need sealed segments to damage")
 	victim := l.segments[len(l.segments)/2]
+	priorSegments := append([]*segment(nil), l.segments...)
 	l.mu.RUnlock()
 	require.True(t, victim.needsBlockConsolidation(),
 		"the victim must be a segment this pass would rewrite")
@@ -133,6 +134,52 @@ func TestConsolidationRefusesASegmentItCannotReadToTheEnd(t *testing.T) {
 	_, gotOff, _, _, err2 := r.ReadMessage(ctx, make([]byte, HeaderBufferLen))
 	require.NoError(t, err2, "the victim's last record did not survive a failed pass")
 	require.Equal(t, lastInVictim, gotOff)
+
+	// The pass consolidates in offset order, so the segments below the victim were
+	// rewritten and INSTALLED before the failure — each renamed over its source's
+	// files, closing the source. What the log publishes has to be those rewrites.
+	// Republishing the sources instead leaves the replacements named by nothing,
+	// so `closeSegments` never walks them; reads keep working through current()'s
+	// redirect, which is why the only symptom is a mapping held to process exit.
+	//
+	// Asserted on the published list rather than on the removal it eventually
+	// causes: the removal only fails on Windows, and this guard has to be
+	// falsifiable on the ubuntu runner too.
+	var source, rewrite *segment
+	for _, s := range priorSegments {
+		s.RLock()
+		r := s.replacement
+		s.RUnlock()
+		if r != nil {
+			source, rewrite = s, r
+			break
+		}
+	}
+	require.NotNil(t, rewrite,
+		"the fixture must install a consolidation BEFORE the failure, or it "+
+			"asserts nothing about a partial pass")
+	l.mu.RLock()
+	published := append([]*segment(nil), l.segments...)
+	l.mu.RUnlock()
+	require.Contains(t, published, rewrite,
+		"the failed pass dropped a consolidation it had already installed: it is "+
+			"reachable only through the source's replacement link, so nothing will "+
+			"ever close it")
+	require.NotContains(t, published, source,
+		"the source of an installed rewrite is closed and its files are gone; "+
+			"republishing it leaves the log serving a segment only current() can rescue")
+
+	// The failed rewrite's working copy is an open segment with its own files and
+	// its own index mapping, and once consolidateOne returns nothing can reach it
+	// to close it. On Windows that surfaces as a data directory that will not
+	// remove; on Linux an open handle blocks no unlink, so the .cleaned artifacts
+	// on disk are what makes the leak visible on both — which is what lets the
+	// guard for this be falsified by the ubuntu runner at all.
+	strays, err2 := filepath.Glob(filepath.Join(dir, "*"+cleanedSuffix))
+	require.NoError(t, err2)
+	require.Empty(t, strays,
+		"the failed consolidation left its working copy behind: it is open, "+
+			"mapped, and nothing names it")
 
 	// Whatever it decides, it must SAY so.
 	require.ErrorIs(t, err, ErrSegmentUnreadable,
