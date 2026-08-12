@@ -1249,6 +1249,15 @@ run_guard "a consolidation read failure stops the pass" compact_cleaner.go   '		
 # stage's list and left every rewrite this pass installed named by nothing.
 run_guard "a partial consolidation result is published" clean.go   '		return consolidated, -1, err' '		return cleaned, -1, err'   '^TestConsolidationRefusesASegmentItCannotReadToTheEnd$'
 
+# The replication fetch says so when the bytes are damaged. Neutralized into the
+# bare `break` it used to be, which answers a damaged segment with an EMPTY set
+# and a nil error -- and the caller is a follower, which then retries the same
+# offset forever, making no progress and never learning why. Only falsifiable on
+# the empty case: a short set is progress and stays a success.
+run_guard "a replication fetch reports damaged bytes" commitlog.go   '			if !errors.Is(err, io.EOF) && len(out) == 0 {
+				return nil, fmt.Errorf("%w: message set at offset %d: %w",' '			if false {
+				return nil, fmt.Errorf("%w: message set at offset %d: %w",'   '^TestReadMessageSetReportsDamageRatherThanAnEmptySet$'
+
 # And the working-copy disposal on that path, which had none at all: every error
 # return left an open, mapped .cleaned segment behind. Anchored on the defer so
 # it does not collide with cleanSegment's copy above.

@@ -63,6 +63,13 @@ var ErrCorruptRecord = errors.New("commitlog: record failed its CRC check")
 // bytes on this replica are damaged, which is a thing a caller with a peer to
 // copy from can act on, and a thing retrying the same call cannot fix.
 //
+// ReadMessageSet wraps it too, and is the one caller that literally IS the
+// replica with a peer to copy from. It reports it only when the damage leaves it
+// with nothing to return: a short set is progress, and the next call starts at
+// the damaged frame. Returning an empty set with a nil error instead — which is
+// what it used to do — sends a follower back to the same offset forever, making
+// no progress and never learning why.
+//
 // The alternative, and what every one of these loops used to do, is to treat it
 // as the end of the segment. That is how damage becomes LOSS rather than an
 // error: each loop writes what it collected into a fresh segment and deletes the
@@ -1023,14 +1030,37 @@ func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
 	// append, so a maxBytes smaller than the first frame yields that frame
 	// rather than a truncation the caller cannot use — starving a follower is
 	// worse than overshooting its budget once.
+	// Through newSegmentScannerCache, NOT assembled as a literal. The constructor
+	// reads the segment's backing and registers this read's claim on it under ONE
+	// lock; a hand-built scanner holds no claim at all, so drainReclaim judges a
+	// superseded tiered object unreferenced and deletes it out from under this
+	// read. It also skips the scanStream a store backing pays for, which turns a
+	// replication fetch of a cold segment into one store request per frame.
+	// prefix_read.go carries this warning in full; this was the one site in the
+	// package that did not follow it.
 	var (
 		out = make([]byte, 0, maxBytes)
-		ss  = &segmentScanner{s: seg, pos: start, cache: newBlockCache()}
+		ss  = newSegmentScannerCache(seg, newBlockCache())
 	)
+	defer ss.Close() // nolint: errcheck — read-only
+	ss.pos = start
 	for {
 		ms, _, err := ss.Scan()
 		if err != nil {
-			break // end of this segment's readable bytes
+			// io.EOF is the ordinary end of this segment's frames. A read failure
+			// is not — and the caller here is a follower replicating bytes, which
+			// is exactly the caller ErrSegmentUnreadable exists for: one with a
+			// peer to copy from, that a retry of the same call cannot help. An
+			// empty set with a nil error sends it back to the same offset forever
+			// with nothing to say the bytes are damaged.
+			//
+			// Reported only when nothing was read. A partial set is real progress,
+			// and the next call starts AT the damaged frame and reports it then.
+			if !errors.Is(err, io.EOF) && len(out) == 0 {
+				return nil, fmt.Errorf("%w: message set at offset %d: %w",
+					ErrSegmentUnreadable, offset, err)
+			}
+			break
 		}
 		if len(out) > 0 && len(out)+len(ms) > maxBytes {
 			break

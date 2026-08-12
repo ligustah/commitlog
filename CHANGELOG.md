@@ -5,6 +5,43 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **The replication fetch read a tiered segment with no claim on its object.**
+  `ReadMessageSet` was the one site in the package that assembled a
+  `segmentScanner` as a struct literal instead of calling
+  `newSegmentScannerCache`. The constructor exists to do three things under one
+  lock: read the segment's backing, register the read's claim on it, and open a
+  `scanStream` where the backing pays for one. The literal did none of them.
+
+  So a replication fetch of an offloaded segment held no claim, and
+  `drainReclaim` — which deletes a superseded object once nothing references it —
+  judged the object unreferenced and could delete it out from under the read.
+  `prefix_read.go` carries this warning in full ("a scanner assembled by hand
+  holds no claim, and a tiered object it is reading can be reclaimed underneath
+  it"); this call site predates it and never followed it. It also read the
+  `backing` field without the lock, and forwent the stream, turning a fetch of a
+  cold segment into one store request per frame.
+
+  No guard for this one: its failure is a reclamation race, and a guard whose
+  test cannot be made to go red is worse than none. The existing `reclamation
+  pin` guard covers the mechanism.
+
+- **A damaged segment stalled a follower silently.** `ReadMessageSet` broke out
+  of its scan on any error and returned what it had with a nil error — so damage
+  at the start of the requested range produced an EMPTY set and no error. The
+  caller is a follower that continues from the last offset it appended, so it
+  went back to the same offset forever: no progress, no diagnostic, and nothing
+  to tell "caught up with this segment" from "this segment is damaged".
+
+  It now wraps `ErrSegmentUnreadable`, whose doc describes exactly this caller —
+  one with a peer to copy from, which retrying the same call cannot help. Only
+  when the damage leaves it with nothing to return: a short set is real progress,
+  and the follower's next call starts AT the damaged frame and gets the error
+  then.
+
 ## v0.72.6 — 2026-08-12
 
 ### Fixed
