@@ -7,6 +7,12 @@ library from that fork onward.
 
 ## v0.74.0 — 2026-08-12
 
+> **Correction.** The annotated tag for this release claims the tiered *rewrite*
+> tier-name fix as part of it. It is not: that fix is `5c22c1f`, which **is** the
+> `v0.73.0` tag, and it is recorded under v0.73.0 below where it belongs. The tag
+> message is wrong and this file is right. Left standing rather than rewritten,
+> because moving a published tag to fix prose is the worse trade.
+
 ### Added
 
 - **Segment join now runs against a tier.** `CleanSpec.TierJoinBelow` was
