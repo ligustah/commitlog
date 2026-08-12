@@ -5,6 +5,38 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.72.1 — 2026-08-12
+
+### Fixed
+
+- **staticcheck could not read Go 1.27's export data, so v0.72.0 shipped with a
+  red CI job.** The analyzer reads what the compiler emits, Go 1.27 emits export
+  format version 4, and the pinned v0.7.0 understands at most 2 — so the
+  toolchain move turned that step into `internal error in importing
+  "internal/byteorder" ... please report an issue` for every stdlib package.
+  It reads like a staticcheck bug and is not one.
+
+  The pin therefore tracks the toolchain, not just a taste in versions.
+  v0.8.0-rc.1 is the release that understands 1.27: an rc toolchain gets an rc
+  analyzer, and both drop their suffix together at GA. Recorded at the pin so
+  whoever moves the toolchain next knows this line moves with it.
+
+  v0.72.0's tag is 13 of 14 for this reason alone — build, all three platform
+  test jobs, both race jobs, both guard-coverage jobs and all six fuzz targets
+  were green under the rc. Nothing about the library was wrong; prefer this tag
+  anyway, since it is the one with a green CI behind it.
+
+- **A dead store in `leaderEpochCache.ClearEarliest`.** With the analyzer able
+  to run again it reported `this value of removed is never used (SA4006)`, and
+  it was right. `removed` is last read one line above the branch, where it
+  slices the dropped epochs off the front; the `removed--` inside the branch
+  meant "one of them went back on", but nothing reads the count afterwards.
+  A leftover rather than a masked bug — the count is function-local and never
+  returned, so no caller could observe either value.
+
+- `govulncheck` now reports **no vulnerabilities at all** on this tree, where
+  go1.26.0 reported GO-2026-4602 as reachable plus 24 uncalled findings.
+
 ## v0.72.0 — 2026-08-12
 
 ### Changed
