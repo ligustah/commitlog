@@ -1314,8 +1314,8 @@ run_guard "a metadata header parse is bounds-checked" message_set.go   '	if n < 
 # least leave the damaged bytes under the source's name, and this one collects
 # them.
 run_guard "a join read failure stops the pass" clean_join.go   '				if !errors.Is(err, io.EOF) {
-					return nil, fmt.Errorf("%w: join of segment %d: %w",' '				if false && !errors.Is(err, io.EOF) {
-					return nil, fmt.Errorf("%w: join of segment %d: %w",'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
+					return nil, nil, fmt.Errorf("%w: join of segment %d: %w",' '				if false && !errors.Is(err, io.EOF) {
+					return nil, nil, fmt.Errorf("%w: join of segment %d: %w",'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
 
 # The working-copy disposal on the join path. Anchored on `joined` so it does not
 # collide with the two identically-shaped defers in compact_cleaner.go.
