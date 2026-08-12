@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed
+
+- **Builds on Go 1.27, pinned to `go1.27rc2`.** `go.mod` now reads `go 1.27`
+  with `toolchain go1.27rc2`, matching durable_streams, sqlcdc and gocdc, and
+  CI moves off `go-version: stable` onto the same prerelease.
+
+  This raises the minimum Go for anyone importing commitlog — the `go`
+  directive is a floor consumers inherit, unlike `toolchain`, which only binds
+  the main module. The one consumer is durable_streams, already on `go 1.27`.
+
+  The motivating defect: on go1.26.0 `govulncheck` reported **GO-2026-4602**
+  (*FileInfo can escape from a Root in `os`*) as reachable from our own code,
+  traced `FileSegmentStore.List → os.ReadDir`. It is fixed in go1.26.1, so 1.27
+  clears it. Only locally built binaries were ever affected; CI built with
+  `stable` and consumers build with their own toolchain.
+
+  The two version strings cannot be derived from each other while a prerelease
+  is pinned: go.mod spells it `go1.27rc2` and setup-go spells it
+  `1.27.0-rc.2`, and setup-go cannot resolve go.mod's form — so
+  `go-version-file: go.mod`, the obvious way to keep them in step, does not
+  work. Both are written out, with the reason recorded at each. They collapse
+  back to one plain release at 1.27.0 GA.
+
 ## v0.71.1 — 2026-08-12
 
 ### Fixed

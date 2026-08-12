@@ -1,6 +1,8 @@
 module github.com/ligustah/commitlog
 
-go 1.26.0
+go 1.27
+
+toolchain go1.27rc2
 
 // v0.43.6 reads a log with a torn tail back as EMPTY. Its check for an index
 // that cannot describe its log fired on any unclean shutdown mid-append, where
