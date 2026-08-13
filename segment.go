@@ -2453,7 +2453,31 @@ func (s *segment) Finalize() error {
 		return errors.Wrap(err, "rename trimmed log failed")
 	}
 	if err := os.Rename(s.indexPath(), finalIdx); err != nil {
-		return errors.Wrap(err, "rename trimmed index failed")
+		// Put the log back, for the same reason Replace does after the same two
+		// renames — but the thing at stake here is different, so it is worth
+		// saying which. Replace is protecting the SOURCE it is renaming over.
+		// This has no source: it is protecting the DISCRIMINATOR.
+		//
+		// Publishing a working copy means clearing its suffix, and
+		// segment.dropIfUnpublished reads that suffix to decide whether the copy
+		// still needs dropping. Returning here with the log already at its final
+		// name and s.suffix still set makes that answer wrong in the one
+		// direction nothing checks: the caller's defer sees "not published",
+		// deletes by the SUFFIXED paths, removes the index it can still see and
+		// leaves the log it cannot — an orphan .log at the trim's base offset
+		// with nothing beside it.
+		//
+		// The next open does survive that (the orphan overlaps the boundary
+		// segment, which nothing deleted because this call failed, and
+		// resolveSegmentOverlaps drops the contained one). Relying on it would
+		// mean a failed operation whose cleanup depends on a recovery pass
+		// noticing, which is precisely what the suffix rule exists to avoid.
+		//
+		// So: either both files are at their final names or neither is, and the
+		// suffix is telling the truth in both cases.
+		return stderrors.Join(err,
+			errors.Wrap(os.Rename(finalLog, s.logPath()),
+				"restore trimmed log after failed index rename"))
 	}
 	// The working copy's own table, and then the PRE-TRIM segment's, which is
 	// now sitting beside bytes it does not describe. Dropped rather than left to

@@ -1401,6 +1401,14 @@ run_guard "a join read failure stops the pass" clean_join.go   '				if !errors.I
 # The working-copy disposal on the join path.
 run_guard "a failed join drops its working copy" clean_join.go   '	defer joined.dropIfUnpublished()' '	defer func() {}()'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
 
+# Finalize's rollback, which is what keeps the suffix honest for the disposal
+# above to read. Neutralized into the bare wrapped error it was before the fix:
+# the log stays at its FINAL name with the suffix still set, so the caller's
+# defer deletes by the suffixed paths, takes the index and cannot see the log.
+run_guard "a half-done finalize puts the log back" segment.go   '		return stderrors.Join(err,
+			errors.Wrap(os.Rename(finalLog, s.logPath()),
+				"restore trimmed log after failed index rename"))' '		return errors.Wrap(err, "rename trimmed index failed")'   '^TestAHalfDoneFinalizeLeavesNoOrphanLog$'
+
 # And the fifth site, which had the duty and no test that it was doing it. This
 # one publishes with Finalize rather than Replace -- the suffix is renamed off in
 # place instead of over a source -- so it is the site that shows the
