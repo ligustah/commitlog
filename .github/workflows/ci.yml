@@ -181,6 +181,22 @@ jobs:
       # half rather than letting it escape the rule by not being mentioned.
       - name: layercheck
         run: bash hack/layercheck.sh
+      # The three scripts above and guardcheck decide whether this repo is
+      # correct, and until now nothing checked THEM. Every bug they have had was
+      # shell semantics rather than logic: a `| while` setting its flag in a
+      # subshell so layercheck printed every violation and exited 0; a substring
+      # filter taken for a regex; `go test -run` selecting nothing and reading as
+      # a pass; and `printf | grep -q` under pipefail, where grep exiting early
+      # gave printf EPIPE and turned a guard that WAS covered into a red. A
+      # correctness checker that returns the wrong verdict is worse than not
+      # having one.
+      #
+      # Free to run: the actionlint step below already asserts shellcheck is on
+      # the runner, so there is nothing to install and its absence is already
+      # loud. severity=warning rather than the default, which is style-level and
+      # would be argued with instead of fixed.
+      - name: shellcheck hack scripts
+        run: shellcheck --severity=warning hack/*.sh
       # Static check of the workflows themselves: bad expressions, unknown
       # action inputs, and — via shellcheck, preinstalled on the runner — the
       # `run:` blocks. Pinned and fetched through the module proxy rather than

@@ -72,7 +72,7 @@ library from that fork onward.
   that was never selected, and a guard whose test name went stale after a rename
   produced the same output as a working one. Now `-v ./...`, with the run
   required to have printed a `=== RUN` line; absent that it is a harness error
-  rather than a verdict. All 159 guard names were checked against the real test
+  rather than a verdict. Every guard name was checked against the real test
   functions, so the fix surfaced nothing pre-existing.
 
   That check then failed a guard *because* its test matched. It was written as
