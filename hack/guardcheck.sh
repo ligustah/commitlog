@@ -667,6 +667,20 @@ run_guard "an unknown codec is refused where it arrives" commitlog.go   '	if !op
 # result that is correct when returned and wrong a block later.
 run_guard "decompressing into dst does not alias src" compress/codec.go   '		return append(dst[:0], src...), nil'   '		return src, nil'   '^TestDecompressIntoNeverAliasesItsInput$'
 
+# The codec set is written out five times in codec.go, and the older tests
+# enumerate it from literals -- so a fifth codec is covered by none of them. The
+# two guards below are the two halves of "added to some switches and not
+# others", which the derived test reaches by taking its cases from Valid().
+#
+# Dropping the Zstd arm of Compress is the dangerous one: the default arm stores
+# the block RAW while the header still records zstd, so the read decompresses
+# raw bytes as compressed ones. Silent corruption of data the write path took.
+run_guard "a valid codec actually compresses" compress/codec.go   '		return zstdEnc.EncodeAll(src, nil)'   '		return src'   '^TestEveryValidCodecRoundTripsItsDataAndItsName$'
+
+# And the naming half: a codec whose String does not round-trip through Parse
+# renders a descriptor the next open cannot read, so the log stops opening.
+run_guard "a valid codec's name round-trips" compress/codec.go   '		return "zstd"'   '		return "zstd-unparseable"'   '^TestEveryValidCodecRoundTripsItsDataAndItsName$'
+
 # The manifest is the commit point, so a COPY of a tier has to write it last for
 # the same reason an offload does: until it lands, nothing in the destination is
 # claimed by anything, and a copy that dies partway leaves collectable orphans
@@ -1460,6 +1474,14 @@ run_guard "the cleaner agrees with itself about a negative limit" delete_cleaner
 # MaxSegmentBytes failure already in this table, one field away in Options.
 # Neutralized by dropping the entry, which compiles.
 run_guard "a negative segment age is refused, not rolled forever" commitlog.go   '		{"MaxSegmentAge", opts.MaxSegmentAge < 0, opts.MaxSegmentAge},' ''   '^TestNegativeOptionsAreRefused$'
+
+# The table above is a hand-maintained enumeration of Options' numeric fields,
+# and it was missing an entry twice in one day -- silently, because the option
+# was accepted and the default arm swallowed it. The reflection test builds its
+# cases from the STRUCT, so a missing entry is a failure at the point of adding
+# the field. Neutralized by dropping the entry the reflection test has no
+# special knowledge of, which is the exact shape of forgetting to add one.
+run_guard "a missing negative-option entry is caught by reflection" commitlog.go   '		{"CompactMinAge", opts.CompactMinAge < 0, opts.CompactMinAge},' ''   '^TestEveryNumericOptionDecidesAboutNegatives$'
 
 # concurrencyBudget defaults on `v <= 0`, so a negative reaches the arm that
 # exists to catch a MISSING value and the caller silently gets 8 or 64. Needs a

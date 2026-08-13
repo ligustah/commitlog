@@ -542,6 +542,25 @@ func New(opts Options) (_ CommitLog, err error) {
 		{"MaxLogBytes", opts.MaxLogBytes < 0, opts.MaxLogBytes},
 		{"MaxLogMessages", opts.MaxLogMessages < 0, opts.MaxLogMessages},
 		{"MaxLogAge", opts.MaxLogAge < 0, opts.MaxLogAge},
+		// The two compaction horizons, which are here for a reason unlike any of
+		// the above: a negative is BEHAVIOURALLY harmless. Both consumers gate on
+		// `> 0` — `if c.MinAge > 0` and `gcActive = spec.TombstoneRetention > 0` —
+		// so a negative disables the feature exactly as zero does, and nothing
+		// misbehaves.
+		//
+		// What is not harmless is that both are in descriptor.enforced(). The
+		// negative is written into the descriptor and becomes part of what the
+		// log IS, so a log created with -1h and reopened with 0 is REFUSED with
+		// ErrDescriptorMismatch — two values that do the identical thing, one of
+		// which permanently rejects the other. A second spelling of "off" that
+		// only shows up on a reopen, months later, as a mismatch naming a knob
+		// whose two values mean the same.
+		//
+		// Refused rather than normalised to zero on the way in. Normalising is a
+		// converter, and it makes the descriptor disagree with the Options the
+		// caller can see in their own config.
+		{"CompactMinAge", opts.CompactMinAge < 0, opts.CompactMinAge},
+		{"CompactTombstoneRetention", opts.CompactTombstoneRetention < 0, opts.CompactTombstoneRetention},
 		// CleanRewriteBudget is NOT here, and the omission is deliberate: a
 		// negative budget means "no budget at all", which is what every
 		// spec-less pass had before one existed. It is the one field in this

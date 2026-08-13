@@ -1,11 +1,87 @@
 package commitlog
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// negativeIsAValue names the signed numeric Options where a negative is a value
+// the caller can mean, with the meaning. Everything else must be REFUSED.
+//
+// An allowlist and not a denylist, because those rot in opposite directions.
+// The list of refused options is the one that has to grow with the struct, and
+// forgetting to grow it is silent — that is how PrefixReadConcurrency,
+// MaxSegmentAge and the three retention limits each shipped able to launder a
+// negative. This list only grows when someone gives a negative a MEANING, which
+// is a thing they are already thinking about at the time.
+var negativeIsAValue = map[string]string{
+	"CleanRewriteBudget": "a negative budget means no budget at all, which is " +
+		"what every spec-less pass had before one existed",
+	"PrefixReadCoalesceBytes": "the documented way to say never coalesce, one " +
+		"request per isolated record",
+	"PrefixReadTierCoalesceBytes": "as PrefixReadCoalesceBytes, for the tier",
+}
+
+// Every signed numeric option has an opinion about negatives, found by
+// REFLECTION over Options rather than by a list kept beside it.
+//
+// The table in New is an enumeration of fields, maintained by hand, one struct
+// away from the thing it enumerates. Twice in one day it turned out to be
+// missing an entry, and neither omission was visible: the option was accepted,
+// the default arm swallowed it, and the log ran on a value nobody meant. A test
+// built from the same hand-written list cannot see that — it checks the entries
+// the list already has.
+//
+// So the fields come from the struct. Adding a numeric option to Options and
+// not deciding about negatives now fails HERE, at the point of adding it, with
+// the two ways to resolve it named in the failure. That is the whole mechanism:
+// the decision becomes unavoidable rather than remembered.
+func TestEveryNumericOptionDecidesAboutNegatives(t *testing.T) {
+	ot := reflect.TypeOf(Options{})
+	checked := 0
+	for i := range ot.NumField() {
+		field := ot.Field(i)
+		switch field.Type.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			// Signed only. An unsigned option cannot hold a negative, and
+			// compress.Codec is a byte — so the codec is excluded by what it is
+			// rather than by being remembered.
+		default:
+			continue
+		}
+		checked++
+		t.Run(field.Name, func(t *testing.T) {
+			opts := Options{Name: "negatives", Path: tempDir(t)}
+			reflect.ValueOf(&opts).Elem().FieldByName(field.Name).SetInt(-1)
+
+			l, err := New(opts)
+			if l != nil {
+				t.Cleanup(func() { _ = l.Close() })
+			}
+			if why, ok := negativeIsAValue[field.Name]; ok {
+				require.NoError(t, err,
+					"Options.%s is on the negative-is-a-value list (%s) but New refused it",
+					field.Name, why)
+				return
+			}
+			require.Error(t, err,
+				"Options.%s accepted -1. Either refuse it in New's table, or add it to "+
+					"negativeIsAValue with what a negative MEANS. Accepting it without a "+
+					"meaning is how a value nobody meant reaches a default arm.", field.Name)
+			require.Contains(t, err.Error(), "must not be negative",
+				"Options.%s was refused for some OTHER reason, so this test says nothing "+
+					"about negatives for it", field.Name)
+		})
+	}
+	// Reflection finding nothing is a passing test. See how many fields it is
+	// actually reaching, so a change to the Kind switch above cannot quietly
+	// turn this into a loop over zero options.
+	require.GreaterOrEqual(t, checked, 15,
+		"only %d signed numeric Options fields were reached; the Kind filter is wrong", checked)
+}
 
 // Every option defaulted by a test for zero refuses a negative value.
 //
