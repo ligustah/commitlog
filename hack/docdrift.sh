@@ -15,13 +15,32 @@
 # segment" above TestSplitOffloadedPrefix is correct, not drift — and a linter
 # that needs a suppression list to stay quiet is a linter that gets ignored.
 #
+# EVERY package, not just the root one. This ran `for f in *.go` — the repo root
+# — until 2026-08-13, so compress/ was exempt and nothing said so. The rule is
+# plain Go doc convention and applies there identically; the exclusion was an
+# artifact of the glob, not a decision. Note the contrast with layercheck.sh,
+# which IS root-only and correctly so, because the thing it measures (direction
+# of dependency on *commitLog) exists only in the one package — and which says
+# that in its header rather than leaving it to be inferred from a glob.
+#
+# The count is printed, and an empty selection is an error. A checker that
+# quietly narrows its own scope reports the same green as one that checked
+# everything, which is the failure this repo has now had in four separate tools.
+#
 # Exits non-zero listing every offender.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
+# git ls-files rather than a find: it is already the list of files that belong
+# to the repo, so build artifacts and anything ignored cannot wander in.
+files=$(git ls-files '*.go' ':!:*_test.go')
+if [ -z "$files" ]; then
+  echo "docdrift: HARNESS ERROR — selected no files to check." >&2
+  exit 1
+fi
+
 found=$(
-  for f in *.go; do
-    case "$f" in *_test.go) continue ;; esac
+  for f in $files; do
     awk -v file="$f" '
       # Remember the most recent contiguous comment block: its first line and
       # where it started. A blank or code line ends the block.
@@ -60,4 +79,4 @@ if [ -n "$found" ]; then
   echo "Fix the comment, or move it to the function it describes."
   exit 1
 fi
-echo "docdrift: every doc comment opens with the function it documents."
+echo "docdrift: every doc comment opens with the function it documents ($(printf '%s\n' "$files" | wc -l | tr -d ' ') files)."
