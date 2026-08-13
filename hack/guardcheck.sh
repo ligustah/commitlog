@@ -1415,6 +1415,14 @@ run_guard "a half-done finalize puts the log back" segment.go   '		return stderr
 # discriminator is the SUFFIX and not the rename target.
 run_guard "a failed truncate-before drops its trim" commitlog.go   '			defer t.dropIfUnpublished()' '			defer func() {}()'   '^TestAFailedTruncateBeforeDropsTheTrimItBuilt$'
 
+# The size steering readStoreDescriptor's allocation is the STORE's answer and
+# nothing verifies it, so a store reporting a huge descriptor allocates it in the
+# caller's process during New, before a byte is parsed. Neutralized with a
+# short-circuit rather than a deletion so it still compiles; the test then fails
+# on the parse error instead of the refusal, which is exactly the difference
+# between "never tried" and "tried and happened to survive".
+run_guard "an oversized store descriptor is refused, not allocated" descriptor.go   '	if size > maxDescriptorBytes {' '	if false && size > maxDescriptorBytes {'   '^TestAnOversizedStoreDescriptorIsRefusedNotAllocated$'
+
 # A conflicted identity must not be re-stamped by the republish that keeps the
 # non-gating fields current. The republish carries the CALLER's descriptor, so
 # without the conflict term a plain codec or segment-size change adopts the

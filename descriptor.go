@@ -46,6 +46,12 @@ const (
 	// existing log simply has no identity, which is exactly what it means.
 	descriptorFileV0 = 0
 	descriptorFileV1 = 1
+	// maxDescriptorBytes bounds what readStoreDescriptor will allocate for an
+	// object the store claims is the descriptor. Equal to bufio.Scanner's
+	// default maximum token, which is what parseDescriptor reads with — so it
+	// is the size past which no descriptor can parse anyway, and not a limit
+	// invented for this check. See readStoreDescriptor.
+	maxDescriptorBytes = 64 << 10
 )
 
 // ErrDescriptorMismatch is returned by New when the log was created with
@@ -166,6 +172,27 @@ func readStoreDescriptor(store SegmentStore) (descriptor, error) {
 	}
 	if size <= 0 {
 		return descriptor{}, errors.New("commitlog: log descriptor in store is empty")
+	}
+	// The size steering this allocation is the STORE's answer, and nothing has
+	// verified it — the same shape as any length field read before the thing it
+	// describes. A remote store reporting a large object here allocates it
+	// entirely into memory before a single byte is parsed, during New, in the
+	// caller's process.
+	//
+	// The bound is derived rather than picked. parseDescriptor reads with a
+	// bufio.Scanner at its default 64KiB maximum token, so a descriptor holding
+	// any line longer than that cannot parse whatever else is true of it; and a
+	// descriptor is one short line per field. Reading past this point can only
+	// ever end in a parse error, so refusing early costs nothing that could have
+	// succeeded.
+	//
+	// The local path has no equivalent because it never had the bug: it hands
+	// the open file to the same scanner and streams, so an enormous file on disk
+	// fails on the first oversized token without being read into memory.
+	if size > maxDescriptorBytes {
+		return descriptor{}, errors.Errorf(
+			"commitlog: log descriptor in store is %d bytes, over the %d-byte maximum",
+			size, maxDescriptorBytes)
 	}
 	body := make([]byte, size)
 	if _, err := store.ReadAt(descriptorKey, body, 0); err != nil {

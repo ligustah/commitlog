@@ -5,6 +5,37 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.80.1 — 2026-08-13
+
+### Fixed
+
+- **A store's claimed descriptor size drove an unbounded allocation.**
+  `readStoreDescriptor` sized its buffer from `store.Size(descriptorKey)` with
+  only a `<= 0` check, so a store reporting a large object at that key allocated
+  it entirely into memory during `New`, in the caller's process, before a single
+  byte was parsed. The length steering the read was the one thing nothing had
+  verified.
+
+  The bound is derived rather than picked: `parseDescriptor` reads with a
+  `bufio.Scanner` at its default 64 KiB maximum token, so a descriptor holding
+  any line longer than that cannot parse whatever else is true of it — and a
+  descriptor is one short line per field. Reading past that point can only ever
+  end in a parse error, so refusing early costs nothing that could have
+  succeeded. A real descriptor measures a few hundred bytes, which the test
+  asserts directly so the bound stays honest.
+
+  The local path never had this: it hands the open file to the same scanner and
+  streams, so an enormous file on disk fails on its first oversized token
+  without being read into memory. That asymmetry is what made the store path
+  easy to miss.
+
+  **Not fixed, deliberately:** `manifest.go`, `segment.go`'s block table, and
+  `index_cache.go` size their reads from the store the same way. The descriptor
+  is the only one whose bound is *derivable* — the others legitimately scale
+  with how much data the log holds, so any limit would be a policy invented
+  here rather than a fact about the format. Named so the shape is on record
+  rather than rediscovered.
+
 ## v0.80.0 — 2026-08-13
 
 ### Added
