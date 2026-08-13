@@ -474,6 +474,38 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 	if err := s.initPositions(); err != nil {
 		return nil, err
 	}
+	// The walk has already been paid for, so make it the last one these bytes
+	// cost. seal() is the other writer and it covers the ordinary case — a clean
+	// close seals every segment on its way out, the active one included, which is
+	// why a log shut down cleanly walks nothing on the next open. What no close
+	// can cover is the open that FOLLOWS a crash: the process that would have
+	// sealed this segment died, and without a write here the next open walks the
+	// same chain again, and the one after that, for as long as the crashes keep
+	// arriving before a clean close does.
+	//
+	// Here rather than inside initPositions, which has three other callers. Two of
+	// them — Replace and trimTo — reopen a segment whose files were just renamed,
+	// and they delete the old sidecar first ON PURPOSE, because a rewrite that
+	// dropped nothing lands on the same size and a table believed on that evidence
+	// maps logical offsets onto the wrong records. Writing a fresh table under
+	// them would heal the different-size case and so make that removal look
+	// unnecessary, which is exactly how a guard stops being able to fail.
+	//
+	// blocksWalked, not len(blocks): it is the walk that this pays back, and it is
+	// zero for the segment that answered from its sidecar and for the empty
+	// segment a split just created. Best-effort, one degree more so than at seal —
+	// this is the open path, and refusing to open a log because a file it can
+	// regenerate could not be written would turn a slow open into no log at all.
+	//
+	// Writing a table for a file still being appended to is safe because of the
+	// check that reads it back, not in spite of it: the next append leaves this
+	// table describing fewer bytes than the file holds, and loadLocalBlockTable
+	// refuses a table that does not account for exactly the file beside it. A
+	// sidecar that goes stale costs the walk it would have cost anyway, never a
+	// wrong answer.
+	if s.blocksWalked > 0 {
+		writeLocalBlockTable(s) // nolint: errcheck
+	}
 	err = s.setupIndex()
 	return s, err
 }

@@ -5,6 +5,84 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed
+
+- **`CleanWithSpec` now refuses a `CleanSpec.StripBelow` above a supplied
+  `CleanSpec.Ceiling`.** `docs/layering.md` has carried a standing note that
+  `Ceiling` is the LSO by convention only, that this package cannot verify it,
+  and that "if a cheap invariant on `Ceiling` ever becomes available, it belongs
+  at the top of `CleanWithSpec`". This is one.
+
+  The two fields are one caller's account of one boundary from opposite sides.
+  `Ceiling` says records at or above it MAY BE UNDECIDED and are retained
+  verbatim; `StripBelow` says records below it ARE DECIDED and no longer need
+  their transactional bookkeeping. `StripBelow > Ceiling` asserts both about the
+  range in between, and the pass acts on the second: `mergeDigests` marks a
+  record for stripping on `r.offset < spec.StripBelow` BEFORE it consults the
+  ceiling, so records the ceiling was set to protect keep their offsets and lose
+  their `pid`/`epoch`/`seq` headers — the bookkeeping the caller needs to decide
+  the transaction they belong to. An undecided record that loses them cannot be
+  decided by anyone afterwards.
+
+  It also makes `Ceiling`'s own doc true. "Retained verbatim" was not what a
+  record in that range got, and verbatim is what a spec refused here leaves them.
+
+  Deliberately scoped to a SUPPLIED ceiling. With the field unset the bound is
+  the log's own high watermark, resolved inside the pass and free to move between
+  a check and a use of it, so a refusal there would be a race dressed as an
+  invariant — `TestAStripBelowWithNoCeilingIsNotJudged` holds that boundary, and
+  `TestAStripBelowAtTheCeilingStillRuns` holds the other one, because every
+  transactional caller passes the two EQUAL and a `>=` would reject the normal
+  spec.
+
+  Not breaking for any caller that exists: every spec in this repo and in
+  durable_streams passes `Ceiling: At(hw), StripBelow: hw`, or the same pair at
+  `hw+1`. What the refusal rejects is a combination nothing constructs on
+  purpose.
+
+- **An open that has to walk a segment's block chain now keeps the table it
+  built.** A block-compressed segment's physical layout is a chain: each block's
+  header carries the length that locates the next, so rebuilding the table is one
+  read per block over the whole file, before the segment serves anything. The
+  sidecar written at seal removes that — and `closeSegment` ends in `seal()`, so
+  a log shut down cleanly persists a table for every segment including the ACTIVE
+  one, and its next open walks nothing at all.
+
+  What no close covers is the open that FOLLOWS a crash. The process that would
+  have sealed the active segment died, and a segment whose best-effort write at
+  seal failed has nothing that tries again either. Both then walked on that open
+  and threw the result away, so the open after that walked the same chain, and so
+  on for as long as crashes kept arriving before a clean close did. `newSegment`
+  now writes the table on the far side of the walk, which makes a crash cost the
+  chain once rather than once per restart.
+
+  It sits in `newSegment` rather than in `initPositions`, which has three other
+  callers. Two of them — `Replace` and `trimTo` — reopen a segment whose files
+  were just renamed, and they delete the old sidecar first deliberately: a
+  rewrite that dropped nothing lands on the same size, and a table believed on
+  that evidence maps logical offsets onto the wrong records. Writing a fresh
+  table under them would heal the different-size case and leave that removal
+  looking unnecessary, which is how a guard quietly stops being able to fail.
+  `TestInstallingARewriteDropsTheReplacedBlockTable` went red on exactly that
+  while this was being placed.
+
+  The write is keyed on `blocksWalked`, so it is skipped for the segment that
+  answered from its sidecar and for the empty segment a split just created. It is
+  best-effort, one degree more so than at seal: this is the open path, and
+  refusing to open a log because a file it can regenerate could not be written
+  would turn a slow open into no log at all. Writing a table for a file still
+  being appended to is safe because of the check that reads it back — the next
+  append leaves the table describing fewer bytes than the file holds, and
+  `loadLocalBlockTable` refuses a table that does not account for exactly the file
+  beside it, so a stale sidecar costs the walk it would have cost anyway and
+  never a wrong answer.
+
+  Not a full removal of the walk, and the remainder is not bookkeeping: after an
+  unclean shutdown the active segment's chain is walked once, and that same pass
+  is what finds the torn tail and discards it. It is bounded by one segment.
+
 ## v0.75.0 — 2026-08-13
 
 ### Changed

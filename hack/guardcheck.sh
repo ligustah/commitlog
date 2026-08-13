@@ -784,6 +784,13 @@ run_guard "findEntry builds the block table it is about to scan" segment.go   '	
 	}
 	s.RLock()'   '	s.RLock()'   '^TestOpeningAnOffloadedTierReadsNoLogObjects$'
 
+# A walk at open keeps what it built. seal() covers the log that closed cleanly --
+# closeSegment ends in seal(), so even the active segment gets a sidecar -- but the
+# open AFTER a crash has no close behind it, and without this write the next open
+# walks the same chain, and the one after that. The neutralization makes the write
+# unreachable while still compiling, which is the state every open was in before.
+run_guard "a walk at open keeps the table it built" segment.go   '	if s.blocksWalked > 0 {' '	if s.blocksWalked < 0 {'   '^TestAWalkAtOpenPersistsTheTableItBuilt$'
+
 # A block table is refused when damaged, never approximated and never rebuilt by
 # walking the object -- that walk is the cost the table exists to remove, so a
 # fallback would turn damage into a slow success. The neutralization drops the
@@ -925,6 +932,18 @@ run_guard "a magic with no version is refused" inspect.go   '		if hdr[0] == bloc
 # reclaims bytes, not the compile.
 run_guard "a log cleans at open" clean.go   '	l.cleanAtOpen()' '	_ = l.cleanAtOpen'   '^TestALogCleansAtOpenWithoutWaitingForATick$'
 run_guard "a ceiling needs the auto cleaner off" clean.go   '	if _, ok := spec.Ceiling.Get(); ok && !l.DisableAutoClean {' '	if false {'   '^TestACeilingOnAnAutoCleaningLogIsRefused$'
+
+# Ceiling and StripBelow are one caller's account of one boundary, and StripBelow
+# above Ceiling makes them contradict. The pass acts on StripBelow: mergeDigests
+# marks a record for stripping before it consults the ceiling, so the records the
+# ceiling protects lose the pid/epoch/seq an undecided record needs to ever be
+# decided. The neutralization inverts the comparison, which lets that spec through.
+run_guard "a strip below above the ceiling is refused" clean.go   '	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow > ceiling {' '	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow < ceiling {'   '^TestAStripBelowAboveTheCeilingIsRefused$'
+
+# ...and the refusal is about EXCEEDING it. Every transactional caller passes the
+# two equal, because one LSO is being described from both sides. A `>=` reads as
+# stricter and simply rejects the normal spec.
+run_guard "a strip refusal is about exceeding the ceiling" clean.go   '	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow > ceiling {' '	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow >= ceiling {'   '^TestAStripBelowAtTheCeilingStillRuns$'
 
 # A named tier with a budget of 0 is refused. Neutralized to `d < 0`, which is
 # unreachable and keeps `d` used so the package still builds -- a `false` here

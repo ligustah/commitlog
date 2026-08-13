@@ -33,6 +33,11 @@ func localBlockTablePath(seg *segment) string {
 // for the same reason. Best-effort here too: a failure costs the next open a
 // walk, which is exactly what happened before this existed.
 //
+// Also called from newSegment, on the far side of a walk it could not avoid. The
+// two together are what make the walk rare rather than merely optional: seal
+// covers every segment of a log that was closed cleanly, and the open covers the
+// log that was not, so a crash costs the chain once instead of once per restart.
+//
 // tmp-then-rename rather than a plain write, so the failure cannot be a
 // half-written table. Best-effort is only safe while the error path leaves
 // nothing behind to find; a torn file would be read back by the next open, and

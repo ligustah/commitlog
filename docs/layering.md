@@ -82,13 +82,30 @@ offsets"). The callback is what keeps this package ignorant of transactions, and
 it should stay that way.
 
 What is thin is VALIDATION. `Ceiling` is the LSO by convention only — commitlog
-cannot verify it, so a wrong ceiling is undetectable here and catchable only in
-the caller. The same holds for `Aborted`. This layer trusts its caller completely
-and cannot detect misuse.
+cannot verify it against anything it owns, so a ceiling that is simply the WRONG
+NUMBER is undetectable here and catchable only in the caller. The same holds for
+`Aborted`. On the value itself this layer trusts its caller completely.
 
 That is a trade, not an oversight, and it is recorded here so the next person
-finds it stated rather than rediscovers it from a bug. If a cheap invariant on
-`Ceiling` ever becomes available, it belongs at the top of `CleanWithSpec`.
+finds it stated rather than rediscovers it from a bug.
+
+What the layer CAN check is the caller contradicting itself, and one such check
+now sits at the top of `CleanWithSpec`: **`StripBelow` must not exceed
+`Ceiling`.** Both fields describe the same boundary — `Ceiling` says records at
+or above it may be undecided and are retained verbatim, `StripBelow` says records
+below it are decided and no longer need their transactional bookkeeping — so
+`StripBelow > Ceiling` asserts both about the range in between. The pass acts on
+the second: `mergeDigests` marks a record for stripping on
+`r.offset < spec.StripBelow` before it consults the ceiling, so records the
+ceiling was set to protect keep their offsets and lose the `pid`/`epoch`/`seq`
+that would let anyone decide them later.
+
+Note the shape of what makes it checkable, because it is the shape any future
+check will have: nothing about the log is consulted. It compares two numbers the
+caller wrote down together. The refusal deliberately does NOT fire when `Ceiling`
+is unset — the bound is then the log's own high watermark, resolved inside the
+pass and free to move, so a check against it would be a race rather than an
+invariant.
 
 ## Reading the format from outside
 

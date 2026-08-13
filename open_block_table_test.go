@@ -67,9 +67,17 @@ func blockCompressedLog(t *testing.T, records int) Options {
 // segment now persists the table it built, in the same bytes the store object
 // uses, and the open reads it instead of rebuilding it.
 //
-// The ACTIVE segment is exempt and stays exempt — it is still being appended to,
-// so it cannot have a current sidecar. That is one segment, bounded by
-// MaxSegmentBytes, rather than the whole log.
+// The ACTIVE segment is covered too, and not by an exemption: closeSegment ends
+// in seal(), so shutting a log down seals the segment it was still appending to
+// and writes its table with the rest. The measurement below is over EVERY segment
+// the reopen produced, active one included, which is why it can require zero
+// rather than "zero but for the last".
+//
+// What is left is the open that follows a CRASH, where no close ran to seal
+// anything. That walk is not bookkeeping — it is the same pass that finds the
+// torn tail and discards it — so it stays, bounded by one segment.
+// TestAWalkAtOpenPersistsTheTableItBuilt holds the part that does not have to
+// repeat.
 func TestReopeningASealedBlockLogWalksNoBlockHeaders(t *testing.T) {
 	opts := blockCompressedLog(t, 4000)
 
@@ -132,6 +140,63 @@ func TestAnUnusableBlockTableFallsBackToTheWalk(t *testing.T) {
 			require.Positive(t, l.NewestOffset())
 		})
 	}
+}
+
+// A walk at open persists what it built, so a crash costs the chain once.
+//
+// seal() is the other writer and it covers the log that was closed cleanly —
+// closeSegment ends in seal(), so every segment gets a sidecar on the way out.
+// The gap is the open that FOLLOWS a crash: the process that would have sealed
+// the active segment is gone, and the segment whose best-effort write at seal
+// failed has nothing to try again either. Without a write on the far side of the
+// walk, the next open rebuilds the same table, and so does the one after it, for
+// as long as the crashes keep arriving before a clean close does.
+//
+// The assertion is made while the log is still OPEN, and that is the whole
+// design of the test. Closing it seals every segment and writes the sidecar
+// anyway, so a check afterwards passes just as happily against code that
+// persists nothing at open — it would be measuring seal, not this.
+func TestAWalkAtOpenPersistsTheTableItBuilt(t *testing.T) {
+	opts := blockCompressedLog(t, 4000)
+	path := filepath.Join(opts.Path, "00000000000000000000"+blocksSuffix)
+	require.FileExists(t, path,
+		"a sealed block-compressed segment should have persisted its table")
+	require.NoError(t, os.Remove(path))
+
+	l, err := New(opts)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, l.Close()) }()
+
+	cl := l.(*commitLog)
+	cl.mu.RLock()
+	first := cl.segments[0]
+	cl.mu.RUnlock()
+	first.RLock()
+	walked := first.blocksWalked
+	first.RUnlock()
+	require.Positive(t, walked,
+		"the fixture did not produce a walk, so it cannot be testing what the "+
+			"walk leaves behind")
+
+	require.FileExists(t, path,
+		"the open walked %d block headers and kept the result to itself; the "+
+			"next open after a crash would walk them again", walked)
+
+	// And what it wrote has to be what the reader accepts, or persisting it is a
+	// write that changes nothing: loadLocalBlockTable refuses a table that does
+	// not account for exactly the bytes of the file beside it.
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	blocks, err := decodeBlockTable(data)
+	require.NoError(t, err, "the table written at open does not decode")
+	require.Len(t, blocks, walked,
+		"the persisted table does not hold the blocks the walk resolved")
+	logInfo, err := os.Stat(filepath.Join(opts.Path, "00000000000000000000"+logSuffix))
+	require.NoError(t, err)
+	_, phys := blockTableExtent(blocks)
+	require.Equal(t, logInfo.Size(), phys,
+		"the table written at open describes a different number of bytes than "+
+			"the log beside it, so the next open would refuse it and walk anyway")
 }
 
 // A stale table is refused even though it decodes cleanly.
