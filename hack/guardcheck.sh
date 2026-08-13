@@ -600,7 +600,7 @@ run_guard "a sidecar must carry the reserved prefix" sidecar.go   '	if !isClient
 # instead of from a list. Registered separately because that test does not read
 # the rule, it reads the DIRECTORY -- and a test which could not notice the rule
 # being dropped would have been proving nothing about it.
-run_guard "the derived name check is not vacuous" sidecar.go   '	if !isClientSidecar(name) || name == ClientSidecarPrefix {'   '	if false {'   '^TestEveryFileTheLogWritesIsRefusedAsASidecarName$'
+run_guard "the derived sidecar name check is not vacuous" sidecar.go   '	if !isClientSidecar(name) || name == ClientSidecarPrefix {'   '	if false {'   '^TestEveryFileTheLogWritesIsRefusedAsASidecarName$'
 
 # The other half, and the half a refusal cannot deliver: the log's own directory
 # scans must SKIP the client's files. Both scans dispatch on suffix, so without
