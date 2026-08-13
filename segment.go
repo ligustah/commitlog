@@ -1329,14 +1329,29 @@ func (s *segment) seal() {
 	s.notifyWaiters()
 	if s.Index != nil {
 		s.Index.Shrink() // nolint: errcheck
-		// Sealing is the index's flush point, because it is the moment after
-		// which nothing else will repair it. The durability hot path flushes log
-		// bytes only, relying on open() rebuilding a short index tail — but that
-		// rebuild runs on the ACTIVE segment alone, so a segment that rolls
-		// between syncs would otherwise keep a permanently short index. One extra
-		// fsync per roll, off the hot path, confines the unflushed index to the
-		// active segment that open already fixes, and makes an offset in a sealed
-		// segment durable by construction.
+		// Sealing is the index's flush point. The durability hot path flushes log
+		// bytes only and leaves the index to be rebuilt from them, so without a
+		// flush here a segment that rolls between syncs is left short.
+		//
+		// This used to say that nothing else would ever repair such a segment,
+		// which was true and is no longer: as of v0.79.0 open() reconciles the
+		// index tail of EVERY sealed segment, not just the active one, because
+		// leaving that state unrepaired lost 56 of 60 records. Read the old
+		// justification against today's code and it is simply false, and the
+		// conclusion it supports — one fsync per roll — looks unnecessary.
+		//
+		// It is not. What changed is the reason, and the reason is now about
+		// BOUNDING RECOVERY rather than being the only repair. A roll is rare
+		// next to an append (one per MaxSegmentBytes), so this costs little; what
+		// it buys is that a crash leaves at most ONE segment with a short index —
+		// the active one — instead of every segment that rolled since the last
+		// sync. The repair at open is O(1) for a segment whose index covers its
+		// log and a tail walk for one that does not, so an unflushed index is not
+		// a correctness problem any more, it is a pile of recovery work. This
+		// keeps that pile at one segment.
+		//
+		// So: correctness comes from the reconcile, boundedness comes from here.
+		// Deleting this is safe for the data and unbounds the recovery.
 		//
 		// Best-effort, like the shrink above: a failure here costs a rebuilt
 		// index tail, not data, and seal runs on paths that cannot return one.
