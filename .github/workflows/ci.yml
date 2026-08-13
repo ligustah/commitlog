@@ -195,6 +195,16 @@ jobs:
       # the runner, so there is nothing to install and its absence is already
       # loud. severity=warning rather than the default, which is style-level and
       # would be argued with instead of fixed.
+      #
+      # The optional check-extra-masked-returns (SC2312) was considered for the
+      # pipefail bug above and rejected, so it does not get proposed again: it
+      # flags a command SUBSTITUTION whose exit status is discarded, and that bug
+      # was a PIPELINE whose status was the whole condition — nothing masked, so
+      # it would not have fired. What it would flag here is `cd "$(dirname $0)"`
+      # and `echo "... $(wc -l)"`, roughly a dozen of them, none a defect. The
+      # real fix for that class is structural and is already applied: neither
+      # script pipes into `grep -q` any more, so no `set` line has to stay absent
+      # for them to be correct.
       - name: shellcheck hack scripts
         run: shellcheck --severity=warning hack/*.sh
       # Static check of the workflows themselves: bad expressions, unknown

@@ -158,9 +158,26 @@ fi
 EXPORTED_EXCEPT=""
 
 iface=$(awk '/^type CommitLog interface \{/,/^\}$/' interface.go)
+
+# Matched with bash's own regex operator rather than `echo "$iface" | grep -q`.
+# That pipeline is safe HERE and only by accident: grep -q exits at its first
+# match, leaving echo writing into a pipe nothing reads, and this script has no
+# `set -o pipefail` to turn the resulting EPIPE into a failure. guardcheck.sh
+# does have one, had the identical construct, and reported a properly covered
+# guard as a HARNESS ERROR the moment its output outgrew the pipe buffer — a
+# false red that looks exactly like the real thing the check exists to catch.
+#
+# So the safety of this line was a property of a `set` line thirty lines above
+# it, and adding pipefail to this script — an obvious hardening — would have
+# reintroduced the same bug. No pipe, no EPIPE, no dependency on that.
+#
+# The regex keeps the anchoring the grep had: start of a line, indentation, the
+# method name, an open paren. $nl is a literal newline; $m is the method name,
+# matched by `[A-Z][A-Za-z0-9]*` above, so it holds no regex metacharacters.
+nl=$'\n'
 for m in $(grep -ohE '^func \(l \*commitLog\) [A-Z][A-Za-z0-9]*' *.go | sed 's/.*) //' | sort -u); do
 	case " $EXPORTED_EXCEPT " in *" $m "*) continue ;; esac
-	if ! echo "$iface" | grep -qE "^[[:space:]]+$m\("; then
+	if ! [[ $iface =~ (^|$nl)[[:space:]]+$m\( ]]; then
 		echo "layercheck: commitLog.$m is exported but not on the CommitLog interface."
 		echo "  New returns the interface, so callers can only reach it through a"
 		echo "  structural assertion that fails silently. Add it, or add it to"
