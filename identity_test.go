@@ -180,6 +180,50 @@ func TestAnIdentityWithFileFormatBytesRoundTrips(t *testing.T) {
 	require.Equal(t, nasty, l3.IdentityConflict().Stored)
 }
 
+// The compatibility question a downstream repo asked directly, pinned rather
+// than reasoned about: does a v0.80.0 process rewrite the descriptor of a log
+// created by an older one?
+//
+// It must not. renderDescriptor now emits version 1 unconditionally, so ANY
+// rewrite makes the file unreadable to an older build — and a plain reopen is
+// the case where that would be a surprise rather than a decision. The rewrite
+// is reachable (a legitimate compression or segment-size change republishes),
+// so this asserts the specific path where it must not happen: same options, no
+// identity, nothing to reconcile.
+func TestReopeningAnUnchangedLogDoesNotRewriteItsDescriptor(t *testing.T) {
+	dir := tempDir(t)
+	opts := Options{Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20}
+	l, err := New(opts)
+	require.NoError(t, err)
+	_, err = l.Append([]*Message{{Value: []byte("a")}})
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	// Put the file back the way a v0.79.x build wrote it, then reopen with the
+	// options that build would have passed.
+	path := filepath.Join(dir, descriptorFileName)
+	body, err := os.ReadFile(path)
+	require.NoError(t, err)
+	old := strings.Replace(string(body), "1\n", "0\n", 1)
+	require.NotEqual(t, string(body), old, "the fixture did not downgrade the version")
+	require.NoError(t, os.WriteFile(path, []byte(old), 0644))
+	before, err := os.Stat(path)
+	require.NoError(t, err)
+
+	l2, err := New(opts)
+	require.NoError(t, err)
+	require.NoError(t, l2.Close())
+
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, old, string(after),
+		"an unchanged reopen rewrote the descriptor, so an older build can no "+
+			"longer read this log")
+	afterStat, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, before.Size(), afterStat.Size())
+}
+
 // A descriptor written before identity existed carries no version line for it
 // and must still open — that is what makes the field additive rather than a
 // migration. The log simply has no identity, which is exactly what it means.
