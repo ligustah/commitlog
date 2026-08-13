@@ -61,7 +61,6 @@ func (s *fzFaultStore) ReadAt(key string, p []byte, off int64) (int, error) {
 func (s *fzFaultStore) Size(key string) (int64, error) { return s.inner.Size(key) }
 func (s *fzFaultStore) List() ([]string, error)        { return s.inner.List() }
 func (s *fzFaultStore) Delete(key string) error        { return s.inner.Delete(key) }
-func (s *fzFaultStore) LiveRead() bool                 { return s.inner.LiveRead() }
 
 // fzOffloadSetup builds a log wired to a filesystem SegmentStore (behind a
 // fault-injecting wrapper), with the index cache enabled (option 2) or not

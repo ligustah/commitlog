@@ -135,10 +135,20 @@ var ErrObjectNotFound = errors.New("commitlog: no such object in the segment sto
 // cloud/blob stores (S3/GCS/…) implement the same interface from outside
 // commitlog so the cloud dependency never enters it.
 //
-// A store declares its read capability via LiveRead, for its caller to consult
-// — commitlog itself does not, and the reason is on that method. A
-// restore-required store simply returns ErrRestoreRequired from the READ until
-// the object is restored.
+// A restore-required store — one whose objects cannot be read until an explicit
+// restore has run — declares nothing here. It reports itself, to the caller
+// that reads the segment, by returning ErrRestoreRequired from the READ, which
+// is why a log holding a cold segment nobody reads opens and runs normally.
+//
+// There was a LiveRead() bool for that, required of every implementer and
+// called by nothing: opening a log stopped touching the store when boot began
+// reading sizes from the tier manifest, which removed the one place inside
+// commitlog a capability check would have gone. It was kept for a caller that
+// held only a SegmentStore and wanted to schedule a restore before reading —
+// but the only implementer outside this repo returned a constant true and never
+// consulted it either, so the method was a requirement placed on everyone to
+// serve nobody. A caller that needs the distinction knows which store it
+// constructed.
 type SegmentStore interface {
 	// Put stores size bytes read from r under key, overwriting any existing
 	// object (idempotent re-offload).
@@ -194,29 +204,12 @@ type SegmentStore interface {
 	List() ([]string, error)
 	// Delete removes the object under key; deleting an absent key is a no-op.
 	Delete(key string) error
-	// LiveRead reports whether the store serves transparent read-through
-	// (true) or requires an explicit restore before reads succeed (false).
-	//
-	// commitlog does not branch on it. Nothing in this package calls it, and
-	// that is the design rather than an oversight: opening a log stopped
-	// touching the store when boot began reading sizes from the tier manifest,
-	// which removed the one place a capability check would have gone. A
-	// restore-required tier reports ITSELF, to the caller that reads the
-	// segment, by returning ErrRestoreRequired — so a log holding a cold
-	// segment nobody reads opens and runs normally.
-	//
-	// It stays on the interface for the CALLER's benefit: a caller that holds
-	// only a SegmentStore can ask what kind it is without a type switch, which
-	// is what it needs to decide whether to schedule a restore before reading.
-	// Said here because a required method with no consumer inside the package
-	// reads as unwired, and the next person to notice should find the answer
-	// rather than the question.
-	LiveRead() bool
 }
 
 // FileSegmentStore is a filesystem SegmentStore: each offloaded segment's log
 // bytes are a file under Dir. It covers the fast-disk → slow-disk tiering case
-// with zero external dependencies. It is a live-read store.
+// with zero external dependencies. Its objects are readable the moment they are
+// written — it never returns ErrRestoreRequired.
 type FileSegmentStore struct {
 	dir string
 }
@@ -379,8 +372,6 @@ func (s *FileSegmentStore) Delete(key string) error {
 	}
 	return err
 }
-
-func (s *FileSegmentStore) LiveRead() bool { return true }
 
 // prefetchSize is how far ahead storeBacking reads on a cache miss. Sequential
 // scans (recovery, compaction, replay) then serve most reads from the buffer

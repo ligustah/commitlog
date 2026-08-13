@@ -7,6 +7,25 @@ library from that fork onward.
 
 ## Unreleased
 
+### Breaking
+
+- **`SegmentStore.LiveRead() bool` is removed.** Implementers delete the method;
+  nothing else changes. It reported whether a store served transparent
+  read-through or required an explicit restore first, and nothing anywhere
+  called it. Inside commitlog that was deliberate and documented: opening a log
+  stopped touching the store when boot began reading sizes from the tier
+  manifest, which removed the one place a capability check would have gone. A
+  restore-required tier reports *itself*, to the caller that reads the segment,
+  by returning `ErrRestoreRequired` — which is why a log holding a cold segment
+  nobody reads opens and runs normally.
+
+  It was kept for a caller holding only a `SegmentStore` that wanted to schedule
+  a restore before reading. That caller does not exist: the only implementation
+  outside this repo returns a constant `true` and never consults it either. So
+  the method was a requirement placed on every implementer to serve nobody, and
+  it is the kind of dead weight a linter cannot see — an interface-satisfying
+  method counts as used.
+
 ### Fixed
 
 - **A `SegmentStore` that wraps its errors had its short reads treated as
@@ -60,6 +79,21 @@ library from that fork onward.
   could reach it or do anything with the result. `hack/layercheck.sh` carried a
   hand-written exception for it whose own justification argued for unexporting;
   the exception list is now empty.
+
+- Local retention's message and byte limits were two byte-identical eighteen-line
+  functions differing in the measure and the limit, sitting directly below
+  `applyTierLimit` — the same backwards walk already parameterised by exactly
+  those two things. What kept them apart was one rule each spelled out in
+  control flow: retention never deletes the active segment, which a tier does
+  not have. `deletablePrefix` makes that load-bearing rather than belt and
+  braces, since with no floor it returns the whole log.
+
+  Only the messages copy had a test. Deleting the bytes copy's protection
+  outright — guard and loop start both — left all twenty-five retention tests
+  green, which is what a hand copy costs: the rule was enforced twice and
+  falsifiable once. All three now share `applyTotalLimit`, where what varied is
+  a named argument (`keepActiveSegment` / `keepNoSegment`), and
+  `TestDeleteCleanerBytesKeepActiveSegment` fills the coverage hole.
 
 ## v0.83.0 — 2026-08-13
 
