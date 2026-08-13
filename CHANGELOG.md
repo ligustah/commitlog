@@ -5,6 +5,40 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.81.0 — 2026-08-13
+
+### Changed
+
+- **A negative `PrefixReadConcurrency` or `PrefixReadTierConcurrency` is now
+  refused by `New` instead of silently becoming the default.** `concurrencyBudget`
+  defaults on `v <= 0`, so a negative reached the arm that exists to catch a
+  *missing* value and the caller got 8 or 64 instead of what it asked for. Same
+  defect as the three options already refused there, in a fourth and fifth place.
+
+  What makes this one more than a table entry: it is reachable by following the
+  documentation. The sibling `PrefixReadCoalesceBytes` knobs are described in the
+  same `Options` paragraph, and that paragraph teaches that a negative is
+  meaningful and powerful here — "NEGATIVE means never coalesce... the
+  maximum-concurrency and maximum-request-count setting". A caller who read that
+  and asked for the analogous extreme on the concurrency knob was quietly given
+  the default.
+
+  Refused rather than given a meaning, because there is no defensible one: the
+  analogous extreme is unbounded on one reading and serial on the other, and
+  picking either would be this package deciding something the caller was trying
+  to say. A negative `CoalesceBytes` still means "never coalesce" and is
+  unaffected; that asymmetry is now pinned by a test, since it reads as an
+  oversight and is not.
+
+  Minor rather than patch: a caller passing a negative concurrency today gets a
+  working log and will now get an error from `New`. No caller in this repo or
+  either downstream does.
+
+### Added
+
+- `docs/sweep-2026-08-13-complexity.md` — the standing complexity sweep, both
+  axes, recording what was checked and found clean as well as what changed.
+
 ## v0.80.2 — 2026-08-13
 
 ### Fixed
