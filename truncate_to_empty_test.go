@@ -51,7 +51,7 @@ func TestTruncatingToEmptyLeavesTheLogUsable(t *testing.T) {
 	require.EqualValues(t, records-1, l.NewestOffset())
 	require.EqualValues(t, l.NewestOffset(), l.HighWatermark(),
 		"the fixture needs a fully committed log, which is what makes the cut lossy")
-	require.Greater(t, len(l.Segments()), 1, "the cut should span more than one segment")
+	require.Greater(t, len(l.segmentsSnapshot()), 1, "the cut should span more than one segment")
 
 	// The call from the trace, verbatim in shape: cut to 0 on a log where every
 	// record is committed.

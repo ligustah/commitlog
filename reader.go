@@ -111,7 +111,7 @@ func (l *commitLog) newSourceReader(spec readSpec) (contextReader, error) {
 		} else {
 			cr, err = l.newReaderCommitted(spec.offset, !spec.follow)
 		}
-		// Each attempt takes its own Segments() snapshot, so a retry is
+		// Each attempt takes its own segmentsSnapshot(), so a retry is
 		// resolving against the post-swap log rather than repeating the same
 		// lookup. A log that is closing or gone reports that instead: there is
 		// no replacement coming, and spinning would turn a clean shutdown into a
@@ -331,7 +331,7 @@ func (r *uncommittedReader) Read(ctx context.Context, p []byte) (n int, err erro
 	defer r.mu.Unlock()
 
 	var (
-		segments = r.cl.Segments()
+		segments = r.cl.segmentsSnapshot()
 		readSize int
 		waiting  bool
 	)
@@ -379,7 +379,7 @@ LOOP:
 
 		// We hit an EOF after waiting for data which means a new segment was
 		// rolled, so move to the next segment.
-		segments = r.cl.Segments()
+		segments = r.cl.segmentsSnapshot()
 		nextSeg := findSegmentAfter(segments, r.seg)
 
 		// If there are not enough segments to read, wait for new segment to be
@@ -389,7 +389,7 @@ LOOP:
 				err = werr
 				break LOOP
 			}
-			segments = r.cl.Segments()
+			segments = r.cl.segmentsSnapshot()
 			nextSeg = findSegmentAfter(segments, r.seg)
 		}
 		r.seg = nextSeg
@@ -437,7 +437,7 @@ func (r *uncommittedReader) waitForData(ctx context.Context, seg *segment) error
 // newReaderUncommitted returns a contextReader which reads data from the log
 // starting at the given offset.
 func (l *commitLog) newReaderUncommitted(offset int64, noWait bool) (contextReader, error) {
-	seg, contains := findSegmentContains(l.Segments(), offset)
+	seg, contains := findSegmentContains(l.segmentsSnapshot(), offset)
 	if seg == nil {
 		return nil, ErrSegmentNotFound
 	}
@@ -477,7 +477,7 @@ type committedReader struct {
 func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	segments := r.cl.Segments()
+	segments := r.cl.segmentsSnapshot()
 
 	if r.seg == nil {
 		// Fixed BEFORE the watermark moves: this reader has served everything up
@@ -623,7 +623,7 @@ func (r *committedReader) syncHW(ctx context.Context) ([]*segment, error) {
 	// Re-snapshotted AFTER the wait: the append that moved the watermark may have
 	// rolled a segment, and a snapshot taken before it cannot hold the one the
 	// watermark now lives in.
-	segments := r.cl.Segments()
+	segments := r.cl.segmentsSnapshot()
 	hwSeg, hwPos, err := getHWPos(segments, r.hw)
 	if err != nil {
 		return nil, err
@@ -663,7 +663,7 @@ func (r *committedReader) waitForHW(ctx context.Context, hw int64) error {
 func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader, error) {
 	var (
 		hw       = l.HighWatermark()
-		segments = l.Segments()
+		segments = l.segmentsSnapshot()
 	)
 
 	// If offset exceeds HW, wait for the next message. This also covers the

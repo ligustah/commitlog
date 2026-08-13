@@ -24,7 +24,7 @@ func TestDeleteCleanerPartialFailure(t *testing.T) {
 		require.NoError(t, err)
 	}
 	l.SetHighWatermark(29)
-	segs := l.Segments()
+	segs := l.segmentsSnapshot()
 	require.GreaterOrEqual(t, len(segs), 4, "need several segments to drop")
 
 	// Retention that keeps roughly the last two segments.
@@ -54,7 +54,7 @@ func TestDeleteCleanerPartialFailure(t *testing.T) {
 
 	// The surviving segments must be contiguous, start at the FAILED segment
 	// (the first deletion succeeded), and agree with what a reader can reach.
-	after := cl.Segments()
+	after := cl.segmentsSnapshot()
 	require.Equal(t, segs[1].BaseOffset, after[0].BaseOffset,
 		"survivors must start at the failed segment")
 	for i := 1; i < len(after); i++ {
@@ -74,6 +74,6 @@ func TestDeleteCleanerPartialFailure(t *testing.T) {
 	// With the fault cleared, the next Clean completes the retention.
 	deleteSegment = restore
 	require.NoError(t, l.Clean())
-	final := cl.Segments()
+	final := cl.segmentsSnapshot()
 	require.Len(t, final, 2, "retention should keep the last two segments")
 }

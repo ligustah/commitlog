@@ -167,7 +167,7 @@ func TestASegmentAdvanceSkipsTheTrimOfTheSegmentJustRead(t *testing.T) {
 	}
 	l.SetHighWatermark(last)
 
-	segs := l.Segments()
+	segs := l.segmentsSnapshot()
 	require.GreaterOrEqual(t, len(segs), 3)
 	source := segs[0]
 	require.Greater(t, source.LastOffset(), source.BaseOffset,

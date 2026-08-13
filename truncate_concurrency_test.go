@@ -139,7 +139,7 @@ func TestTruncateRacingAppendsLosesNoAcknowledgedRecord(t *testing.T) {
 // The same convoy TestReadsAreServedWhileATruncationRuns covers for
 // TruncateBefore, on the other truncation.
 //
-// Truncate held l.mu — the lock every reader takes through Segments() — across
+// Truncate held l.mu — the lock every reader takes through segmentsSnapshot() — across
 // the scan of the boundary segment, the write of its replacement, and the
 // unlink of every segment above the cut. A follower reconciling after an
 // unclean election can be told to truncate a long way back, so that is not a

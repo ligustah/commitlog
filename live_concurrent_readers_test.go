@@ -108,7 +108,7 @@ func TestConcurrentReadersAndProbesOnLiveLog(t *testing.T) {
 					if off < 0 {
 						continue
 					}
-					for _, seg := range l.Segments() {
+					for _, seg := range l.segmentsSnapshot() {
 						_, _ = seg.findEntry(off) // an error is fine; a panic is not
 					}
 				}

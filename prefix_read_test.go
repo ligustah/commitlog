@@ -430,7 +430,7 @@ func TestSkipSupersededDropsWithinSegmentOnly(t *testing.T) {
 	got := drainReader(t, skipped)
 
 	require.Less(t, len(got), len(all), "supersessions within a segment must be dropped")
-	sealed := len(l.Segments()) - 1
+	sealed := len(l.segmentsSnapshot()) - 1
 	require.LessOrEqual(t, len(got), sealed+1,
 		"at most one copy per key per segment: got %d over %d sealed segments", len(got), sealed)
 	require.Equal(t, "v199", string(got[len(got)-1].msg.Value()),
@@ -514,7 +514,7 @@ func TestReaderKeyPrefixSkipsSegmentsWithoutHits(t *testing.T) {
 	require.Less(t, offWant, l.ActiveSegmentBase())
 	requireCleanOK(t, l, CleanSpec{Ceiling: At(l.HighWatermark())})
 
-	sealed := len(l.Segments()) - 1
+	sealed := len(l.segmentsSnapshot()) - 1
 	require.Greater(t, sealed, 10)
 
 	before := segmentScans.Load()
@@ -599,7 +599,7 @@ func offloadedPrefixLog(t *testing.T) (*commitLog, int64) {
 	require.NoError(t, err)
 	require.NotZero(t, n, "test is vacuous unless segments were actually offloaded")
 
-	segs := l.Segments()
+	segs := l.segmentsSnapshot()
 	var tiered, local int
 	for _, s := range segs[:len(segs)-1] {
 		if s.tiered() {
@@ -718,7 +718,7 @@ func TestPlanRunsFanOutIsNotCappedBySegmentCount(t *testing.T) {
 		app(&Message{Key: []byte(fmt.Sprintf("pad:%03d", i)), Value: []byte("padpadpadpad")})
 	}
 
-	segs := l.Segments()
+	segs := l.segmentsSnapshot()
 	sealed := segs[:len(segs)-1]
 	require.Greater(t, len(sealed), 2)
 

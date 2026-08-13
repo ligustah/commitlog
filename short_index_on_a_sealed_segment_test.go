@@ -47,7 +47,7 @@ func TestAShortIndexOnASealedSegmentHidesRecords(t *testing.T) {
 		_, err := l.Append([]*Message{{Value: []byte("record-" + strconv.Itoa(i))}})
 		require.NoError(t, err)
 	}
-	require.Greater(t, len(l.(*commitLog).Segments()), 2,
+	require.Greater(t, len(l.(*commitLog).segmentsSnapshot()), 2,
 		"the fixture needs a sealed segment that is not the last")
 	newest := l.NewestOffset()
 	require.NoError(t, l.Close())

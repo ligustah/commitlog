@@ -149,10 +149,13 @@ fi
 # EXPORTED_EXCEPT lists the ones that are deliberately not on it, each of which
 # needs a reason that is about the SIGNATURE and not about convenience:
 #
-#   Segments  returns []*segment, an unexported type. Nothing outside this
-#             package can do anything with the result, so putting it on the
-#             interface would advertise a method no external caller can use.
-EXPORTED_EXCEPT="Segments"
+# Empty, and worth keeping that way. Its one entry was `Segments`, excused on
+# the grounds that it returns []*segment — an unexported type nothing outside
+# this package can do anything with. That was a correct reason not to put it on
+# the interface and an equally good reason not to EXPORT it, which is what it
+# became: segmentsSnapshot. An exception list is where a question stops being
+# asked, so prefer changing the code until one is genuinely unavoidable.
+EXPORTED_EXCEPT=""
 
 iface=$(awk '/^type CommitLog interface \{/,/^\}$/' interface.go)
 for m in $(grep -ohE '^func \(l \*commitLog\) [A-Z][A-Za-z0-9]*' *.go | sed 's/.*) //' | sort -u); do
@@ -174,4 +177,8 @@ if [ "$fail" -ne 0 ]; then
 fi
 
 echo "layercheck: OK — $(echo $LOWER | wc -w) files below the log, none of them name it;"
-echo "  every exported commitLog method is on the interface but $EXPORTED_EXCEPT"
+if [ -n "$EXPORTED_EXCEPT" ]; then
+	echo "  every exported commitLog method is on the interface but $EXPORTED_EXCEPT"
+else
+	echo "  every exported commitLog method is on the interface, with no exceptions"
+fi

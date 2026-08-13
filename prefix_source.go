@@ -87,7 +87,7 @@ func (p *prefixSource) pop() (prefixQueued, bool, error) {
 func (p *prefixSource) fillFromNextSegment() error {
 	p.queue, p.qi = p.queue[:0], 0
 
-	segments := p.log.Segments()
+	segments := p.log.segmentsSnapshot()
 	if len(segments) == 0 {
 		p.done = true
 		return nil

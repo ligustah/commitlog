@@ -45,7 +45,7 @@ func localRetentionLog(t *testing.T, age time.Duration) (*commitLog, func(time.D
 	l.SetHighWatermark(last)
 
 	cl := l.(*commitLog)
-	require.Greater(t, len(cl.Segments()), 2,
+	require.Greater(t, len(cl.segmentsSnapshot()), 2,
 		"the fixture needs sealed segments to offload")
 	require.Zero(t, offloadedCount(cl), "nothing should be offloaded yet")
 
@@ -54,7 +54,7 @@ func localRetentionLog(t *testing.T, age time.Duration) (*commitLog, func(time.D
 
 func offloadedCount(l *commitLog) int {
 	n := 0
-	for _, s := range l.Segments() {
+	for _, s := range l.segmentsSnapshot() {
 		if s.isOffloaded() {
 			n++
 		}

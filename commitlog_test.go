@@ -347,16 +347,16 @@ func TestCleaner(t *testing.T) {
 
 	_, err := l.Append(msgs)
 	require.NoError(t, err)
-	segments := l.Segments()
-	require.Equal(t, 1, len(l.Segments()))
+	segments := l.segmentsSnapshot()
+	require.Equal(t, 1, len(l.segmentsSnapshot()))
 
 	_, err = l.Append(msgs)
 	require.NoError(t, err)
 
 	require.NoError(t, l.Clean())
 
-	require.Equal(t, 1, len(l.Segments()))
-	for i, s := range l.Segments() {
+	require.Equal(t, 1, len(l.segmentsSnapshot()))
+	for i, s := range l.segmentsSnapshot() {
 		require.NotEqual(t, s, segments[i])
 	}
 }
@@ -403,7 +403,7 @@ func TestCleanerDeleteLeaderEpochOffsets(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.Equal(t, 15, len(l.Segments()))
+	require.Equal(t, 15, len(l.segmentsSnapshot()))
 
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
@@ -415,7 +415,7 @@ func TestCleanerDeleteLeaderEpochOffsets(t *testing.T) {
 	// Force a clean.
 	require.NoError(t, l.Clean())
 
-	require.Equal(t, 5, len(l.Segments()))
+	require.Equal(t, 5, len(l.segmentsSnapshot()))
 	require.Equal(t, int64(10), l.OldestOffset())
 	require.Equal(t, int64(14), l.NewestOffset())
 	require.Equal(t, 1, len(l.leaderEpochCache.epochOffsets))
@@ -482,7 +482,7 @@ func TestCleanerKeepsLeaderEpochOffsetsThroughCompaction(t *testing.T) {
 	// Set the HW so compaction will run.
 	l.SetHighWatermark(l.NewestOffset())
 
-	require.Equal(t, 15, len(l.Segments()))
+	require.Equal(t, 15, len(l.segmentsSnapshot()))
 
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
@@ -494,7 +494,7 @@ func TestCleanerKeepsLeaderEpochOffsetsThroughCompaction(t *testing.T) {
 	// Force a clean.
 	require.NoError(t, l.Clean())
 
-	require.Equal(t, 3, len(l.Segments()))
+	require.Equal(t, 3, len(l.segmentsSnapshot()))
 	require.Equal(t, int64(4), l.OldestOffset())
 	require.Equal(t, int64(14), l.NewestOffset())
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))

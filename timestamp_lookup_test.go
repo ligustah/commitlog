@@ -54,7 +54,7 @@ func buildBlockModeLog(t *testing.T) (*commitLog, int64) {
 		})
 		require.NoError(t, err)
 	}
-	require.Greater(t, len(l.Segments()), 1, "need more than one segment")
+	require.Greater(t, len(l.segmentsSnapshot()), 1, "need more than one segment")
 	return l, base + int64(n/2)*int64(time.Millisecond)
 }
 
@@ -105,7 +105,7 @@ func TestTimestampLookupsRefuseAFailedReadInsteadOfGuessing(t *testing.T) {
 			// touching the backing at all — so the injection would do nothing and
 			// this would pass for no reason. TestTimestampLookupsWorkOnAHealthyLog
 			// is what establishes the lookup works at all.
-			for _, s := range l.Segments() {
+			for _, s := range l.segmentsSnapshot() {
 				s.Lock()
 				s.backing = &readFailingBacking{s.backing}
 				s.Unlock()

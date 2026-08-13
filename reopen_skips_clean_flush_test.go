@@ -31,13 +31,13 @@ func TestAReopenedLogFlushesNoIndexAtClose(t *testing.T) {
 		_, err := l.Append([]*Message{{Value: []byte("record-" + strconv.Itoa(i))}})
 		require.NoError(t, err)
 	}
-	require.Greater(t, len(l.(*commitLog).Segments()), 2,
+	require.Greater(t, len(l.(*commitLog).segmentsSnapshot()), 2,
 		"the fixture needs sealed segments, or there is nothing to skip")
 	require.NoError(t, l.Close())
 
 	l2, err := New(opts)
 	require.NoError(t, err)
-	segs := l2.(*commitLog).Segments()
+	segs := l2.(*commitLog).segmentsSnapshot()
 
 	// Counted per segment rather than in total, so a single segment still being
 	// flushed cannot hide behind the others.
@@ -76,14 +76,14 @@ func TestAReopenedLogFlushesAnIndexItHadToRepair(t *testing.T) {
 		_, err := l.Append([]*Message{{Value: []byte("record-" + strconv.Itoa(i))}})
 		require.NoError(t, err)
 	}
-	require.Greater(t, len(l.(*commitLog).Segments()), 2)
+	require.Greater(t, len(l.(*commitLog).segmentsSnapshot()), 2)
 	require.NoError(t, l.Close())
 
 	truncateFirstIndexByOneEntry(t, dir)
 
 	l2, err := New(opts)
 	require.NoError(t, err)
-	segs := l2.(*commitLog).Segments()
+	segs := l2.(*commitLog).segmentsSnapshot()
 	first := segs[0]
 	require.True(t, first.dirtyIndex,
 		"the reconcile wrote this segment's missing tail entry, so its index is "+

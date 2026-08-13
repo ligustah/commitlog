@@ -100,10 +100,10 @@ func TestReopenAfterSealingAnEmptyIndexIsUsable(t *testing.T) {
 		lastOff = offs[0]
 	}
 	// Roll to a fresh segment and leave it untouched.
-	segs := l.Segments()
+	segs := l.segmentsSnapshot()
 	active := segs[len(segs)-1]
 	require.NoError(t, l.split(active))
-	segs = l.Segments()
+	segs = l.segmentsSnapshot()
 	fresh := segs[len(segs)-1]
 	require.NotEqual(t, active.BaseOffset, fresh.BaseOffset, "expected a fresh segment")
 	require.Zero(t, fresh.Index.Position(), "the fresh active segment's index must be empty")

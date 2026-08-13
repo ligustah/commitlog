@@ -1900,9 +1900,10 @@ func (l *commitLog) IsClosed() bool {
 // end. Reproduced in roughly one run in eight.
 //
 // l.mu is a different matter, and this holds it only to publish. It is the lock
-// every reader takes through Segments(), so holding it across the scan, the
-// rewrite and the unlinks stopped the whole log for the length of the call —
-// the same convoy TruncateBefore had. Holding appendMu makes this simpler than
+// every reader takes through segmentsSnapshot(), so holding it across the
+// scan, the rewrite and the unlinks stopped the whole log for the length of
+// the call — the same convoy TruncateBefore had. Holding appendMu makes this
+// simpler than
 // the fix there: nothing can roll a segment underneath the call, so the list at
 // publish time is the list that was snapshotted, and there is no rebase to do.
 func (l *commitLog) Truncate(offset int64) error {
@@ -2159,9 +2160,9 @@ func (l *commitLog) OffloadBefore(minOffset int64) (int, error) {
 // or after minOffset. The active segment is never rewritten.
 // The lock discipline here is the same one CleanWithSpec uses, and for the same
 // reason: decide under l.mu, do the FILE WORK with it released, then re-take it
-// only to publish. Every reader and every appender takes l.mu — Segments()
-// RLocks it, split() Locks it — so anything done while holding it is a hard stop
-// for the whole log.
+// only to publish. Every reader and every appender takes l.mu —
+// segmentsSnapshot() RLocks it, split() Locks it — so anything done while
+// holding it is a hard stop for the whole log.
 //
 // This used to hold the write lock across all of it: N segment closes, N
 // unlinks, and then a scan of the boundary segment end to end and a write of a
@@ -2310,8 +2311,8 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 		}
 		return ErrCommitLogClosed
 	}
-	// Copy on write, for the same reason Truncate does. Segments() hands out the
-	// slice HEADER, so every lock-free reader holding one indexes this backing
+	// Copy on write, for the same reason Truncate does. segmentsSnapshot() hands
+	// out the slice HEADER, so every lock-free reader holding one indexes this backing
 	// array — writing an element in place is a data race against all of them, and
 	// the race detector calls it: reported downstream, red under -race in a
 	// deletion and a truncate chaos test. Publishing a new array instead leaves
@@ -2365,9 +2366,16 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 	return nil
 }
 
-// Segments returns the log's segment slice. It returns the slice HEADER, not a
-// copy — deliberately, because this is on the path of every read and copying
-// here would allocate per call.
+// segmentsSnapshot returns the log's segment slice. It returns the slice
+// HEADER, not a copy — deliberately, because this is on the path of every read
+// and copying here would allocate per call.
+//
+// Unexported: it returns []*segment, and segment is unexported, so no caller
+// outside this package could do anything with the result. It was `Segments`,
+// which meant layercheck had to carry a hand-written exception for the one
+// exported commitLog method deliberately kept off the CommitLog interface — and
+// the reason written there ("nothing outside this package can do anything with
+// the result") was equally an argument for not exporting it at all.
 //
 // That choice puts an obligation on the other side, and it is the one thing to
 // know before changing the segment set: callers index the returned slice WITHOUT
@@ -2381,7 +2389,7 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 // the shared array: append can only touch indices at or past len(l.segments),
 // and a snapshot's length is fixed when it is taken, so no reader ever indexes
 // there.
-func (l *commitLog) Segments() []*segment {
+func (l *commitLog) segmentsSnapshot() []*segment {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.segments

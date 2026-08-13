@@ -49,7 +49,7 @@ func TestBufReaderForwardsTheBackingsEndOfData(t *testing.T) {
 	require.NoError(t, err)
 	l.SetHighWatermark(offsets[0])
 
-	seg := l.Segments()[0]
+	seg := l.segmentsSnapshot()[0]
 	var b bufReader
 	b.reset(seg, 0)
 

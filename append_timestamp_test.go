@@ -24,7 +24,7 @@ func TestAppendStampsMissingTimestamps(t *testing.T) {
 		require.NoError(t, err)
 	}
 	after := time.Now().UnixNano()
-	segs := l.Segments()
+	segs := l.segmentsSnapshot()
 	require.GreaterOrEqual(t, len(segs), 3, "need several sealed segments")
 	for i, seg := range segs {
 		require.GreaterOrEqual(t, seg.FirstWriteTime(), before, "segment %d first write time", i)
@@ -54,6 +54,6 @@ func TestAppendStampsMissingTimestamps(t *testing.T) {
 	// fresh segment depends on how many bytes a record happens to occupy, which
 	// is not what this test is about — asserting an exact count made it fail when
 	// the frame header grew by four bytes.
-	require.GreaterOrEqual(t, len(l.Segments()), len(segs),
+	require.GreaterOrEqual(t, len(l.segmentsSnapshot()), len(segs),
 		"no segment may be deleted by age retention")
 }

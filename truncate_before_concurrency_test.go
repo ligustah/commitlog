@@ -15,7 +15,7 @@ import (
 // Retention is background work, and a log that stops serving for the duration of
 // it is not doing background work. TruncateBefore held l.mu across every segment
 // close, every unlink and the whole boundary rewrite, and every reader takes that
-// same lock through Segments() — so one truncation was a hard stop for the whole
+// same lock through segmentsSnapshot() — so one truncation was a hard stop for the whole
 // log. Reported downstream as a 10-minute test timeout whose stack was one
 // truncator inside a Windows FlushFileBuffers with everyone else queued behind
 // it.
@@ -70,7 +70,7 @@ func TestReadsAreServedWhileATruncationRuns(t *testing.T) {
 			default:
 			}
 			// A read that actually resolves a segment: NewReader goes through
-			// Segments(), which is the RLock the truncation was starving.
+			// segmentsSnapshot(), which is the RLock the truncation was starving.
 			r, err := l.NewReader(From(l.OldestOffset()), Uncommitted())
 			if err != nil {
 				continue // the floor moved out from under it; not what we measure
@@ -217,7 +217,7 @@ func TestATruncationDoesNotLoseASegmentRolledUnderIt(t *testing.T) {
 // trim, and this asserts it against a SNAPSHOT rather than by timing.
 //
 // findSegment resolves through the slice a reader is holding, not through
-// l.segments, and Segments() hands out the header — so a reader that took its
+// l.segments, and segmentsSnapshot() hands out the header — so a reader that took its
 // snapshot before a truncation published still reaches the boundary after the
 // truncation has unlinked it. Without the link that segment is gone with no
 // replacement, which reads as "retention collected these", and findSegment
@@ -248,7 +248,7 @@ func TestAStaleSegmentSnapshotFollowsATrimmedBoundary(t *testing.T) {
 	}
 	l.SetHighWatermark(last)
 
-	segs := l.Segments()
+	segs := l.segmentsSnapshot()
 	require.GreaterOrEqual(t, len(segs), 4, "need segments below and above the boundary")
 	boundary := segs[1]
 	require.Greater(t, boundary.LastOffset(), boundary.BaseOffset,
@@ -258,7 +258,7 @@ func TestAStaleSegmentSnapshotFollowsATrimmedBoundary(t *testing.T) {
 	cut := boundary.BaseOffset + 1
 
 	// The snapshot, taken before the truncation. This is the reader.
-	stale := l.Segments()
+	stale := l.segmentsSnapshot()
 
 	require.NoError(t, l.TruncateBefore(cut))
 

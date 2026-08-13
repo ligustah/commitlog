@@ -13,7 +13,7 @@ import (
 
 // A segment slice handed to a reader must never be written to again.
 //
-// Segments() returns the slice HEADER, not a copy — deliberately, because it is
+// segmentsSnapshot() returns the slice HEADER, not a copy — deliberately, because it is
 // called on the path of every read and copying there would allocate per call.
 // The cost of that choice is an obligation on the other side: whoever changes
 // the segment set publishes a NEW array rather than writing into the one
@@ -72,7 +72,7 @@ func TestRetentionNeverWritesIntoASliceAReaderIsHolding(t *testing.T) {
 					return
 				default:
 				}
-				snapshot := l.Segments()
+				snapshot := l.segmentsSnapshot()
 				for _, seg := range snapshot {
 					_ = seg.BaseOffset
 					_ = seg.LastOffset()

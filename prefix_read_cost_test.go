@@ -155,7 +155,7 @@ func TestPrefixReadCostProfile(t *testing.T) {
 			// Guard against a vacuous measurement: with at most one hit per
 			// segment there is nothing for a budget to coalesce, and a flat
 			// profile would say nothing about the setting.
-			segs := l.Segments()
+			segs := l.segmentsSnapshot()
 			require.Greater(t, len(want), len(segs),
 				"need more hits (%d) than segments (%d), or coalescing has nothing to do",
 				len(want), len(segs))
