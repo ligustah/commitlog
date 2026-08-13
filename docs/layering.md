@@ -10,15 +10,21 @@ not as a field, not as a parameter. The script carries the two halves of the
 stack as explicit file lists, and a non-test `.go` file in neither half is an
 error, so a new file cannot escape the rule by simply not being mentioned.
 
-These still hold and are worth stating, though only the first is machine-checked:
+Every row below is checked by something, not asserted:
 
-| from → to | refs |
-|---|---|
-| lower half → `*commitLog` | 0 (enforced) |
-| `index.go` → `*segment` | 0 |
-| `segment.go` → `*Reader` | 0 |
-| `segment.go` → cleaners | 0 |
-| `compress/` → commitlog | 0 (compiler-enforced) |
+| from → to | refs | by |
+|---|---|---|
+| lower half → `*commitLog` | 0 | layercheck |
+| `index.go` → `*segment` | 0 | layercheck |
+| `segment.go` → `*Reader` | 0 | layercheck |
+| `segment.go` → cleaners | 0 | layercheck |
+| `compress/` → commitlog | 0 | the compiler |
+| exported `*commitLog` methods off `CommitLog` | 0 (bar `Segments`) | layercheck |
+
+The three middle rows were left un-enforced when the `*commitLog` row was
+mechanized, which put unchecked counts in a table that now looked enforced —
+the same state that let the original metric rot. They are real direction claims
+(`index.go` naming `*segment` IS an upward reference), so each got its own rule.
 
 The cleaners are written against `[]*segment` and never against the log, which
 is why compaction policy can be tested without one.

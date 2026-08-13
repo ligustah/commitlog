@@ -87,7 +87,55 @@ for f in $LOWER; do
 	fi
 done
 
-# 3. Every exported method on *commitLog must be ON the CommitLog interface.
+# 3. The stack's internal steps, not just the top one.
+#
+# docs/layering.md listed these three beside the *commitLog row as evidence for
+# the same claim. Only that row got mechanized when the metric was replaced,
+# which left three un-checked counts sitting in a table that now looked
+# enforced — the precise state that let the first one rot for months. Each is a
+# real direction claim (index.go naming *segment IS an upward reference, unlike
+# the receiver-counting it sat next to), so each is worth a rule of its own.
+#
+# Format: file:pattern:description. The pattern is a pointer type for the same
+# reason as rule 2 — prose names these types legitimately.
+STEPS="
+index.go:\*segment\b:the offset index must not know about segments
+segment.go:\*Reader\b:a segment must not know about readers
+segment.go:\*(compactCleaner|deleteCleaner)\b:a segment must not know about compaction policy
+"
+# Iterated LINE by line, not word by word: the descriptions contain spaces, and
+# `for step in $STEPS` splits on them — which turned one rule into twenty
+# nonsense ones named "must", "not", "know".
+#
+# Collected into a variable rather than looped over directly, because the
+# obvious `printf ... | while read` puts the loop in a SUBSHELL, where setting
+# fail=1 changes nothing the parent can see. That version reports every
+# violation and then exits 0 — a check that prints its own failure and passes,
+# which is worse than the word-splitting bug it replaced.
+step_violations=$(
+	printf '%s\n' "$STEPS" | while IFS= read -r step; do
+		[ -n "$step" ] || continue
+		f=${step%%:*}
+		rest=${step#*:}
+		pat=${rest%%:*}
+		why=${rest#*:}
+		if [ ! -f "$f" ]; then
+			echo "layercheck: $0 checks $f, which does not exist"
+			continue
+		fi
+		hits=$(grep -nE "$pat" "$f" || true)
+		if [ -n "$hits" ]; then
+			echo "layercheck: $why ($f):"
+			echo "$hits" | sed 's/^/  /'
+		fi
+	done
+)
+if [ -n "$step_violations" ]; then
+	echo "$step_violations"
+	fail=1
+fi
+
+# 4. Every exported method on *commitLog must be ON the CommitLog interface.
 #
 # New returns the INTERFACE, so a method missing from it is not public in any
 # useful sense: the only way to reach it is a structural type assertion, and
