@@ -172,6 +172,15 @@ jobs:
       # doc block stranded on an unrelated function.
       - name: docdrift
         run: bash hack/docdrift.sh
+      # docs/layering.md describes a stack the compiler cannot enforce, since
+      # everything outside compress/ is one package. It used to defend itself
+      # with a count of files naming *commitLog, which drifted from six to ten
+      # while the layering stayed intact — the count was measuring how the
+      # methods are spread across files, not which way the dependencies point.
+      # This checks the direction, and fails on a new file that is in neither
+      # half rather than letting it escape the rule by not being mentioned.
+      - name: layercheck
+        run: bash hack/layercheck.sh
       # Static check of the workflows themselves: bad expressions, unknown
       # action inputs, and — via shellcheck, preinstalled on the runner — the
       # `run:` blocks. Pinned and fetched through the module proxy rather than

@@ -4,19 +4,43 @@ Everything except `compress/` is ONE Go package. Nothing here is enforced by the
 compiler: any file can reach any other, and the layering below survives on
 discipline alone. That is the reason to write it down.
 
-Measured rather than asserted — these are reference counts over the tree, not
-intentions:
+Checked rather than asserted, by `hack/layercheck.sh` in CI. The rule is one
+sentence: **nothing below the log may name `*commitLog`** — not as a receiver,
+not as a field, not as a parameter. The script carries the two halves of the
+stack as explicit file lists, and a non-test `.go` file in neither half is an
+error, so a new file cannot escape the rule by simply not being mentioned.
+
+These still hold and are worth stating, though only the first is machine-checked:
 
 | from → to | refs |
 |---|---|
+| lower half → `*commitLog` | 0 (enforced) |
 | `index.go` → `*segment` | 0 |
 | `segment.go` → `*Reader` | 0 |
 | `segment.go` → cleaners | 0 |
-| `compact_cleaner.go` → `*commitLog` | 0 |
-| `compress/` → commitlog | 0 |
+| `compress/` → commitlog | 0 (compiler-enforced) |
 
-`*commitLog` is named by six files. The cleaners are not among them: compaction
-policy is written against `[]*segment`, never against the log.
+The cleaners are written against `[]*segment` and never against the log, which
+is why compaction policy can be tested without one.
+
+### The metric this replaced, and why it could not fail
+
+An earlier version of this doc defended itself with "`*commitLog` is named by
+six files". That number is now ten, and **nothing was violated in between**.
+Almost every hit is a `func (l *commitLog)` method DECLARATION, and a file full
+of commitLog methods is by definition part of the top layer — so the count was
+measuring how the log's 90-odd methods happen to be spread across files, which
+is filing, not layering. It would have read exactly the same on a tree where
+`index.go` had started calling into the log.
+
+`segment.go` shows the same trap from the other side: it names `SegmentStore`
+and `tier` in six places, which looks like the segment layer reaching up into
+the tier layer. It is the opposite — `SegmentStore` is an INTERFACE the segment
+is handed, so the arrow points down and this is the one place the repo does
+dependency inversion on purpose.
+
+The lesson generalises past this file: a count that a violation would not
+change is not a measurement, and writing it in a table makes it look like one.
 
 ## The stack
 
