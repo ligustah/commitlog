@@ -1152,8 +1152,14 @@ run_guard "only a move resolves a double claim" manifest.go   '	case a.obj.Moved
 # segments — and both halves named the log and the index only, so neither could
 # cover for the other. Guarded separately for that reason: each half is
 # removable on its own and the other does not notice.
-run_guard "a manifest block table is live" tier_state.go   '			if o.BlocksKey != "" {' '			if false {'   '^TestABlockTableIsNotGarbage$'
-run_guard "a segment block table is live" tier_state.go   '		if s.blocksKey != "" {' '		if false {'   '^TestABlockTableTheLogIsReadingIsNotGarbage$'
+#
+# The two lists became objectKeys and objectKeysLocked when the superseded-object
+# list was collapsed, and the neutralization moved with them: dropping the third
+# argument still compiles, because nonEmpty is variadic. That is the same "which
+# objects does this segment consist of" question the two halves each answer in
+# their own representation, so they still have to be guarded one at a time.
+run_guard "a manifest block table is live" tier_state.go   '	return nonEmpty(o.LogKey, o.IndexKey, o.BlocksKey)' '	return nonEmpty(o.LogKey, o.IndexKey)'   '^TestABlockTableIsNotGarbage$'
+run_guard "a segment block table is live" segment.go   '	return nonEmpty(s.storeKey, s.indexKey, s.blocksKey)' '	return nonEmpty(s.storeKey, s.indexKey)'   '^TestABlockTableTheLogIsReadingIsNotGarbage$'
 
 # Retention is per tier, and deletion is a PREFIX operation on the whole log. A
 # newer tier deleting while an older one still holds something does not shorten
