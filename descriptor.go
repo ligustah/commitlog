@@ -401,14 +401,32 @@ func reconcileDescriptor(opts Options, isNew bool) (*IdentityConflict, error) {
 	// still describes the log after a legitimate compression or segment-size
 	// change.
 	//
-	// The republish carries `want`, whose Identity is the CALLER's — so it must
-	// not run while a conflict stands, or a plain compression change would
-	// silently re-stamp the log and destroy the disagreement this open just
-	// found. That is the adopt-on-open failure arriving by the back door, and
-	// it would only show up on the subset of opens that also retune a codec.
+	// What gets published is the STORED record with those two fields refreshed
+	// on top — never `want`, whose Identity is the CALLER's. Publishing `want`
+	// makes the same field wrong in both directions, and the two look nothing
+	// alike from here:
+	//
+	//   - a caller with a DIFFERENT identity re-stamps the log and destroys the
+	//     disagreement this open just found — adopt-on-open by the back door;
+	//   - a caller with NO identity publishes an empty one, which renders as no
+	//     identity line at all and ERASES a stamp someone else relies on. That
+	//     is the worse half: identity exists to stop unstamped copies existing,
+	//     and this manufactures one.
+	//
+	// Neither is reachable once the record is built from `got`, because the
+	// stored identity is then carried by construction rather than by a
+	// condition somebody has to remember to extend. The gating fields are equal
+	// here (enforced passed), so `got` and `want` differ only in the two fields
+	// refreshed below and the one that must not be taken.
+	fresh := got
+	fresh.Compression = want.Compression
+	fresh.MaxSegmentBytes = want.MaxSegmentBytes
+	// The conflict gate stays, for a reason that outlives the erase: while the
+	// caller and the log disagree about what this log IS, the caller's opinion
+	// about how to encode it is not one to act on either.
 	if conflict == nil &&
 		(got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes) {
-		return nil, publishDescriptor(opts, want)
+		return nil, publishDescriptor(opts, fresh)
 	}
 	return conflict, nil
 }

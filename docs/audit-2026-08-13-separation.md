@@ -115,6 +115,28 @@ That requirement shaped the design more than the storage did:
   disagreement. That is adopt-on-open by the back door, firing only on the
   subset of opens that also retune something else. Guarded and mutation-tested.
 
+**Then the same republish turned out to be wrong in the other direction**, found
+by re-reading v0.80.0 rather than by a failure. The guard above tests
+`conflict == nil`, and a caller with NO identity conflicts with nothing — by
+design, since it has no opinion to disagree with. So the republish ran, carrying
+that caller's empty identity, which `renderDescriptor` omits entirely. The stamp
+did not become wrong; it stopped existing.
+
+The two halves look nothing alike from inside the function and are the same
+mistake: the record being published was built from the caller's options, so
+every field in it is the caller's answer, including the one this function had
+just decided to *report* rather than adopt. The fix is to build it from the
+stored record and refresh only the two fields the republish exists to refresh —
+then the stored identity is carried by construction, and the next field added
+cannot reopen this by not being mentioned in a condition.
+
+Worth recording that the erase is the worse half. The whole argument for 3a is
+that an unstamped copy must not be a state that occurs, because durable_streams
+cannot reclaim one — unstamped and stale look identical and only one should be
+destroyed. An erase manufactures exactly that, from a correctly stamped log, on
+an open that did nothing wrong. The feature shipped with a path that produced
+the condition it was built to eliminate.
+
 ### 3b. Two reserved-name lists guard one directory, from two repos
 
 commitlog refuses names it owns (`logOwnedFileNames`, `logOwnedFileSuffixes`);

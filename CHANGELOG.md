@@ -5,6 +5,41 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **An open by a caller with no identity erased the stamp.** The republish that
+  keeps `Compression` and `MaxSegmentBytes` current built its record from the
+  caller's options, so it carried the caller's `Identity`. v0.80.0 guarded the
+  case where those bytes are *different* — a conflicted open must not re-stamp
+  the log — and missed the case where they are *absent*.
+
+  A caller that does not use identity conflicts with nothing, deliberately: it
+  has no opinion to disagree with. So the guard let the republish through, and
+  it published an empty identity, which `renderDescriptor` omits entirely. The
+  stamp did not become wrong; it stopped existing. Any tool that opens a stamped
+  log without using identity and retunes a codec or a segment size did this — a
+  repair utility, a compaction job, another service on the same directory.
+
+  That is the worse half of the two. `Options.Identity` exists so an unstamped
+  copy is not a state that occurs, because downstream cannot reclaim one: an
+  unstamped copy and a stale one look identical and only one of them should be
+  destroyed. Erasing a stamp manufactures precisely that, from a log that was
+  correctly stamped, on an open that did nothing wrong.
+
+  The republish now refreshes those two fields **on top of the stored record**
+  instead of publishing the caller's. The stored identity is then carried by
+  construction rather than by a condition someone has to remember to extend, so
+  neither direction is reachable. The conflict term stays for an independent
+  reason: while the caller and the log disagree about what the log is, its
+  opinion about how to encode it is not one to act on.
+
+  Found by re-reading v0.80.0 rather than from a failure. The nearest existing
+  test opened a stamped log with no identity and asserted no conflict, but never
+  checked that the stamp survived — and without an option change no write path
+  runs, so it passed either way.
+
 ## v0.80.1 — 2026-08-13
 
 ### Fixed

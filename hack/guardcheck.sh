@@ -1432,6 +1432,15 @@ run_guard "an oversized store descriptor is refused, not allocated" descriptor.g
 run_guard "a conflicted identity survives an unrelated retune" descriptor.go   '	if conflict == nil &&
 		(got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes) {' '	if got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes {'   '^TestAConflictIsNotErasedByAnUnrelatedSettingChange$'
 
+# The other direction of the same republish. Building the published record from
+# `want` lets a caller with NO identity publish an empty one, which renders as no
+# identity line at all and erases the stamp -- manufacturing the unstamped copy
+# the feature exists to prevent. Building it from `got` carries the stored
+# identity by construction, so neither direction is reachable by forgetting to
+# extend a condition. Neutralized to `want`, which compiles and is what the code
+# said before.
+run_guard "a stamp survives an open by a caller with no identity" descriptor.go   '	fresh := got' '	fresh := want'   '^TestAStampSurvivesAnOpenByACallerThatHasNoIdentity$'
+
 # The identity is the caller's opaque bytes and the descriptor is line-based, so
 # hex is load-bearing rather than a formatting choice: raw bytes would let a
 # caller's newline write a descriptor that does not parse back, turning a legal

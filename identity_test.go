@@ -143,6 +143,59 @@ func TestAConflictIsNotErasedByAnUnrelatedSettingChange(t *testing.T) {
 		"the stored identity was overwritten by the republish")
 }
 
+// The other half of the same republish, and the half that was missed: a caller
+// with NO identity. It conflicts with nothing by design — it has no opinion to
+// disagree with — so the conflict guard above lets the republish through, and
+// the record it published carried the caller's empty identity. renderDescriptor
+// omits an empty identity entirely, so the stamp did not become wrong, it
+// ceased to exist.
+//
+// That is worse than the adopt case it sits next to. Options.Identity exists to
+// stop unstamped copies from being a state that occurs at all, because
+// durable_streams cannot reclaim one: an unstamped copy and a stale one look
+// identical and only one should be destroyed. An erase here manufactures
+// exactly that, from a log that was correctly stamped, on an open that did
+// nothing wrong.
+//
+// Reachable by any tool that opens a stamped log without using identity and
+// retunes a codec or a segment size — a repair utility, a compaction job, a
+// different service on the same directory.
+func TestAStampSurvivesAnOpenByACallerThatHasNoIdentity(t *testing.T) {
+	dir := tempDir(t)
+	l, err := New(Options{
+		Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20,
+		Identity: []byte("stream-7"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	// No identity, and a non-gating change so the republish actually fires.
+	// Without the change this is TestOpeningAStampedLogWithNoIdentityIsNotA-
+	// Conflict, which passes either way because no write path is taken.
+	l2, err := New(Options{
+		Name: "identity", Path: dir, MaxSegmentBytes: 2 << 20,
+	})
+	require.NoError(t, err)
+	require.Nil(t, l2.IdentityConflict(), "a caller with no identity has nothing to conflict with")
+	require.NoError(t, l2.Close())
+
+	body, err := os.ReadFile(filepath.Join(dir, descriptorFileName))
+	require.NoError(t, err)
+	require.Contains(t, string(body), "identity="+"73747265616d2d37",
+		"a caller with no identity erased the stamp by republishing its own empty one")
+
+	// And the refresh still did its job — this must not be fixed by declining
+	// to republish at all.
+	require.Contains(t, string(body), "max_segment_bytes=2097152",
+		"the non-gating refresh stopped happening, which is not the fix")
+
+	// The owner sees no conflict on its next open, which is the outcome that
+	// actually matters: an erased stamp reads as Stored == nil, i.e. "these
+	// bytes belong to nobody".
+	l3 := openWithIdentity(t, dir, []byte("stream-7"), false)
+	require.Nil(t, l3.IdentityConflict(), "the owner was told its own log is not its own")
+}
+
 // An unidentified log is a different fact from one belonging to someone else,
 // and they warrant opposite actions: unidentified data may still be the
 // caller's, data stamped for another owner is not. Stored == nil is how a
