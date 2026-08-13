@@ -1085,8 +1085,23 @@ func (s *segment) lastFrameInBlock(start int64) (*entry, error) {
 // this, the segment would take lastOffset/NextOffset from the stale index and
 // under-report its tail: a seek (index) and a sequential scan (physical log)
 // would disagree on which record an offset names, and the next append could
-// land on an existing un-indexed record. Run on open for the active segment;
-// a no-op when the index already covers the log.
+// land on an existing un-indexed record.
+//
+// Run on open for EVERY segment, not just the active one — that was the v0.79.0
+// fix, and the doc said "the active segment" for as long as it was true. A
+// sealed segment whose index stopped short was repaired by nothing and answered
+// as if the records past it did not exist; one lost entry cost 56 of 60.
+//
+// A no-op when the index already covers the log, and that is what makes running
+// it everywhere affordable: the walk starts at the last indexed frame's end and
+// runs while that is below the file size, so a healthy segment executes the loop
+// body zero times and reads no log bytes. See docs/startup-cost.md.
+//
+// committedThrough is a FLOOR on what may be discarded, and the right value
+// differs by segment: l.hw for the active one, whose torn tail is an ordinary
+// unclean shutdown, and the NEXT segment's base offset minus one for a sealed
+// one, where dropping below that would open a hole between two segments that
+// both still exist.
 func (s *segment) reconcileIndexTail(committedThrough int64) error {
 	if s.Index == nil {
 		return nil // offloaded: index is remote and the segment is immutable
