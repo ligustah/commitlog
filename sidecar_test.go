@@ -34,7 +34,18 @@ func TestASidecarNameCannotReachOutsideTheLog(t *testing.T) {
 	bystander := filepath.Join(parent, "bystander")
 	require.NoError(t, os.WriteFile(bystander, []byte("not the log's"), 0o600))
 
-	for _, name := range []string{"../bystander", `..\bystander`, "sub/x", "..", "."} {
+	// The last three carry ClientSidecarPrefix, and they are the ones that keep
+	// this test about traversal. Once a sidecar name has to carry the prefix,
+	// every name above is refused for lacking it — so the traversal check could
+	// be deleted outright and the first five lines would stay green. "client-"
+	// is a prefix of "client-/../../bystander" too, and that one Cleans to a
+	// file in the log directory's PARENT.
+	for _, name := range []string{
+		"../bystander", `..\bystander`, "sub/x", "..", ".",
+		ClientSidecarPrefix + "/../../bystander",
+		ClientSidecarPrefix + `\..\..\bystander`,
+		ClientSidecarPrefix + "sub/x",
+	} {
 		require.ErrorIs(t, l.PutSidecar(name, []byte("x")), ErrInvalidSidecarName, "put %q", name)
 		_, err := l.GetSidecar(name)
 		require.ErrorIs(t, err, ErrInvalidSidecarName, "get %q", name)
