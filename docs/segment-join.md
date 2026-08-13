@@ -1,9 +1,9 @@
 # Joining undersized segments
 
-The design behind `clean_join.go`. It exists because the TODO it replaces
-(`compact_cleaner.go`, "join segments that are below the bytes limit") read as a
-small piece of work and is not one, and because the reason it is not is worth
-writing down once rather than rediscovering.
+The design behind `clean_join.go`. It exists because the TODO it replaced — in
+`compact_cleaner.go`, "join segments that are below the bytes limit", since
+deleted — read as a small piece of work and is not one, and because the reason
+it is not is worth writing down once rather than rediscovering.
 
 Every question this document once left open is now settled; they are recorded
 under "Settled" below, with the reasoning, because in each case the losing option

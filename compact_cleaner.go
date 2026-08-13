@@ -189,24 +189,11 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 
 	// Write new segments. Skip the last segment since we will not compact it.
 	//
-	// TODO: join adjacent segments that have shrunk below the bytes limit.
-	// Genuinely unbuilt — consolidateSegments is a different thing, rewriting
-	// blocks WITHIN one segment. Compaction only ever shrinks segments, so a
-	// long-lived compacted log accumulates small ones that each still cost a
-	// file set and a mapping; durable_streams reports 336-segment logs.
-	//
-	// Not done here because a join is not a rewrite. A segment is IDENTIFIED by
-	// its base offset, so merging two means one base offset ceases to exist and
-	// the file names, tier manifest keys, sidecars and reader search must all
-	// agree about that at one moment. The rewrite path never faces this: a
-	// replacement keeps its predecessor's base offset, which is exactly why it
-	// can swap under live readers.
-	//
-	// docs/segment-join.md carries the design: the hazards, an ordered sketch,
-	// and the one constraint that is already settled — the replacement link
-	// itself tolerates a differing base offset (every consumer bounds only from
-	// above), but it becomes MANY-TO-ONE, so the l.segments splice has to retire
-	// both inputs in a single critical section or LocalBytes double-counts.
+	// Joining the small segments compaction leaves behind is NOT done here: it
+	// is its own stage, in clean_join.go, reached from cleanPass. A join retires
+	// a base offset, and a base offset is a segment's identity — so it can never
+	// be a rewrite, which is the whole reason it lives apart. See the header of
+	// clean_join.go, and docs/segment-join.md for the hazards.
 	//
 	// Classify every sealed segment, then SPEND the rewrite budget in
 	// DROP-DENSITY order — most droppable records first. Both the choice of
