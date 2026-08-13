@@ -3,12 +3,62 @@ package commitlog
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ligustah/commitlog/compress"
 	"github.com/stretchr/testify/require"
 )
+
+// Every field of the descriptor survives a render and a parse.
+//
+// renderDescriptor and set() are an enumeration of the struct's fields, kept in
+// two places, by hand — the same shape as the reserved-name lists the sidecar
+// prefix replaced, and it rots the same way. Every other test in this file goes
+// through New and Options, so each covers only the fields it happens to set;
+// none of them can notice a field that persists nowhere.
+//
+// The three ways it breaks, and what each one does:
+//
+//   - in the struct, not in renderDescriptor: silently not persisted. The
+//     reopen then reads back a zero value for it, so if it is one of the fields
+//     reconcileDescriptor keeps current, "the log disagrees with the caller" is
+//     true on EVERY open and the descriptor is rewritten every time.
+//   - in the struct, not in set(): renderDescriptor writes a key its own reader
+//     refuses by design, so the build that wrote the file cannot open it.
+//   - in both, wrong format either side: the value comes back changed.
+//
+// Completeness of the fixture is checked by REFLECTION and its values are
+// written by hand, because those need different things. Reflection is what
+// makes a newly added field appear here without anyone remembering to add it;
+// hand-written values are what keep each one legal — Compression has to be a
+// codec compress.Parse accepts, and a generic "set it to something non-zero"
+// would render a value that fails to parse and report the wrong defect.
+func TestADescriptorRoundTripsEveryField(t *testing.T) {
+	full := descriptor{
+		Compact:                   true,
+		CompactMinAge:             90 * time.Minute,
+		CompactTombstoneRetention: 36 * time.Hour,
+		Compression:               compress.Zstd,
+		MaxSegmentBytes:           12345,
+		Identity:                  []byte{0xde, 0xad, 0xbe, 0xef},
+	}
+
+	v := reflect.ValueOf(full)
+	for i := range v.NumField() {
+		require.False(t, v.Field(i).IsZero(),
+			"descriptor.%s is at its zero value in this fixture, so the round trip below "+
+				"cannot tell whether it is persisted at all — give it a distinctive value, "+
+				"and add it to renderDescriptor and set() if it is not there yet",
+			v.Type().Field(i).Name)
+	}
+
+	got, err := parseDescriptor(strings.NewReader(renderDescriptor(full)))
+	require.NoError(t, err, "the descriptor this build writes is one it cannot read")
+	require.Equal(t, full, got, "a descriptor field did not survive the round trip")
+}
 
 // appendOne writes a record so the directory holds a real log.
 func appendOne(t *testing.T, l CommitLog) {

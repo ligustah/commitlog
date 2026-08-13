@@ -1486,6 +1486,20 @@ run_guard "a stamp survives an open by a caller with no identity" descriptor.go 
 # and round-trips for every identity that happens to contain no separator.
 run_guard "a client identity cannot break the descriptor format" descriptor.go   '		fmt.Fprintf(&b, "identity=%s\n", hex.EncodeToString(d.Identity))' '		fmt.Fprintf(&b, "identity=%s\n", string(d.Identity))'   '^TestAnIdentityWithFileFormatBytesRoundTrips$'
 
+# renderDescriptor and set() enumerate the descriptor's fields by hand, in two
+# places. Every other descriptor test goes through New and Options and so covers
+# only the fields it happens to set; a field that persists NOWHERE is invisible
+# to all of them. The three guards below are the three ways the pair rots, and
+# they are registered separately because each produces a different failure:
+# dropping a field from the writer loses it silently, dropping it from the
+# reader makes the file unreadable by the build that wrote it, and the
+# conditional identity line is a fourth mechanism again.
+run_guard "every descriptor field is written" descriptor.go   '	fmt.Fprintf(&b, "max_segment_bytes=%d\n", d.MaxSegmentBytes)' '	_ = d.MaxSegmentBytes'   '^TestADescriptorRoundTripsEveryField$'
+
+run_guard "every descriptor field is read back" descriptor.go   '	case "max_segment_bytes":' '	case "max_segment_bytes_unreachable":'   '^TestADescriptorRoundTripsEveryField$'
+
+run_guard "a descriptor identity is written when it is set" descriptor.go   '	if len(d.Identity) > 0 {' '	if false {'   '^TestADescriptorRoundTripsEveryField$'
+
 # An input a join did not rename over must leave WITH a link. Marked as left and
 # carrying none is the retention case — reader, skip me, those records are gone —
 # and taking that path here skips records sitting in the result. Neutralized by
