@@ -281,6 +281,38 @@ type offloadMeta struct {
 	BlockMode      bool
 }
 
+// offloadMetaLocked is what this segment currently is, as an offloadMeta: the
+// keys its bytes are under and the boundaries that place it without reading it.
+//
+// The caller must hold at least s.RLock. It is spelled out in the name because
+// both callers already hold it for their own reasons and taking it here would
+// deadlock them.
+//
+// This exists because there are two callers and they had written the same ten
+// assignments out separately — tierState, publishing what the log believes, and
+// moveSegment, carrying a segment to another tier. A field added to offloadMeta
+// has to reach both, and one of them silently not carrying it is a manifest
+// that describes the segment wrongly.
+//
+// The upload paths do NOT use it, and the difference is real rather than an
+// omission: uploadTo and uploadReplacement name objects they have just written,
+// with a size they have just measured, so their keys and PhysPosition are not
+// this segment's current ones. They are describing what they made, not what is.
+func (s *segment) offloadMetaLocked() offloadMeta {
+	return offloadMeta{
+		LogKey:         s.storeKey,
+		IndexKey:       s.indexKey,
+		BlocksKey:      s.blocksKey,
+		FirstOffset:    s.firstOffset,
+		LastOffset:     s.lastOffset,
+		FirstWriteTime: s.firstWriteTime,
+		LastWriteTime:  s.lastWriteTime,
+		Position:       s.position,
+		PhysPosition:   s.physPosition,
+		BlockMode:      s.blockMode,
+	}
+}
+
 // uploadTo uploads the segment's log bytes to store under key and returns the
 // metadata naming what it wrote. The segment must be sealed and not already
 // offloaded. When cache is non-nil (tiered storage, option 2) it also uploads

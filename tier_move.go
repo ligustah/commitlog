@@ -40,18 +40,7 @@ func (l *commitLog) moveSegment(s *segment, dst Tier) ([]pendingReclaim, error) 
 	s.RLock()
 	src := s.tier
 	srcStore := s.store
-	meta := offloadMeta{
-		LogKey:         s.storeKey,
-		IndexKey:       s.indexKey,
-		BlocksKey:      s.blocksKey,
-		FirstOffset:    s.firstOffset,
-		LastOffset:     s.lastOffset,
-		FirstWriteTime: s.firstWriteTime,
-		LastWriteTime:  s.lastWriteTime,
-		Position:       s.position,
-		PhysPosition:   s.physPosition,
-		BlockMode:      s.blockMode,
-	}
+	meta := s.offloadMetaLocked()
 	s.RUnlock()
 
 	if srcStore == nil {

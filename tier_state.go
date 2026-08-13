@@ -136,20 +136,7 @@ func (l *commitLog) tierState() ([]TierObject, error) {
 	for _, s := range l.segments {
 		s.RLock()
 		if s.store != nil {
-			out = append(out, TierObject{
-				BaseOffset:     s.BaseOffset,
-				Tier:           s.tier,
-				LogKey:         s.storeKey,
-				IndexKey:       s.indexKey,
-				BlocksKey:      s.blocksKey,
-				FirstOffset:    s.firstOffset,
-				LastOffset:     s.lastOffset,
-				FirstWriteTime: s.firstWriteTime,
-				LastWriteTime:  s.lastWriteTime,
-				Position:       s.position,
-				PhysPosition:   s.physPosition,
-				BlockMode:      s.blockMode,
-			})
+			out = append(out, s.offloadMetaLocked().tierObject(s.BaseOffset, s.tier))
 		}
 		s.RUnlock()
 	}
