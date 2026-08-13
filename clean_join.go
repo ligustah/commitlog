@@ -203,19 +203,7 @@ func joinOne(
 	if err != nil {
 		return nil, nil, err
 	}
-	// Disposed of on every way out until it is installed, and by the same
-	// discriminator the two rewrite paths use: Replace clears the suffix at the
-	// moment the copy stops being a copy and becomes the segment, so a suffix
-	// still set means deleting it unlinks nothing anyone can reach. Left behind,
-	// it holds a handle and an index mapping until the process exits.
-	defer func() {
-		joined.RLock()
-		working := joined.suffix != ""
-		joined.RUnlock()
-		if working {
-			joined.Delete() // nolint: errcheck — best effort on a failure path
-		}
-	}()
+	defer joined.dropIfUnpublished()
 	bw.reset(joined)
 	// One scanner per input, all closed AFTER the install. Closing each as its
 	// scan ends would be tidier and is wrong: what Close releases is the tiered

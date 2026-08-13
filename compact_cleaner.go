@@ -825,32 +825,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	if err != nil {
 		return nil, 0, err
 	}
-	// The working copy is this function's to dispose of on every way out of it.
-	// It is an open segment with its own files and its own index mapping, and
-	// until it is installed NOTHING else can reach it — the log does not name it
-	// and the source does not link to it — so a return that leaves it behind
-	// holds a handle and a mapping until the process exits and strands its
-	// .cleaned artifacts on disk. Only the scan-failure path used to do this by
-	// hand, which left every other error return leaking one.
-	//
-	// The suffix decides whether disposal is still the right act. Past Replace's
-	// renames this same object owns the SOURCE's files under the source's names,
-	// and deleting it there would unlink the installed rewrite; Replace clears
-	// the suffix at exactly that point, and a Replace that failed before it puts
-	// the files back under the working names. So a suffix that is still set
-	// means the copy is still only a copy.
-	disposed := false
-	defer func() {
-		if disposed {
-			return
-		}
-		cleaned.RLock()
-		working := cleaned.suffix != ""
-		cleaned.RUnlock()
-		if working {
-			cleaned.Delete() // nolint: errcheck — best effort on a failure path
-		}
-	}()
+	defer cleaned.dropIfUnpublished()
 	bw.reset(cleaned)
 	var (
 		ss = newSegmentScannerCache(seg, sc)
@@ -936,7 +911,6 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 
 	if cleaned.IsEmpty() {
 		// If the new segment is empty, remove it along with the old one.
-		disposed = true
 		return nil, removed, cleanupEmptySegment(cleaned, seg)
 	}
 	// After either outcome the segment's digest is refreshed with a strip
@@ -959,7 +933,6 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 	// prove it without the scan this pass just paid. (Consolidation passes
 	// are exempt: their value IS the rewrite.)
 	if removed == 0 && stripped == 0 && !consolidating {
-		disposed = true
 		if err := cleaned.Delete(); err != nil {
 			return nil, 0, err
 		}
@@ -1002,7 +975,6 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 			return nil, removed, err
 		}
 		c.superseded = append(c.superseded, reclaim...)
-		disposed = true
 		if err := cleaned.Delete(); err != nil { // the local vehicle is done
 			return nil, removed, err
 		}
@@ -1100,21 +1072,7 @@ func consolidateOne(seg *segment, bw *blockWriter, sc *blockCache) (*segment, er
 	if err != nil {
 		return nil, err
 	}
-	// The working copy is this function's to dispose of on every way out, for the
-	// reason cleanSegment states at length: until it is installed nothing else can
-	// reach it, so a return that leaves it behind holds a handle and an index
-	// mapping until the process exits and strands .cleaned artifacts on disk. The
-	// suffix is the discriminator — Replace clears it at the moment the copy stops
-	// being a copy and starts being the segment, so a suffix still set means
-	// deleting it unlinks nothing anyone can reach.
-	defer func() {
-		cleaned.RLock()
-		working := cleaned.suffix != ""
-		cleaned.RUnlock()
-		if working {
-			cleaned.Delete() // nolint: errcheck — best effort on a failure path
-		}
-	}()
+	defer cleaned.dropIfUnpublished()
 	bw.reset(cleaned)
 	ss := newSegmentScannerCache(seg, sc)
 	// Deliberately still AFTER Replace, which is where the inline defer put it

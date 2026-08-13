@@ -1265,26 +1265,20 @@ run_guard "a failed pass keeps the rewrites it installed" compact_cleaner.go   '
 # stage's segments -- the CLOSED sources of every rewrite this pass installed.
 run_guard "a partial compaction result is published" clean.go   '			return compacted, -1, err' '			return cleaned, -1, err'   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
 
-# A rewrite that failed disposes of its working copy. Neutralized by keeping the
-# suffix check and never acting on it, which is the state every error path but
-# the scan one was in: an open, mapped .cleaned segment nothing can reach.
+# A rewrite that failed disposes of its working copy. Neutralized into an empty
+# defer, which is the state every error path but the scan one was in: an open,
+# mapped .cleaned segment nothing can reach.
 #
-# Anchored on the disposed check above it, not on the bare condition:
-# consolidateOne grew the same disposal, so `if working {` now matches twice and
-# an ambiguous anchor is a SKIP rather than a failure.
-run_guard "a failed rewrite drops its working copy" compact_cleaner.go   '		if disposed {
-			return
-		}
-		cleaned.RLock()
-		working := cleaned.suffix != ""
-		cleaned.RUnlock()
-		if working {' '		if disposed {
-			return
-		}
-		cleaned.RLock()
-		working := cleaned.suffix != ""
-		cleaned.RUnlock()
-		if working && false {'   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
+# The rule itself lives in segment.dropIfUnpublished and these four call sites
+# share it. Anchored per site anyway, on the defer rather than on the helper: one
+# anchor in segment.go would prove the rule exists and stop proving that each
+# path still invokes it, which is the half that keeps getting forgotten. The two
+# in this file are told apart by the two lines below them.
+run_guard "a failed rewrite drops its working copy" compact_cleaner.go   '	defer cleaned.dropIfUnpublished()
+	bw.reset(cleaned)
+	var (' '	defer func() {}()
+	bw.reset(cleaned)
+	var ('   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
 
 # The consolidation pass must tell io.EOF from a read failure. Neutralized into
 # the loop it replaced -- `for ms, _, err := ss.Scan(); err == nil; ...` -- which
@@ -1311,23 +1305,17 @@ run_guard "a replication fetch reports damaged bytes" commitlog.go   '			if !err
 				return nil, fmt.Errorf("%w: message set at offset %d: %w",'   '^TestReadMessageSetReportsDamageRatherThanAnEmptySet$'
 
 # And the working-copy disposal on that path, which had none at all: every error
-# return left an open, mapped .cleaned segment behind. Anchored on the defer so
-# it does not collide with cleanSegment's copy above.
-run_guard "a failed consolidation drops its working copy" compact_cleaner.go   '	defer func() {
-		cleaned.RLock()
-		working := cleaned.suffix != ""
-		cleaned.RUnlock()
-		if working {' '	defer func() {
-		cleaned.RLock()
-		working := cleaned.suffix != ""
-		cleaned.RUnlock()
-		if working && false {'   '^TestConsolidationRefusesASegmentItCannotReadToTheEnd$'
+# return left an open, mapped .cleaned segment behind.
+run_guard "a failed consolidation drops its working copy" compact_cleaner.go   '	defer cleaned.dropIfUnpublished()
+	bw.reset(cleaned)
+	ss := newSegmentScannerCache(seg, sc)' '	defer func() {}()
+	bw.reset(cleaned)
+	ss := newSegmentScannerCache(seg, sc)'   '^TestConsolidationRefusesASegmentItCannotReadToTheEnd$'
 
 # The same duty on the truncation path, where the replacement is NOT yet
 # installed and so has to be dropped rather than published. Neutralized by the
 # bare return that was there, which left it open, mapped and named by nothing.
-run_guard "a failed truncate drops its replacement" commitlog.go   '		if err := snapshot[i].Delete(); err != nil {
-			dropReplacement()' '		if err := snapshot[i].Delete(); err != nil {'   '^TestAFailedTruncateDropsTheReplacementItBuilt$'
+run_guard "a failed truncate drops its replacement" commitlog.go   '		defer newSegment.dropIfUnpublished()' '		defer func() {}()'   '^TestAFailedTruncateDropsTheReplacementItBuilt$'
 
 # A committed reader reports a watermark it cannot locate. Neutralized into the
 # shape the three inline copies had: the error is dropped and the caller carries
@@ -1369,15 +1357,8 @@ run_guard "a join read failure stops the pass" clean_join.go   '				if !errors.I
 					return nil, nil, fmt.Errorf("%w: join of segment %d: %w",' '				if false && !errors.Is(err, io.EOF) {
 					return nil, nil, fmt.Errorf("%w: join of segment %d: %w",'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
 
-# The working-copy disposal on the join path. Anchored on `joined` so it does not
-# collide with the two identically-shaped defers in compact_cleaner.go.
-run_guard "a failed join drops its working copy" clean_join.go   '		joined.RLock()
-		working := joined.suffix != ""
-		joined.RUnlock()
-		if working {' '		joined.RLock()
-		working := joined.suffix != ""
-		joined.RUnlock()
-		if working && false {'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
+# The working-copy disposal on the join path.
+run_guard "a failed join drops its working copy" clean_join.go   '	defer joined.dropIfUnpublished()' '	defer func() {}()'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
 
 # An input a join did not rename over must leave WITH a link. Marked as left and
 # carrying none is the retention case — reader, skip me, those records are gone —

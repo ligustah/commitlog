@@ -2906,6 +2906,50 @@ func (s *segment) scanForward(start int64, match func(m messageSet) bool) (*entr
 // even where several processes share a store: if two manifests named the SAME
 // object, neither log could safely delete it whatever stamp it carried, so the
 // fence would not have saved that topology either.
+// dropIfUnpublished disposes of a rewrite's working copy unless it has already
+// become the segment, or already left. Every path that builds one owes this on
+// every way out — `defer wc.dropIfUnpublished()` immediately after minting it.
+//
+// A working copy is an open segment with its own files and its own index
+// mapping, and until it is installed NOTHING else can reach it: the log does not
+// name it and the source does not link to it. So a return that leaves it behind
+// holds a handle and a mapping until the process exits and strands its suffixed
+// artifacts on disk. On Windows the far end of that is a data directory that
+// cannot be removed after a Close that returned nil.
+//
+// THE SUFFIX IS WHAT DECIDES, and nothing else. Past Replace's renames this same
+// object owns the SOURCE's files under the source's names, and deleting it there
+// would unlink the installed rewrite; Replace clears the suffix at exactly that
+// moment, and a Replace that failed before it puts the files back under the
+// working names. So a suffix still set means the copy is still only a copy.
+//
+// `left` is the second half and it is what lets callers stop tracking disposal
+// by hand. A path that disposes of the copy itself — cleanupEmptySegment on an
+// empty rewrite, the explicit Delete on a converged one — has already marked it,
+// so this becomes a no-op rather than a second Delete against unlinked files.
+//
+// It lives here, on the segment, because the rule is a property of the working
+// copy and not of whoever built it. It used to be written out in prose at four
+// sites in three different shapes, and was forgotten twice in two days from
+// opposite sides: a failed compaction pass abandoned rewrites it had already
+// installed, and a failed truncate stranded a replacement it had not. What
+// decides which is whether the rename has happened, and nothing else — so that
+// question is asked once, here.
+//
+// nil is accepted: a caller that failed before it had a copy to drop can defer
+// this against the variable it has not filled in yet.
+func (s *segment) dropIfUnpublished() {
+	if s == nil {
+		return
+	}
+	s.RLock()
+	working := s.suffix != "" && !s.left
+	s.RUnlock()
+	if working {
+		s.Delete() // nolint: errcheck — best effort on a failure path
+	}
+}
+
 func (s *segment) Delete() error {
 	s.Lock()
 	defer s.Unlock()
