@@ -5,6 +5,80 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.78.0 — 2026-08-13
+
+### Fixed
+
+- **`seal()` cleared a segment's `dirtyIndex` mark even when the flush it
+  performed had failed.** `dirtyIndex` means "these index bytes are on stable
+  storage". `seal()` called `Index.Sync()`, discarded the error deliberately —
+  the shrink beside it is best-effort for good reasons, and seal runs on paths
+  that cannot return an error — and then cleared the mark unconditionally. A
+  `Sync` that returned an error did not put the bytes anywhere, so the segment
+  was left asserting a durability it did not have.
+
+  Nothing could observe that while the close path fsynced every index
+  unconditionally on the way out, which it did until this release: the second,
+  unconditional flush covered the lie. It stops being covered the moment close
+  starts trusting the mark, which is exactly what the change below does — so
+  this had to be fixed first, and the speedup rides on top of it rather than
+  the other way round.
+
+  The discarded error stays discarded; only the mark is now conditional.
+  `TestSealKeepsTheDirtyMarkWhenTheFlushFails` pins it, with a guard.
+
+### Performance
+
+- **Closing a log no longer fsyncs index files that are already on stable
+  storage.** `closeSegment` passed `durable=true` straight through to
+  `index.Close()` for every segment, so a clean shutdown issued one
+  `FlushFileBuffers` (or `fsync`) per segment whether this process had written
+  to that segment or not. For a log that has been up long enough to roll, most
+  of those segments were sealed by this process, flushed by `seal()`, and never
+  touched again — the flush pushed nothing and cost a syscall that, on Windows,
+  flushes the whole DEVICE cache.
+
+  That last detail is the reason this is worth doing, and it is not the mean.
+  Measured on an idle box the fsync is about +2ms against an unmap of ~3.2ms —
+  the smaller of the two. Measured with a neighbour working the same disk, every
+  syncing case went to 36-50ms while every non-syncing case stayed at ~3ms,
+  because `FlushFileBuffers` pays for whatever else is dirty on the volume. A
+  shutdown that fsyncs once per segment therefore has a cost with no upper bound
+  in the thing it is nominally measuring. durable_streams runs 336-segment logs.
+
+  End to end, closing a 44-segment log this process rolled itself: **7.3 →
+  3.4 ms per segment**. The saving is proportional to how many CLEAN segments
+  the log holds, so it is worth most to exactly the long-lived logs that have
+  the most of them. `BenchmarkCloseCleanLog` and `BenchmarkIndexTeardownParts`
+  carry the numbers and the method.
+
+  A REOPENED log still pays the fsync for every segment. `dirtyIndex` is
+  initialized to true for anything opened from disk, on the stated ground that
+  a segment opened from disk was written by a process whose flush state this one
+  cannot know, and nothing repairs a SHORT index on a SEALED segment. Changing
+  that needs either a clean-shutdown marker or an additive index reconcile at
+  open; neither is in this release.
+
+### Changed
+
+- **`index.Close()` split into three named closers.** `closeIndex` took one
+  `durable` flag that decided two independent things — whether to flush, and
+  whether to trim the file to its content. Those only agreed by coincidence while
+  there were two callers. There are now `Close()` (flush and trim),
+  `CloseFlushed()` (trim only, for an index already on stable storage) and
+  `CloseDiscarding()` (neither, for a caller about to unlink the files), over a
+  `closeIndex(flush, trim bool)`.
+
+  The trim also now skips when `position == size`, which is the common case for
+  a reopened sealed segment: its index was already shrunk, so `SetEndOfFile` was
+  being asked to change nothing.
+
+- **`index` counts its flushes.** A flush that is skipped and a flush that is
+  performed leave byte-identical files behind, so the skip above was
+  unobservable from outside and a guard would have had nothing to go red
+  against. The counter is on the real type rather than a test double, because a
+  double replacing `*index` would switch off the very code path under test.
+
 ## v0.77.0 — 2026-08-13
 
 ### Fixed
