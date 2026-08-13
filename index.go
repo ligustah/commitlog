@@ -214,6 +214,54 @@ func (idx *index) ReadEntryAtLogOffset(e *entry, logOffset int64) error {
 	return idx.ReadEntryAtFileOffset(e, logOffset*entryWidth)
 }
 
+// searchEntries binary-searches the index for the first entry pred accepts and
+// returns its ordinal together with the number of entries — so ordinal == count
+// means no entry satisfied pred. It reads into e, which pred is handed on each
+// step and which holds the entry found on return.
+//
+// A read failure inside the search reports the candidate as satisfying pred.
+// That is not a way of ignoring it — the error comes back — but it decides
+// WHERE a failed search lands, and the direction is the point: reporting true
+// sends sort.Search left, so the ordinal it settles on is no higher than the
+// true one. Every caller here either treats the error as fatal or uses the
+// ordinal as a starting point to scan forward from, and a starting point that
+// is too low costs a longer scan while one that is too high steps over the
+// record entirely.
+//
+// This was written out four times: once per lookup path (offset and timestamp)
+// and once per index layout (dense entries, and the sparse anchors of a
+// block-compressed segment). The two halves of each pair differed only in the
+// field compared, and the two pairs had drifted apart in spelling on top of
+// that — one addressing entries by file offset and its twin by log offset,
+// which ReadEntryAtLogOffset shows to be the same call. Four look-alike loops
+// where the real differences are a comparison and an error policy is a place
+// where a reader cannot tell which differences are deliberate.
+//
+// Callers hold whatever lock the index requires; this adds none.
+func (idx *index) searchEntries(e *entry, pred func(*entry) bool) (int, int, error) {
+	n := int(idx.CountEntries())
+	var serr error
+	i := sort.Search(n, func(i int) bool {
+		if err := idx.ReadEntryAtLogOffset(e, int64(i)); err != nil {
+			serr = err
+			return true
+		}
+		return pred(e)
+	})
+	if serr != nil {
+		return 0, n, serr
+	}
+	if i == n {
+		return n, n, nil
+	}
+	// Re-read: sort.Search's last probe is not necessarily at i, so e holds
+	// whichever entry it happened to look at last.
+	if err := idx.ReadEntryAtLogOffset(e, int64(i)); err != nil {
+		return 0, n, err
+	}
+	return i, n, nil
+}
+
 func (idx *index) ReadAt(p []byte, offset int64) (n int, err error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()

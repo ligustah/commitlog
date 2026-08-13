@@ -95,6 +95,16 @@ library from that fork onward.
   a named argument (`keepActiveSegment` / `keepNoSegment`), and
   `TestDeleteCleanerBytesKeepActiveSegment` fills the coverage hole.
 
+- Internal, no API change: two more places where one rule was written out
+  several times. `offloadMeta` and `TierObject` carry the same ten facts about
+  an offloaded segment and were transcribed at four sites; a field added to
+  either is now caught by a reflection round-trip test rather than by
+  remembering. And the index binary search existed four times — once per lookup
+  key (offset, timestamp) and once per layout (dense entries, sparse block
+  anchors) — where the real differences were a comparison and an error policy,
+  buried in loops that otherwise looked identical. Both are now stated once, in
+  `index.searchEntries` and at the two call sites that choose the comparison.
+
 ## v0.83.0 — 2026-08-13
 
 ### Breaking

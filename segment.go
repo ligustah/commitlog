@@ -2781,26 +2781,19 @@ func (s *segment) findEntry(offset int64) (*entry, error) {
 	}
 	var result *entry
 	err := s.withIndex(func(index *index) error {
-		entry := &entry{}
-		n := int(index.Position() / entryWidth)
-		var serr error
-		i := sort.Search(n, func(i int) bool {
-			if e := index.ReadEntryAtFileOffset(entry, int64(i*entryWidth)); e != nil {
-				serr = e
-				return true
-			}
-			return entry.Offset >= offset
+		ent := &entry{}
+		i, n, err := index.searchEntries(ent, func(e *entry) bool {
+			return e.Offset >= offset
 		})
-		if serr != nil {
-			return serr
+		if err != nil {
+			return err
 		}
+		// Fatal, not a hint: this path returns the entry itself, so there is
+		// nothing to scan forward from.
 		if i == n {
 			return ErrEntryNotFound
 		}
-		if e := index.ReadEntryAtFileOffset(entry, int64(i*entryWidth)); e != nil {
-			return e
-		}
-		result = entry
+		result = ent
 		return nil
 	})
 	return result, err
@@ -2837,26 +2830,18 @@ func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
 	}
 	var result *entry
 	err := s.withIndex(func(index *index) error {
-		entry := &entry{}
-		n := int(index.CountEntries())
-		var serr error
-		i := sort.Search(n, func(i int) bool {
-			if e := index.ReadEntryAtLogOffset(entry, int64(i)); e != nil {
-				serr = e
-				return true
-			}
-			return entry.Timestamp >= timestamp
+		ent := &entry{}
+		i, n, err := index.searchEntries(ent, func(e *entry) bool {
+			return e.Timestamp >= timestamp
 		})
-		if serr != nil {
-			return serr
+		if err != nil {
+			return err
 		}
+		// Fatal here too, for findEntry's reason.
 		if i == n {
 			return ErrEntryNotFound
 		}
-		if e := index.ReadEntryAtLogOffset(entry, int64(i)); e != nil {
-			return e
-		}
-		result = entry
+		result = ent
 		return nil
 	})
 	return result, err
@@ -2867,26 +2852,45 @@ func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
 // returns that block's logical start position, the point from which to scan
 // frames forward. Callers hold the segment read lock.
 func (s *segment) anchorPositionForOffset(offset int64) (int64, error) {
+	// STRICTLY greater, where the dense path above uses >=. An anchor names the
+	// block's FIRST offset, so an anchor equal to the target still begins the
+	// block that holds it; stepping back from it would start a block too early.
+	// The timestamp anchor differs for a reason of its own — see there.
+	return s.anchorPosition(func(e *entry) bool { return e.Offset > offset })
+}
+
+// anchorPosition is the body both anchor lookups share: find the first anchor
+// past the target, step back to the block that therefore contains it, and
+// return that block's start position.
+//
+// A failure to read the index leaves the anchor at 0, and returns no error. The
+// anchor is a starting point for scanForward, not an answer, so position 0 is
+// always a correct one — the scan simply begins at the top of the segment and
+// covers everything the block search would have skipped. Turning a transient
+// index read failure into a failed lookup would be a worse trade for a caller
+// than the scan it avoids, and it is the same direction searchEntries biases in
+// for the same reason.
+//
+// Callers hold the segment read lock, as both wrappers' docs say; this takes no
+// lock of its own beyond the one withIndex needs.
+func (s *segment) anchorPosition(pred func(*entry) bool) (int64, error) {
 	var pos int64
 	err := s.withIndex(func(index *index) error {
-		n := int(index.Position() / entryWidth)
-		if n == 0 {
+		e := &entry{}
+		idx, n, err := index.searchEntries(e, pred)
+		if n == 0 || err != nil {
 			return nil
 		}
-		e := &entry{}
-		// First anchor whose base offset is strictly greater than the target; the
-		// containing block is the one before it.
-		idx := sort.Search(n, func(i int) bool {
-			if err := index.ReadEntryAtFileOffset(e, int64(i*entryWidth)); err != nil {
-				return true
-			}
-			return e.Offset > offset
-		})
+		// Stepping back needs a read; landing on the first anchor does not,
+		// because searchEntries has already left that entry in e. The two are
+		// not symmetric: when NO anchor is past the target it returns the count
+		// without reading anything, so e is whatever the search last probed —
+		// and that case steps back too, which is what reads over it.
 		if idx > 0 {
 			idx--
-		}
-		if err := index.ReadEntryAtFileOffset(e, int64(idx*entryWidth)); err != nil {
-			return nil
+			if err := index.ReadEntryAtLogOffset(e, int64(idx)); err != nil {
+				return nil
+			}
 		}
 		pos = e.Position
 		return nil
@@ -2900,29 +2904,13 @@ func (s *segment) anchorPositionForOffset(offset int64) (int64, error) {
 // the target, since the qualifying message may be an interior message of the
 // preceding block. Callers hold the segment read lock.
 func (s *segment) anchorPositionForTimestamp(timestamp int64) (int64, error) {
-	var pos int64
-	err := s.withIndex(func(index *index) error {
-		n := int(index.Position() / entryWidth)
-		if n == 0 {
-			return nil
-		}
-		e := &entry{}
-		idx := sort.Search(n, func(i int) bool {
-			if err := index.ReadEntryAtFileOffset(e, int64(i*entryWidth)); err != nil {
-				return true
-			}
-			return e.Timestamp >= timestamp
-		})
-		if idx > 0 {
-			idx--
-		}
-		if err := index.ReadEntryAtFileOffset(e, int64(idx*entryWidth)); err != nil {
-			return nil
-		}
-		pos = e.Position
-		return nil
-	})
-	return pos, err
+	// >=, where the offset anchor uses >. An anchor carries its block's FIRST
+	// timestamp, and timestamps are not unique or strictly increasing across a
+	// block boundary, so an anchor equal to the target does not mean the first
+	// qualifying message is that one — an earlier message of the preceding block
+	// may carry the same timestamp. Stepping back from it is what the doc above
+	// means by starting one block early.
+	return s.anchorPosition(func(e *entry) bool { return e.Timestamp >= timestamp })
 }
 
 // scanForward walks message frames from the given logical start position and
