@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pkg/errors"
 	"github.com/tysonmote/gommap"
@@ -65,6 +66,15 @@ type index struct {
 	mapMu    sync.RWMutex
 	position int64
 	closed   bool
+	// flushes counts calls that actually reached syncMmap. It exists so "this
+	// close did NOT fsync" is a claim a test can falsify — without it, a flush
+	// skipped and a flush performed leave the same file on disk, and the guard
+	// on closeSegment's dirty-mark branch would have nothing to go red against.
+	//
+	// Atomic because Sync() flushes under mu held SHARED, so two readers can
+	// reach it at once. Counted rather than a bool: the interesting failures are
+	// "once per segment, forever" rather than "at all".
+	flushes atomic.Int64
 }
 
 type entry struct {
@@ -324,6 +334,7 @@ func (idx *index) Sync() error {
 	defer idx.mapMu.RUnlock()
 	mmap, file := idx.mmap, idx.file
 	idx.mu.RUnlock()
+	idx.flushes.Add(1)
 	return syncMmap(mmap, file)
 }
 
@@ -333,11 +344,30 @@ func (idx *index) sync() error {
 	if idx.closed {
 		return ErrSegmentClosed
 	}
+	idx.flushes.Add(1)
 	return syncMmap(idx.mmap, idx.file)
 }
 
 func (idx *index) Close() error {
-	return idx.closeIndex(true)
+	return idx.closeIndex(true, true)
+}
+
+// CloseFlushed closes an index whose bytes have ALREADY reached stable storage,
+// skipping the fsync and doing everything else Close does.
+//
+// The caller is asserting durability, not guessing at it. segment.dirtyIndex is
+// the only thing entitled to make that assertion: it is set by every write and
+// cleared only by a flush that RETURNED NIL, so "not dirty" means some earlier
+// sync on this index succeeded and nothing has touched it since. An fsync then
+// has nothing left to push, and on Windows FlushFileBuffers is not free when it
+// has nothing to do — it flushes the DEVICE cache, so its cost tracks whatever
+// else on the disk is dirty rather than this file. Closing a log with N sealed
+// segments paid that N times in a row for no change to what is on disk.
+//
+// It still shrinks, because that is unrelated to durability: a pre-allocated
+// index is trimmed to its content on the way out whether or not it was flushed.
+func (idx *index) CloseFlushed() error {
+	return idx.closeIndex(false, true)
 }
 
 // CloseDiscarding closes the index for a caller that is about to UNLINK the
@@ -356,10 +386,19 @@ func (idx *index) Close() error {
 // What it still does is release the mapping and the handle, which is not
 // optional: a mapped index cannot be unlinked on Windows at all.
 func (idx *index) CloseDiscarding() error {
-	return idx.closeIndex(false)
+	return idx.closeIndex(false, false)
 }
 
-func (idx *index) closeIndex(durable bool) error {
+// closeIndex releases the mapping and the handle, optionally flushing first and
+// trimming after.
+//
+// flush and trim are SEPARATE because they answer different questions and the
+// three callers want three different pairs. They were one `durable` flag while
+// only Close and CloseDiscarding existed, which read as one concept but was two
+// agreeing by coincidence; CloseFlushed is the case that pulls them apart, and
+// folding it back into one flag would silently stop trimming an index it only
+// meant to stop flushing.
+func (idx *index) closeIndex(flush, trim bool) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	if idx.closed {
@@ -378,7 +417,7 @@ func (idx *index) closeIndex(durable bool) error {
 	// later. Every failure now runs the teardown to the end and reports at the
 	// bottom; each step's error is collected rather than returned.
 	var errs []error
-	if durable {
+	if flush {
 		errs = append(errs, idx.sync())
 	}
 	// Unmap before shrinking: on Windows, SetEndOfFile fails with
@@ -396,7 +435,16 @@ func (idx *index) closeIndex(durable bool) error {
 	// and if the unmap is what failed, the view it could not release is exactly
 	// what makes SetEndOfFile refuse, so attempting it would only add a second
 	// error describing the first.
-	if durable && stderrors.Join(errs...) == nil {
+	//
+	// position == size is the second reason to skip it, and it is the common one:
+	// a sealed index on disk was already trimmed, so a reopened segment's file is
+	// exactly its content and SetEndOfFile is asked to change nothing. Deciding
+	// that from idx.size rather than by stat-ing the file is safe HERE, unlike on
+	// the write path where the mapping and the file run out separately — the
+	// shrink is an optimization in both directions, so a stale-high size costs a
+	// pointless truncate and a stale-low one costs an untrimmed file. Neither is
+	// a wrong answer to anything.
+	if trim && idx.position < idx.size && stderrors.Join(errs...) == nil {
 		errs = append(errs, idx.shrink())
 	}
 	errs = append(errs, idx.file.Close())

@@ -791,6 +791,21 @@ run_guard "findEntry builds the block table it is about to scan" segment.go   '	
 # unreachable while still compiling, which is the state every open was in before.
 run_guard "a walk at open keeps the table it built" segment.go   '	if s.blocksWalked > 0 {' '	if s.blocksWalked < 0 {'   '^TestAWalkAtOpenPersistsTheTableItBuilt$'
 
+# dirtyIndex means "these bytes are on stable storage", and seal must only say so
+# when the flush it just attempted RETURNED NIL -- the error is discarded by
+# design, so an unconditional clear asserts a durability that did not happen. It
+# was harmless only while closeSegment fsynced every index again on the way out;
+# now that close honours the mark, a failed seal would skip the last chance to
+# get those bytes down, and nothing repairs a short index on a SEALED segment.
+# The neutralization is the exact line that shipped before the fix.
+run_guard "seal keeps the dirty mark when the flush fails" segment.go   '	if s.Index.Sync() == nil {' '	if s.Index.Sync() != nil || true {'   '^TestSealKeepsTheDirtyMarkWhenTheFlushFails$'
+
+# The other half: close must actually consult the mark, or the fsync it exists to
+# skip is paid on every segment forever. Neutralizing to the unconditional Close
+# is what the code did before, so the test that asserts a clean segment is closed
+# WITHOUT a flush has to go red.
+run_guard "close honours the index dirty mark" segment.go   '		case s.dirtyIndex:' '		case s.dirtyIndex || true:'   '^TestACleanIndexIsClosedWithoutAFlush$'
+
 # A block table is refused when damaged, never approximated and never rebuilt by
 # walking the object -- that walk is the cost the table exists to remove, so a
 # fallback would turn damage into a slow success. The neutralization drops the

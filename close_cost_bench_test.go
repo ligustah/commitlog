@@ -35,18 +35,31 @@ import (
 // what they are, and anything proposing to reduce them has to argue with that
 // claim rather than around it.
 //
-// Measured (windows, Core Ultra 9 285K), against the open benchmark in the same
-// process so the two are comparable:
+// Measured (windows, Core Ultra 9 285K, IDLE box, two runs each), 44 segments:
 //
-//	 3 segments    24.2ms close    8.06ms/segment     54.5ms open+close
-//	 9 segments    78.6ms close    8.74ms/segment     96.3ms open+close
-//	44 segments   333.9ms close    7.59ms/segment    555.6ms open+close
+//	reopened   254 / 323ms    5.8 / 7.3ms per segment
+//	rolled     168 / 151ms    3.8 / 3.4ms per segment
 //
-// Flat per segment across a 15x range in segment count, and roughly 60% of an
-// open-and-close — which is the point. It does not scale with records, blocks or
-// bytes; it scales with how many segments the directory holds, because every one
-// of them gets an fsync and a truncate on the way out whether this process wrote
-// to it or not.
+// The gap is the per-segment fsync. What is left in the rolled case is the unmap
+// and the handle close — the unmap is the floor here, and it is not optional —
+// plus the active segment's genuine flush. At 9 segments the ratio is smaller
+// (5.4 -> 3.5ms; the one dirty active segment is a bigger share of a shorter
+// list) and at 3 it nearly vanishes (11.2 -> 9.6ms), which is the shape to
+// expect: this saves work in proportion to how many CLEAN segments the log
+// holds, so it is worth most to exactly the long-lived logs that have the most.
+//
+// Both rows come from ONE run of one binary against one disk. That matters more
+// than it looks: an earlier measurement of this benchmark was taken while a
+// neighbour was working the same disk and read about 10x high, and the run
+// before that compared a treatment holding twice the records against its own
+// control. A within-run comparison survives both mistakes; an absolute number
+// survives neither.
+//
+// Before the close path honoured dirtyIndex, both rows were the reopened one —
+// 7.6-8.7ms/segment, flat across a 15x range in segment count, and roughly 60%
+// of a full open-and-close. It never scaled with records, blocks or bytes, only
+// with how many segments the directory held, because every one of them was
+// fsynced on the way out whether this process had written to it or not.
 //
 // Run it on a QUIET box. An earlier run of exactly this benchmark reported
 // 85-105ms/segment, a 10x inflation, because a peer was working the same disk;
@@ -73,7 +86,17 @@ func BenchmarkCloseCleanLog(b *testing.B) {
 		require.NoError(b, probe.Close())
 		require.Greater(b, segments, 0)
 
-		b.Run(itoa(segments)+"seg", func(b *testing.B) {
+		// reopened: every segment starts dirtyIndex=true, because a segment opened
+		// from disk was written by a process whose flush state this one cannot
+		// know. So this case still pays the per-segment fsync, and it is the
+		// CONTROL — same binary, same disk, same fixture as the case below.
+		//
+		// rolled: the log this process just appended to and rolled. Its sealed
+		// segments were flushed by seal() and are marked clean, so close skips
+		// the fsync. That is the production shape — a log that has been up long
+		// enough to accumulate segments — and the difference between the two
+		// rows is the whole of what honouring dirtyIndex at close is worth.
+		b.Run(itoa(segments)+"seg/reopened", func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
 				l, err := New(opts)
@@ -89,6 +112,44 @@ func BenchmarkCloseCleanLog(b *testing.B) {
 			b.StopTimer()
 			// ns/op divided by segments, computed from the harness's own
 			// elapsed time so it stays honest if b.N changes underneath.
+			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(segments),
+				"ns/segment")
+			b.ReportMetric(float64(segments), "segments")
+		})
+
+		b.Run(itoa(segments)+"seg/rolled", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				// An EMPTY directory each time. benchBlockLog would hand back a
+				// log that already holds c.records, and appending c.records on
+				// top of it closes twice the log the reopened case does while
+				// still dividing by the original segment count — which is what
+				// the first run of this benchmark did, and it reported the
+				// treatment as 1.6x SLOWER than the control.
+				fresh := Options{
+					Path:             tempDir(b),
+					MaxSegmentBytes:  c.segBytes,
+					Compression:      opts.Compression,
+					DisableAutoClean: true,
+				}
+				l, err := New(fresh)
+				if err != nil {
+					b.Fatal(err)
+				}
+				// Roll the segments in THIS process, which is what marks them
+				// clean. Reopening above is what leaves them dirty.
+				for j := 0; j < c.records; j++ {
+					if _, err := l.Append([]*Message{{Value: []byte("a modest record payload")}}); err != nil {
+						b.Fatal(err)
+					}
+				}
+				b.StartTimer()
+
+				if err := l.Close(); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
 			b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(segments),
 				"ns/segment")
 			b.ReportMetric(float64(segments), "segments")

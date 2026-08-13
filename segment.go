@@ -1303,8 +1303,22 @@ func (s *segment) seal() {
 		//
 		// Best-effort, like the shrink above: a failure here costs a rebuilt
 		// index tail, not data, and seal runs on paths that cannot return one.
-		s.Index.Sync() // nolint: errcheck
-		s.dirtyIndex = false
+		//
+		// But the MARK is not best-effort, and clearing it unconditionally is how
+		// a discarded error stops being contained. dirtyIndex means "these bytes
+		// are on stable storage"; a Sync that returned an error did not put them
+		// there, and saying so anyway is a lie that only the close path's second,
+		// unconditional fsync was covering. Take that cover away — which is the
+		// whole point of honouring this mark at close — and a single failed seal
+		// leaves a sealed segment with a permanently short index, the exact
+		// outcome this fsync exists to prevent.
+		//
+		// sync(withIndex) one level down already gets this right: it restores the
+		// mark when the flush it attempted fails. This is the same rule, arrived
+		// at from the other side.
+		if s.Index.Sync() == nil {
+			s.dirtyIndex = false
+		}
 	}
 	// Same reasoning one level out: this is the moment the segment's bytes stop
 	// changing, so it is the moment its block table becomes worth keeping.
@@ -1965,10 +1979,29 @@ func (s *segment) closeSegment(durable bool) error {
 	}
 	var ierr error
 	if s.Index != nil {
-		if durable {
-			ierr = s.Index.Close()
-		} else {
+		switch {
+		case !durable:
 			ierr = s.Index.CloseDiscarding()
+		case s.dirtyIndex:
+			ierr = s.Index.Close()
+		default:
+			// Already on stable storage, so the fsync here would push nothing.
+			// It was not free for having nothing to do: FlushFileBuffers flushes
+			// the device cache, and a log closing N sealed segments paid it N
+			// times in a row. Measured at roughly 8ms per segment, ~60% of an
+			// open-and-close, and it is the whole of that 60% — the no-op
+			// truncate beside it is a few tenths of a millisecond
+			// (BenchmarkIndexTeardownParts).
+			//
+			// Trusting the mark is only sound because seal stopped lying about
+			// it: it used to clear dirtyIndex after an Index.Sync() whose error
+			// is discarded, so a FAILED flush left the segment claiming
+			// durability, and this branch would then skip the fsync that was the
+			// last chance to get those bytes down. Nothing repairs a short index
+			// on a SEALED segment — open() reconciles the active one and
+			// manifest.go the adopted ones — so that would have been a lost
+			// index tail, not a slow one. See TestSealKeepsTheDirtyMarkWhenTheFlushFails.
+			ierr = s.Index.CloseFlushed()
 		}
 		if errors.Is(ierr, os.ErrClosed) {
 			ierr = nil
