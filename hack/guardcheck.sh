@@ -24,6 +24,11 @@
 # Usage:  hack/guardcheck.sh          (every guard this platform can check)
 #         hack/guardcheck.sh crc      (only guards whose name matches)
 #
+#         GUARDCHECK_ANCHORS=1 hack/guardcheck.sh
+#                                     (seconds, no tests: do all the anchors
+#                                      still resolve? run this after ANY
+#                                      refactor — see the note by anchors_only)
+#
 #         GUARDCHECK_SET=platform hack/guardcheck.sh
 #                                     (only the guards that REQUIRE this OS)
 #
@@ -64,6 +69,27 @@ deferred=0
 # runner cannot; anything else means "everything checkable here".
 goos="$(go env GOOS)"
 set_sel="${GUARDCHECK_SET:-all}"
+
+# GUARDCHECK_ANCHORS=1 — resolve every guard's anchor and run NOTHING else.
+#
+# A SKIP is not a weaker pass, it is a guard that stopped being checked, and the
+# way it happens is that a refactor moves the text an anchor names. That has now
+# cost two red CI runs in two days -- closeIndex's signature change, and the
+# working-copy disposal collapse, where I checked the four guards whose NAMES
+# mentioned the disposal and missed a fifth anchored on the same lines for an
+# unrelated reason. Both were visible before the push and neither was looked for,
+# because looking meant a forty-minute run.
+#
+# Resolving the anchors is the entire check for that failure and costs seconds:
+# no build, no tests. It answers "did I move something a guard is standing on",
+# which is a question worth asking on every refactor and never worth an hour.
+#
+# It also ignores the platform deferral, deliberately. Whether a guard's text is
+# present is not an OS question -- a //go:build windows file is in the tree on
+# Linux too -- so this mode checks the Windows-only anchors that the ubuntu job
+# cannot otherwise say anything about, and catches a moved one a full run here
+# would still report as deferred.
+anchors_only="${GUARDCHECK_ANCHORS:-}"
 
 # name | file | old text | replacement text | test regex | [race]
 #
@@ -128,6 +154,11 @@ guard_platform() {
   if [ -n "$filter" ] && [[ "$name" != *"$filter"* ]]; then
     return 1
   fi
+  # Anchors are text, not behaviour: check every one of them here. See
+  # GUARDCHECK_ANCHORS above.
+  if [ -n "$anchors_only" ]; then
+    return 0
+  fi
   if [ "$set_sel" = "platform" ] && [ -z "$want" ]; then
     return 1
   fi
@@ -156,6 +187,14 @@ guard_start() {
 guard_finish() {
   local test_re="$1" mode="$2"
   shift 2
+  # The anchor resolved -- apply_edit would have failed otherwise -- and that is
+  # all this mode claims. Say so in those words: a run that prints "ok" for a
+  # guard it never falsified would be the exact lie this script exists to stop.
+  if [ -n "$anchors_only" ]; then
+    echo "anchor resolves"
+    git checkout -- "$@"
+    return 0
+  fi
   local -a extra=()
   if [ "$mode" = "race" ]; then extra=(-race); fi
 
@@ -240,7 +279,11 @@ run_guard_pair() {
   guard_finish "$test_re" "$mode" "$f1" "$f2"
 }
 
-echo "guardcheck: removing each guard and requiring its test to fail"
+if [ -n "$anchors_only" ]; then
+  echo "guardcheck: resolving each guard's anchor only — no build, no tests"
+else
+  echo "guardcheck: removing each guard and requiring its test to fail"
+fi
 
 run_guard "prefix-read CRC" prefix_read.go \
   'if want, got := cp.Crc(), crc32.Checksum(cp[4:], crc32cTable); want != got {' \
@@ -446,7 +489,6 @@ run_guard "truncation carries segments rolled under it" commitlog.go   '	if len(
 run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 	for i := idx + 1; i < len(snapshot); i++ {
 		if err := snapshot[i].Delete(); err != nil {
-			dropReplacement()
 			return err
 		}
 		deleted++
@@ -454,7 +496,6 @@ run_guard "truncate unlinks outside the lock" commitlog.go   '	deleted := 0
 	l.mu.Lock()
 	for i := idx + 1; i < len(snapshot); i++ {
 		if err := snapshot[i].Delete(); err != nil {
-			dropReplacement()
 			l.mu.Unlock()
 			return err
 		}
@@ -1447,7 +1488,11 @@ run_guard "a rewrite publishes under its own tier" compact_cleaner.go   '		segTi
 
 echo
 if [ "$failures" -ne 0 ]; then
-  echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
+  if [ -n "$anchors_only" ]; then
+    echo "guardcheck: $failures of $checked guard anchor(s) no longer resolve."
+  else
+    echo "guardcheck: $failures of $checked guard(s) are NOT covered by the test named for them."
+  fi
   exit 1
 fi
 # A run that checked nothing prints the same green as one that checked
@@ -1495,7 +1540,12 @@ if [ -z "$filter" ] && [ "$set_sel" != "platform" ] && [ $((checked + deferred))
   exit 1
 fi
 if [ "$checked" -gt 0 ]; then
-  echo "guardcheck: all $checked guards covered."
+  if [ -n "$anchors_only" ]; then
+    echo "guardcheck: all $checked guard anchors resolve. NOTHING was falsified —"
+    echo "this says the guards are still standing where the script thinks, and no more."
+  else
+    echo "guardcheck: all $checked guards covered."
+  fi
 fi
 if [ "$deferred" -ne 0 ]; then
   echo "guardcheck: $deferred guard(s) NOT covered here — deferred to another platform's run."
