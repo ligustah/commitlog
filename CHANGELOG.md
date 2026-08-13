@@ -64,6 +64,14 @@ library from that fork onward.
   `buildKeyDigest` and `encodeKeyDigest`. Both now use one small writer type. No
   format or behaviour change.
 
+- The list of store objects a rewrite, a join or a tier move supersedes was
+  built by hand at three sites, each with its own wording of the same two facts.
+  It is one `supersededObjectsLocked` now, beside the `objectKeysLocked` the
+  reclaim sweep spares. The consumer of that list *deletes*, so an entry with
+  the wrong pin removes an object a reader is still on and a missing entry leaks
+  one forever; three transcriptions were three chances for the next object kind
+  to reach only two of them. No behaviour change.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking

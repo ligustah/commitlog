@@ -134,17 +134,10 @@ func (s *segment) swapTier(store SegmentStore, tier string, meta offloadMeta) ([
 	}
 
 	oldBacking, _ := s.backing.(*storeBacking)
-	superseded := []pendingReclaim{{tier: s.tier, key: s.storeKey, pin: oldBacking}}
-	if s.indexKey != "" {
-		// No pin, for the reason uploadReplacement gives: an index object has
-		// no long-lived holder. It is fetched whole into indexCache, which is
-		// invalidated just below, so a reader either already has its bytes or
-		// fetches the new key.
-		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.indexKey})
-	}
-	if s.blocksKey != "" {
-		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.blocksKey})
-	}
+	// Note whose tier these name: s.tier, the tier the segment is leaving. The
+	// caller has the destination, and the objects being reclaimed are the ones
+	// left behind in the source. See supersededObjectsLocked.
+	superseded := s.supersededObjectsLocked(oldBacking)
 
 	sb := newStoreBackingSize(store, meta.LogKey, meta.PhysPosition)
 	// Past here the segment IS the destination's objects, so anything still

@@ -86,6 +86,36 @@ type TierObject struct {
 	MovedFrom string `json:",omitempty"`
 }
 
+// objectKeys returns the store objects this entry names, skipping the ones it
+// does not have. A block table is absent exactly when the object is not
+// block-compressed, and an index key is absent when the index stayed on local
+// disk.
+//
+// It exists so the answer to "what objects does a segment consist of" is given
+// once per representation rather than once per caller. The callers are the two
+// sides of garbage collection — this list is what a key must appear in to be
+// spared, and segment.supersededObjectsLocked is what puts a key up for
+// deletion — so the two have to enumerate the same set or the difference is
+// data loss in one direction and a permanent leak in the other. A
+// block-compressed segment has THREE objects, and its table is the one that is
+// not rebuildable: the local copy went with the local file at offload,
+// deliberately, since it describes bytes that no longer exist. Collect it and
+// the log object stays perfectly intact and stops being readable.
+func (o TierObject) objectKeys() []string {
+	return nonEmpty(o.LogKey, o.IndexKey, o.BlocksKey)
+}
+
+// nonEmpty returns the keys that are set, in order.
+func nonEmpty(keys ...string) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // tierObject is meta's inverse: the same ten fields, plus the base offset that
 // identifies which segment they describe. offloadMeta is what a segment knows
 // about its own objects and TierObject is what the manifest says about them, so
@@ -388,33 +418,16 @@ func (l *commitLog) UnreferencedObjects() ([]StoreObject, error) {
 			return nil, errors.Wrapf(err, "read tier manifest for tier %s", t.Name)
 		}
 		for _, o := range manifest {
-			if o.LogKey != "" {
-				referenced[o.LogKey] = true
-			}
-			if o.IndexKey != "" {
-				referenced[o.IndexKey] = true
-			}
-			// A block-compressed segment has three objects, not two. Its table is
-			// the map from logical offsets to compressed blocks, and the local one
-			// went with the local file at offload — deliberately, since it
-			// describes bytes that no longer exist. So a table collected here is
-			// not rebuildable: the log bytes stay intact and stop being readable.
-			if o.BlocksKey != "" {
-				referenced[o.BlocksKey] = true
+			for _, key := range o.objectKeys() {
+				referenced[key] = true
 			}
 		}
 	}
 	l.mu.RLock()
 	for _, s := range l.segments {
 		s.RLock()
-		if s.storeKey != "" {
-			referenced[s.storeKey] = true
-		}
-		if s.indexKey != "" {
-			referenced[s.indexKey] = true
-		}
-		if s.blocksKey != "" {
-			referenced[s.blocksKey] = true
+		for _, key := range s.objectKeysLocked() {
+			referenced[key] = true
 		}
 		s.RUnlock()
 	}

@@ -95,6 +95,16 @@ func TestAtomicWritePermanentHandleStillFails(t *testing.T) {
 // write. Both used to be bare — os.Open and the atomic-file library — and a
 // deny-all handle on this file failed the open with "The process cannot access
 // the file because it is being used by another process".
+//
+// The hold is MEASURED, not assumed, and that is the difference between this
+// fixture and the three above it. Those hold a file across a call that reaches
+// it immediately, so any hold at all covers the attempt. New() reaches the
+// descriptor only after claiming the directory, building the epoch cache and
+// running init(), so the hold has to outlast all of that — and a fixed 120ms
+// did not on the CI Windows runner. Nothing went red there: the read simply
+// happened after the handle had cleared, the retry was never exercised, and
+// guardcheck reported the guard as uncovered. Timing an unheld reopen first
+// prices that prologue on the machine actually running the test.
 func TestReopeningALogRidesOutAHeldDescriptor(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(Options{Path: dir, MaxSegmentBytes: 1 << 20, CleanerInterval: time.Hour})
@@ -103,11 +113,21 @@ func TestReopeningALogRidesOutAHeldDescriptor(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, l.Close())
 
+	start := time.Now()
+	warm, err := New(Options{Path: dir, MaxSegmentBytes: 1 << 20, CleanerInterval: time.Hour})
+	require.NoError(t, err)
+	require.NoError(t, warm.Close())
+	// Strictly longer than a whole unheld reopen, so the descriptor read is
+	// certainly inside the window rather than probably inside it.
+	hold := 2*time.Since(start) + 250*time.Millisecond
+	require.Less(t, hold, waitedOnRetryBudget,
+		"the hold must sit inside the read's retry budget, or a correct retry gives up first")
+
 	h := openDenyAll(t, filepath.Join(dir, descriptorFileName))
 	released := make(chan struct{})
 	go func() {
-		time.Sleep(120 * time.Millisecond) // well inside waitedOnRetryBudget
-		syscall.CloseHandle(h)             // nolint: errcheck
+		time.Sleep(hold)
+		syscall.CloseHandle(h) // nolint: errcheck
 		close(released)
 	}()
 

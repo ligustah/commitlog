@@ -2157,6 +2157,46 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 	return newSegment(path, baseOffset, maxBytes, false, suffix, codec)
 }
 
+// objectKeysLocked returns the store objects this segment currently consists
+// of, skipping the ones it does not have. Caller holds at least the read lock.
+//
+// The *segment side of TierObject.objectKeys — see there for why the answer is
+// given once per representation. These two are what garbage collection spares,
+// and supersededObjectsLocked below is what it deletes.
+func (s *segment) objectKeysLocked() []string {
+	return nonEmpty(s.storeKey, s.indexKey, s.blocksKey)
+}
+
+// supersededObjectsLocked lists this segment's CURRENT store objects as reclaim
+// entries, for a caller that is about to replace all of them. Caller holds the
+// write lock.
+//
+// One list, because the consumer DELETES. drainReclaim removes an entry's object
+// once its refcount reaches zero, and that is only sound because every entry it
+// sees came from a swap that had just made the object unreachable — so a copy of
+// this list that forgot the pin would delete an object a reader is still on, and
+// a copy that forgot a key would leak it forever. It was written out three times
+// (here, retireIntoJoin, swapTier), each with its own wording of the same two
+// facts, which is three chances for the next object kind to reach two of them.
+//
+// The pin is on the log object alone, and only that one has a holder to count.
+// An index object is fetched WHOLE into indexCache rather than streamed from, so
+// only a fetch already in flight can still be reading it, and the queue's
+// deferral covers that on its own; a block table is fetched whole and held by
+// the segment, so nothing is ever mid-read of one. See pendingReclaim.
+func (s *segment) supersededObjectsLocked(pin *storeBacking) []pendingReclaim {
+	keys := s.objectKeysLocked()
+	superseded := make([]pendingReclaim, 0, len(keys))
+	for _, key := range keys {
+		e := pendingReclaim{tier: s.tier, key: key}
+		if key == s.storeKey {
+			e.pin = pin
+		}
+		superseded = append(superseded, e)
+	}
+	return superseded
+}
+
 // uploadReplacement installs fresh — a fully-written LOCAL working segment — as
 // the current objects of this offloaded segment, and returns the object keys the
 // rewrite superseded. It is the FIRST of two halves; swapReplacement is the
@@ -2221,7 +2261,9 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 	var (
 		newKey, freshIndexKey, freshBlocksKey = newStoreKeys(s.BaseOffset)
 		newIndexKey, newBlocksKey             string
-		superseded                            = []pendingReclaim{{tier: s.tier, key: s.storeKey, pin: oldBacking}}
+		// Taken BEFORE anything is uploaded: it names what this segment reads
+		// from now, and the uploads below install the replacements.
+		superseded = s.supersededObjectsLocked(oldBacking)
 	)
 
 	size, err := fresh.backing.Size()
@@ -2240,13 +2282,6 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 		if err := s.store.Put(newIndexKey, r, isize); err != nil {
 			return offloadMeta{}, nil, errors.Wrap(err, "put rewritten index")
 		}
-		// No pin: an index object has no long-lived holder to count. It is
-		// fetched whole into indexCache, which is invalidated below, so a reader
-		// either already has its bytes or will fetch the new key. Only a fetch
-		// already in flight can still be reading this object, and what covers
-		// that is the deferral — the entry is not considered for deletion until
-		// a later pass, by which time a single in-flight request is long done.
-		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.indexKey})
 	}
 
 	if fresh.blockMode {
@@ -2256,12 +2291,6 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 			return offloadMeta{}, nil, errors.Wrap(err, "put rewritten block table")
 		}
 	}
-	if s.blocksKey != "" {
-		// No pin, for the index object's reason: the table is fetched whole and
-		// held by the segment, not streamed from, so nothing is mid-read of it.
-		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.blocksKey})
-	}
-
 	meta := offloadMeta{
 		LogKey:         newKey,
 		IndexKey:       newIndexKey,
@@ -2383,17 +2412,7 @@ func (s *segment) retireIntoJoin(joined *segment) []pendingReclaim {
 	// uploadReplacement does: this is the backing readers are on right now, and
 	// it is the reason its object cannot be deleted yet.
 	oldBacking, _ := s.backing.(*storeBacking)
-	superseded := []pendingReclaim{{tier: s.tier, key: s.storeKey, pin: oldBacking}}
-	if s.indexKey != "" {
-		// No pin, for uploadReplacement's reason: an index object is fetched
-		// whole into indexCache rather than streamed from, so only a fetch
-		// already in flight can be reading it, and the queue's deferral covers
-		// that on its own.
-		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.indexKey})
-	}
-	if s.blocksKey != "" {
-		superseded = append(superseded, pendingReclaim{tier: s.tier, key: s.blocksKey})
-	}
+	superseded := s.supersededObjectsLocked(oldBacking)
 
 	// Nothing should reach these objects again. A reader that took the backing
 	// before this call keeps reading — that is what the pin is for — but no new

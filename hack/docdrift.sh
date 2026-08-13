@@ -53,7 +53,11 @@ found=$(
           name = $0
           sub(/^func +\([^)]*\) +/, "", name)
           sub(/^func +/, "", name)
-          sub(/\(.*$/, "", name)
+          # Cut at whichever comes first, the argument list or a type parameter
+          # list: a generic function is "func retryWhileHeld[T any](...)", and
+          # stopping only at "(" makes its name "retryWhileHeld[T any]", which
+          # no doc comment can ever open with.
+          sub(/[[(].*$/, "", name)
           opener = first
           sub(/^\/\/ */, "", opener)
           sub(/ .*$/, "", opener)
