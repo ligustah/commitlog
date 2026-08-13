@@ -595,7 +595,7 @@ func New(opts Options) (_ CommitLog, err error) {
 	}
 
 	cleanerOpts := deleteCleanerOptions{
-		Name: opts.Path,
+		Path: opts.Path,
 	}
 	cleanerOpts.Retention.Bytes = opts.MaxLogBytes
 	cleanerOpts.Retention.Messages = opts.MaxLogMessages
@@ -604,7 +604,7 @@ func New(opts Options) (_ CommitLog, err error) {
 	cleaner := newDeleteCleaner(cleanerOpts)
 
 	compactCleanerOpts := compactCleanerOptions{
-		Name:               opts.Name,
+		Path:               opts.Path,
 		MinAge:             opts.CompactMinAge,
 		TombstoneRetention: opts.CompactTombstoneRetention,
 	}

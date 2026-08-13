@@ -174,7 +174,7 @@ func TestTheCleanerAgreesWithItselfAboutANegativeLimit(t *testing.T) {
 		"Age":      func(o *deleteCleanerOptions) { o.Retention.Age = -time.Second },
 	} {
 		t.Run(name, func(t *testing.T) {
-			opts := deleteCleanerOptions{Name: "agree"}
+			opts := deleteCleanerOptions{Path: "agree"}
 			mut(&opts)
 			c := &deleteCleaner{deleteCleanerOptions: opts}
 			require.True(t, c.noRetentionLimits(),

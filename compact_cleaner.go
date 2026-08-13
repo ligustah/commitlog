@@ -17,7 +17,10 @@ import (
 // compactCleanerOptions contains configuration settings for the
 // compactCleaner.
 type compactCleanerOptions struct {
-	Name string
+	// Path identifies the log in this cleaner's log lines, and exists only for
+	// that. See the same field on deleteCleanerOptions for why it is the
+	// directory rather than Options.Name.
+	Path string
 	// MinAge protects a compaction horizon: a segment whose most recent write is
 	// newer than MinAge is kept intact rather than compacted. Zero disables it.
 	MinAge time.Duration
@@ -87,12 +90,12 @@ func (c *compactCleaner) CompactSpec(spec CleanSpec, segments []*segment) ([]*se
 		return segments, -1, nil
 	}
 
-	slog.Debug("Compacting log", slog.String("name", c.Name))
+	slog.Debug("Compacting log", slog.String("path", c.Path))
 	before := time.Now()
 	compacted, removed, verified, err := c.compact(spec, segments)
 	if err == nil {
 		slog.Debug("Finished compacting log",
-			slog.String("name", c.Name),
+			slog.String("path", c.Path),
 			slog.Int("removed", removed),
 			slog.Int("before", len(segments)),
 			slog.Int("after", len(compacted)),
@@ -689,7 +692,7 @@ func (c *compactCleaner) loadOrBuildDigests(segments []*segment) ([]*keyDigest, 
 			if persist {
 				if werr := writeKeyDigest(seg, d); werr != nil {
 					slog.Warn("key digest write failed; will rebuild next clean",
-						slog.String("name", c.Name), slog.String("err", werr.Error()))
+						slog.String("path", c.Path), slog.String("err", werr.Error()))
 				} else if ld := loadKeyDigest(seg); ld != nil {
 					// Swap to the streaming form so the merge doesn't retain
 					// this build's keyed bytes (post-restart first cleans can
@@ -876,7 +879,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 				// boundary — a later pass would trust that and skip the scan.
 				residualStrippable = true
 				slog.Warn("record failed its CRC; copied without stripping rather than re-signing it",
-					slog.String("name", c.Name), slog.Int64("offset", offset),
+					slog.String("path", c.Path), slog.Int64("offset", offset),
 					slog.String("err", err.Error()))
 			case err != nil:
 				return nil, removed, err
@@ -1122,7 +1125,7 @@ func (c *compactCleaner) refreshDigest(seg *segment, stamp int64, stampHdrs []st
 	}
 	if err != nil {
 		slog.Warn("key digest refresh failed; will rebuild next clean",
-			slog.String("name", c.Name), slog.String("err", err.Error()))
+			slog.String("path", c.Path), slog.String("err", err.Error()))
 	}
 }
 

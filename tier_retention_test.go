@@ -29,7 +29,7 @@ func fakeOffloadedTo(s *segment, tier string) *segment {
 func tierCleaner(t *testing.T, set func(o *deleteCleanerOptions)) *deleteCleaner {
 	t.Helper()
 	opts := deleteCleanerOptions{
-		Name:  "tier",
+		Path:  "tier",
 		Tiers: []Tier{{Name: defaultTierName, Store: &FileSegmentStore{}}},
 	}
 	set(&opts)

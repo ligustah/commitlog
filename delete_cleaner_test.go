@@ -17,7 +17,7 @@ func createSegment(t *testing.T, dir string, baseOffset, maxBytes int64) *segmen
 
 // Ensure Clean is a no-op when there are no segments.
 func TestDeleteCleanerNoSegments(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Bytes = 100
 	cleaner := newDeleteCleaner(opts)
 	segments, err := cleaner.Clean(nil, nil, Bound{})
@@ -27,7 +27,7 @@ func TestDeleteCleanerNoSegments(t *testing.T) {
 
 // Ensure Clean is a no-op when bytes and messages are 0.
 func TestDeleteCleanerNoRetentionSet(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
 
@@ -39,7 +39,7 @@ func TestDeleteCleanerNoRetentionSet(t *testing.T) {
 
 // Ensure Clean is a no-op when there is only one segment.
 func TestDeleteCleanerOneSegment(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Bytes = 100
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
@@ -52,7 +52,7 @@ func TestDeleteCleanerOneSegment(t *testing.T) {
 
 // Ensure Clean deletes segments to maintain the bytes limit.
 func TestDeleteCleanerBytes(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	dir := tempDir(t)
 
 	segs := make([]*segment, 5)
@@ -78,7 +78,7 @@ func TestDeleteCleanerBytes(t *testing.T) {
 // Ensure Clean is a no-op when there are segments and a bytes limit but the
 // segments don't exceed the limit.
 func TestDeleteCleanerBytesBelowLimit(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Bytes = 50
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
@@ -94,7 +94,7 @@ func TestDeleteCleanerBytesBelowLimit(t *testing.T) {
 
 // Ensure Clean deletes segments to maintain the messages limit.
 func TestDeleteCleanerMessages(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Messages = 10
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
@@ -115,7 +115,7 @@ func TestDeleteCleanerMessages(t *testing.T) {
 // Ensure Clean deletes segments to maintain the messages limit but keeps at
 // least the active segment.
 func TestDeleteCleanerMessagesKeepActiveSegment(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Messages = 5
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
@@ -141,7 +141,7 @@ func TestDeleteCleanerMessagesKeepActiveSegment(t *testing.T) {
 // Ensure Clean is a no-op when there are segments and a messages limit but the
 // segments don't exceed the limit.
 func TestDeleteCleanerMessagesBelowLimit(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Messages = 100
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
@@ -157,7 +157,7 @@ func TestDeleteCleanerMessagesBelowLimit(t *testing.T) {
 
 // Ensure Clean deletes segments to maintain the messages and bytes limits.
 func TestDeleteCleanerBytesMessages(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Messages = 15
 	// Bytes is the BINDING limit here (messages would keep 15), sized to admit
 	// exactly five segments. Derived, for the reason given in TestDeleteCleanerBytes.
@@ -188,7 +188,7 @@ func TestDeleteCleanerAge(t *testing.T) {
 		computeTTL = computeTTLBefore
 	}()
 
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Age = 100
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
@@ -220,7 +220,7 @@ func TestDeleteCleanerMessagesBelowAgeLimit(t *testing.T) {
 		computeTTL = computeTTLBefore
 	}()
 
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Age = 50
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)
@@ -241,7 +241,7 @@ func TestDeleteCleanerMessagesBelowAgeLimit(t *testing.T) {
 // Ensure Clean correctly calculates the number of messages in the log when
 // it's been compacted.
 func TestDeleteCleanerMessagesCompacted(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "foo"}
+	opts := deleteCleanerOptions{Path: "foo"}
 	opts.Retention.Messages = 10
 	cleaner := newDeleteCleaner(opts)
 	dir := tempDir(t)

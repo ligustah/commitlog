@@ -38,7 +38,7 @@ func twoTierSegs(t *testing.T) []*segment {
 func twoTierCleaner(t *testing.T, set func(o *deleteCleanerOptions)) *deleteCleaner {
 	t.Helper()
 	opts := deleteCleanerOptions{
-		Name: "chain",
+		Path: "chain",
 		Tiers: []Tier{
 			{Name: "cold", Store: &FileSegmentStore{}},
 			{Name: "hot", Store: &FileSegmentStore{}},

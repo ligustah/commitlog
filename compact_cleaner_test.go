@@ -21,7 +21,7 @@ type expectedMsg struct {
 
 // Ensure Compact is a no-op when there are no segments.
 func TestCompactCleanerNoSegments(t *testing.T) {
-	opts := compactCleanerOptions{Name: "foo"}
+	opts := compactCleanerOptions{Path: "foo"}
 	cleaner := newCompactCleaner(opts)
 	segments, _, err := cleaner.CompactSpec(CleanSpec{ceiling: 0}, nil)
 	require.NoError(t, err)
@@ -30,7 +30,7 @@ func TestCompactCleanerNoSegments(t *testing.T) {
 
 // Ensure Compact is a no-op when there is one segment.
 func TestCompactCleanerOneSegment(t *testing.T) {
-	opts := compactCleanerOptions{Name: "foo"}
+	opts := compactCleanerOptions{Path: "foo"}
 	cleaner := newCompactCleaner(opts)
 	dir := tempDir(t)
 

@@ -34,7 +34,7 @@ func oneMessagePerSegment(t *testing.T, n int) []*segment {
 
 // The message limit stops at the floor instead of deleting through it.
 func TestTheMessageLimitStopsAtTheRetentionFloor(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "floor"}
+	opts := deleteCleanerOptions{Path: "floor"}
 	opts.Retention.Messages = 5
 	cleaner := newDeleteCleaner(opts)
 
@@ -56,7 +56,7 @@ func TestTheMessageLimitStopsAtTheRetentionFloor(t *testing.T) {
 func TestTheBytesLimitStopsAtTheRetentionFloor(t *testing.T) {
 	segs := oneMessagePerSegment(t, 20)
 
-	opts := deleteCleanerOptions{Name: "floor"}
+	opts := deleteCleanerOptions{Path: "floor"}
 	// Room for two segments, derived from what one actually occupies rather
 	// than hard-coded (a literal here would encode the frame header's size).
 	opts.Retention.Bytes = 2 * segs[0].Position()
@@ -75,7 +75,7 @@ func TestTheAgeLimitStopsAtTheRetentionFloor(t *testing.T) {
 	computeTTL = func(age time.Duration) int64 { return 200 - int64(age) }
 	defer func() { computeTTL = before }()
 
-	opts := deleteCleanerOptions{Name: "floor"}
+	opts := deleteCleanerOptions{Path: "floor"}
 	opts.Retention.Age = 100
 	cleaner := newDeleteCleaner(opts)
 
@@ -104,7 +104,7 @@ func TestTheAgeLimitStopsAtTheRetentionFloor(t *testing.T) {
 // the field. That is why the spec takes a Bound, and this is the test that
 // fails if someone later decides a plain int64 would have been tidier.
 func TestARetentionFloorOfZeroProtectsTheWholeLog(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "floor"}
+	opts := deleteCleanerOptions{Path: "floor"}
 	opts.Retention.Messages = 5
 	opts.Retention.Bytes = 1
 	cleaner := newDeleteCleaner(opts)
@@ -122,7 +122,7 @@ func TestARetentionFloorOfZeroProtectsTheWholeLog(t *testing.T) {
 // for a floor — an unbounded log nothing complains about until a disk fills is
 // a worse bug than the one being fixed.
 func TestNoRetentionFloorLeavesTheLimitsAlone(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "floor"}
+	opts := deleteCleanerOptions{Path: "floor"}
 	opts.Retention.Messages = 5
 	cleaner := newDeleteCleaner(opts)
 
@@ -138,7 +138,7 @@ func TestNoRetentionFloorLeavesTheLimitsAlone(t *testing.T) {
 // The active segment is retained as it always was — the floor only ever
 // removes eligibility, it never adds any.
 func TestAFloorAboveTheLogStillKeepsTheActiveSegment(t *testing.T) {
-	opts := deleteCleanerOptions{Name: "floor"}
+	opts := deleteCleanerOptions{Path: "floor"}
 	opts.Retention.Messages = 1
 	cleaner := newDeleteCleaner(opts)
 

@@ -87,7 +87,14 @@ type deleteCleanerOptions struct {
 	// offloaded segments, so this never applies to it at all and only the local
 	// limits above govern.
 	Tiers []Tier
-	Name  string
+	// Path identifies the log in this cleaner's log lines, and exists only for
+	// that. It is the log DIRECTORY, matching every slog.String("path", l.Path)
+	// on commitLog itself — this was `Name`, logged under the key "name", while
+	// the compact cleaner logged a different value under the same key. One key
+	// meant two things across one log's output, so nothing could select a single
+	// log's cleaning activity. Options.Name is not usable for it: nothing
+	// requires it to be set.
+	Path string
 }
 
 // deleteCleaner implements the delete cleanup policy which deletes old log
@@ -148,10 +155,10 @@ func (c *deleteCleaner) cleanLocal(segments []*segment, floor Bound) ([]*segment
 
 	slog.Debug(
 		"Cleaning log based on retention policy",
-		slog.String("name", c.Name),
+		slog.String("path", c.Path),
 		slog.String("policy", fmt.Sprintf("%+v", c.Retention)),
 	)
-	defer slog.Debug("Finished cleaning log", slog.String("name", c.Name))
+	defer slog.Debug("Finished cleaning log", slog.String("path", c.Path))
 
 	// A partial deletion failure still returns the surviving segments (the
 	// apply functions delete oldest-first, so the survivors are a contiguous
