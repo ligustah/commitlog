@@ -98,6 +98,16 @@ func (l *commitLog) GetSidecar(name string) ([]byte, error) {
 	return ReadFileWithRetry(filepath.Join(l.Path, name))
 }
 
+// IdentityConflict returns the disagreement found when this log was opened, or
+// nil if there was none. See Options.Identity.
+//
+// It is a property of the OPEN, not of the log: the answer is fixed when New
+// returns and never changes for the life of this handle, so a caller checks it
+// once and a second call cannot report that the conflict went away.
+func (l *commitLog) IdentityConflict() *IdentityConflict {
+	return l.identityConflict
+}
+
 func (l *commitLog) RemoveSidecar(name string) error {
 	if err := checkSidecarName(name); err != nil {
 		return err

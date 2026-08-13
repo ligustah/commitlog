@@ -1415,6 +1415,22 @@ run_guard "a half-done finalize puts the log back" segment.go   '		return stderr
 # discriminator is the SUFFIX and not the rename target.
 run_guard "a failed truncate-before drops its trim" commitlog.go   '			defer t.dropIfUnpublished()' '			defer func() {}()'   '^TestAFailedTruncateBeforeDropsTheTrimItBuilt$'
 
+# A conflicted identity must not be re-stamped by the republish that keeps the
+# non-gating fields current. The republish carries the CALLER's descriptor, so
+# without the conflict term a plain codec or segment-size change adopts the
+# caller's identity and destroys the disagreement the open just found. That is
+# adopt-on-open arriving by the back door, on only the subset of opens that also
+# retune something else -- which is why it needs a guard rather than a comment.
+run_guard "a conflicted identity survives an unrelated retune" descriptor.go   '	if conflict == nil &&
+		(got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes) {' '	if got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes {'   '^TestAConflictIsNotErasedByAnUnrelatedSettingChange$'
+
+# The identity is the caller's opaque bytes and the descriptor is line-based, so
+# hex is load-bearing rather than a formatting choice: raw bytes would let a
+# caller's newline write a descriptor that does not parse back, turning a legal
+# identity into an unopenable log. Neutralized to the raw string, which compiles
+# and round-trips for every identity that happens to contain no separator.
+run_guard "a client identity cannot break the descriptor format" descriptor.go   '		fmt.Fprintf(&b, "identity=%s\n", hex.EncodeToString(d.Identity))' '		fmt.Fprintf(&b, "identity=%s\n", string(d.Identity))'   '^TestAnIdentityWithFileFormatBytesRoundTrips$'
+
 # An input a join did not rename over must leave WITH a link. Marked as left and
 # carrying none is the retention case — reader, skip me, those records are gone —
 # and taking that path here skips records sitting in the result. Neutralized by

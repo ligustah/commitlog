@@ -93,10 +93,27 @@ reason given in the comment there — a policy the log was not created with must
 never get applied at all. Client identity has the same shape and the same
 requirement, and the two-step is forced only by the API.
 
-**Proposal (needs durable_streams' agreement, not filed as a commitlog task):**
-let `Options` carry opaque client identity bytes, written with the descriptor at
-creation. "Unstamped" then stops being a state that exists rather than a state
-that is tolerated forever.
+**Shipped in v0.80.0.** `Options.Identity` carries opaque client bytes written
+with the descriptor at creation, so "unstamped" stops being a state that exists
+rather than one tolerated forever. durable_streams asked for one thing on top of
+the proposal, and it was the right thing: a mismatch on reopen must be
+*reported*, not silently adopted and not refused — "swallowing it just moves the
+window."
+
+That requirement shaped the design more than the storage did:
+
+- **Not refused**, because a caller whose identity disagrees still needs the log
+  open to do anything about it. Refusing takes a partition offline over
+  bookkeeping.
+- **Not adopted**, because a signal consumed at open time is lost to a crash
+  immediately after. Leaving the stored bytes alone is what makes the
+  disagreement survive restarts. `AdoptOptions` already meant "I know what this
+  log is, record it" and is the deliberate resolution, so no new knob.
+- The republish that keeps non-gating descriptor fields current carries the
+  *caller's* identity, so it had to be suppressed while a conflict stands —
+  otherwise a plain codec change re-stamps the log and destroys the
+  disagreement. That is adopt-on-open by the back door, firing only on the
+  subset of opens that also retune something else. Guarded and mutation-tested.
 
 ### 3b. Two reserved-name lists guard one directory, from two repos
 

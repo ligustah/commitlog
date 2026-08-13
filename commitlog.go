@@ -163,6 +163,11 @@ type commitLog struct {
 	// is handed out and released once by whichever of Close/Delete runs first,
 	// both of which already serialise on stopBackgroundLoops.
 	dirLock *dirLock
+	// identityConflict is the disagreement New found between Options.Identity
+	// and the identity stored beside the log, or nil. Written once in New
+	// before the log is handed out and read-only thereafter, so it needs no
+	// lock — same as dirLock above and for the same reason.
+	identityConflict *IdentityConflict
 	// reclaim holds store objects a rewrite superseded, waiting for the readers
 	// still on them to finish. Drained at the start of a clean pass.
 	reclaim []pendingReclaim
@@ -342,6 +347,31 @@ type Options struct {
 	// process passes the settings it believes the log has and is checked against
 	// what the log says; AdoptOptions would skip exactly that check.
 	AdoptOptions bool
+	// Identity is opaque bytes the CALLER uses to say which of its own entities
+	// this log's data belongs to. commitlog never interprets them; it stores
+	// them with the descriptor and reports a disagreement through
+	// IdentityConflict.
+	//
+	// It exists so that identity can be recorded ATOMICALLY WITH CREATION.
+	// A caller that stamps a log after New returns has a window — log on disk,
+	// not yet stamped — and a crash inside it leaves bytes that nothing
+	// identifies. That state is unrecoverable rather than merely untidy: an
+	// unstamped copy and a stale one look identical, so a caller cannot reclaim
+	// either without risking the wrong one, and the copy leaks permanently.
+	// commitlog creates the directory, so it is the only layer that can make
+	// the stamp and the log appear together.
+	//
+	// A mismatch on reopen is REPORTED, not refused and not adopted. Refusing
+	// would take a partition offline over bookkeeping; adopting would consume
+	// the signal, and consuming it on open means a crash immediately after
+	// loses it — which just moves the window rather than closing it. Leaving
+	// the stored bytes alone makes the disagreement survive restarts, so the
+	// caller can act on it whenever it is ready to.
+	//
+	// Resolve it deliberately with AdoptOptions, which rewrites the descriptor
+	// and so re-stamps the identity along with it. Empty means the caller does
+	// not use this, and never conflicts with anything.
+	Identity []byte
 	// DisableAutoClean stops the internal cleaner loop from running Clean. For
 	// logs whose owner drives cleaning explicitly (CleanWithSpec) — an automatic
 	// clean has no transaction awareness and must not race the owner's policy.
@@ -573,9 +603,15 @@ func New(opts Options) (_ CommitLog, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := reconcileDescriptor(descOpts, isNew); err != nil {
+	identityConflict, err := reconcileDescriptor(descOpts, isNew)
+	if err != nil {
 		return nil, err
 	}
+	// Set before the log is handed out, and never again — a conflict describes
+	// what THIS open found, so a later mutation would make it describe a moment
+	// that never happened. That immutability is what makes it readable without
+	// a lock.
+	l.identityConflict = identityConflict
 
 	// Everything from here on can fail with segments already open, and the log
 	// they belong to is about to be dropped on the floor — so it has to give

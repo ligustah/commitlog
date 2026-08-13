@@ -3,6 +3,7 @@ package commitlog
 import (
 	"bufio"
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -30,8 +31,21 @@ const (
 	// process that has the store and not the directory has the log, and it must
 	// be able to ask what the log IS from the same place it asks what the log
 	// HOLDS. The directory can only answer for logs that live entirely in it.
-	descriptorKey    = "log-descriptor"
+	descriptorKey = "log-descriptor"
+	// descriptorFileV0 is the original format. descriptorFileV1 adds the
+	// optional identity line.
+	//
+	// Both are READ; only V1 is written. The bump is not ceremony: set()
+	// refuses an unknown key on purpose, so a V0 build handed a file with an
+	// identity line reports "unknown descriptor field" — technically loud, but
+	// it names a field instead of a version and reads like corruption. The
+	// version line is what turns that into "this file is newer than me", which
+	// is the thing that is actually true.
+	//
+	// Reading V0 rather than refusing it is what makes this additive: an
+	// existing log simply has no identity, which is exactly what it means.
 	descriptorFileV0 = 0
+	descriptorFileV1 = 1
 )
 
 // ErrDescriptorMismatch is returned by New when the log was created with
@@ -64,6 +78,10 @@ type descriptor struct {
 	CompactTombstoneRetention time.Duration
 	Compression               compress.Codec
 	MaxSegmentBytes           int64
+	// Identity is the caller's opaque stamp; see Options.Identity. Deliberately
+	// absent from enforced(): it does not gate the open, because a caller whose
+	// identity disagrees still needs the log open to do anything about it.
+	Identity []byte
 }
 
 func descriptorFromOptions(opts Options) descriptor {
@@ -73,6 +91,7 @@ func descriptorFromOptions(opts Options) descriptor {
 		CompactTombstoneRetention: opts.CompactTombstoneRetention,
 		Compression:               opts.Compression,
 		MaxSegmentBytes:           opts.MaxSegmentBytes,
+		Identity:                  opts.Identity,
 	}
 }
 
@@ -165,7 +184,7 @@ func parseDescriptor(r io.Reader) (descriptor, error) {
 	if err != nil {
 		return d, errors.Wrap(err, "parse descriptor version")
 	}
-	if version != descriptorFileV0 {
+	if version != descriptorFileV0 && version != descriptorFileV1 {
 		return d, errors.Errorf("unsupported descriptor version %d", version)
 	}
 	for scanner.Scan() {
@@ -209,6 +228,13 @@ func (d *descriptor) set(key, value string) error {
 		d.Compression, err = compress.Parse(value)
 	case "max_segment_bytes":
 		d.MaxSegmentBytes, err = strconv.ParseInt(value, 10, 64)
+	case "identity":
+		// Hex because the bytes are the CALLER's and this file is line-based:
+		// an identity containing a newline or an "=" would otherwise write a
+		// descriptor that does not parse back, turning a caller's choice of
+		// bytes into an unopenable log. Hex has no such byte, and an odd or
+		// non-hex value is a parse error rather than a silent truncation.
+		d.Identity, err = hex.DecodeString(value)
 	default:
 		return errors.Errorf("unknown descriptor field %q", key)
 	}
@@ -222,12 +248,19 @@ func (d *descriptor) set(key, value string) error {
 // stored so the two cannot drift into writing different files.
 func renderDescriptor(d descriptor) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d\n", descriptorFileV0)
+	fmt.Fprintf(&b, "%d\n", descriptorFileV1)
 	fmt.Fprintf(&b, "compact=%t\n", d.Compact)
 	fmt.Fprintf(&b, "compact_min_age=%s\n", d.CompactMinAge)
 	fmt.Fprintf(&b, "compact_tombstone_retention=%s\n", d.CompactTombstoneRetention)
 	fmt.Fprintf(&b, "compression=%s\n", d.Compression)
 	fmt.Fprintf(&b, "max_segment_bytes=%d\n", d.MaxSegmentBytes)
+	// Omitted entirely when unset, so a caller that does not use identity gets
+	// the same file it always did. An empty line would round-trip to []byte{}
+	// rather than nil, which is a distinction identityConflict would then have
+	// to know about for no benefit.
+	if len(d.Identity) > 0 {
+		fmt.Fprintf(&b, "identity=%s\n", hex.EncodeToString(d.Identity))
+	}
 	return b.String()
 }
 
@@ -311,10 +344,13 @@ func logIsNew(opts Options) (bool, error) {
 //
 // isNew reports whether the log existed — a genuinely new one simply records
 // what it was created with.
-func reconcileDescriptor(opts Options, isNew bool) error {
+// It also returns the identity disagreement, if any, for the caller to report
+// through IdentityConflict. A conflict is NOT an error and NOT written back:
+// see Options.Identity for why both of those would be worse than reporting it.
+func reconcileDescriptor(opts Options, isNew bool) (*IdentityConflict, error) {
 	want := descriptorFromOptions(opts)
 	if isNew || opts.AdoptOptions {
-		return publishDescriptor(opts, want)
+		return nil, publishDescriptor(opts, want)
 	}
 	got, err := loadDescriptor(opts)
 	if err != nil {
@@ -323,23 +359,61 @@ func reconcileDescriptor(opts Options, isNew bool) error {
 			// reconstruct it, and adopting whatever the caller happens to pass
 			// is exactly the behaviour this prevents, so it is the same refusal
 			// as a mismatch and takes the same deliberate opt-in.
-			return errors.Wrapf(ErrDescriptorMismatch,
+			return nil, errors.Wrapf(ErrDescriptorMismatch,
 				"%s has no descriptor; set AdoptOptions to record the "+
 					"settings it should have been created with", descriptorHome(opts))
 		}
-		return err
+		return nil, err
 	}
 	if !got.enforced(want) {
-		return errors.Wrapf(ErrDescriptorMismatch, "%s: %s",
+		return nil, errors.Wrapf(ErrDescriptorMismatch, "%s: %s",
 			descriptorHome(opts), got.describeDifference(want))
 	}
+	conflict := identityConflict(got.Identity, want.Identity)
 	// Agreed on what gates. Keep the non-gating fields current so the descriptor
 	// still describes the log after a legitimate compression or segment-size
 	// change.
-	if got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes {
-		return publishDescriptor(opts, want)
+	//
+	// The republish carries `want`, whose Identity is the CALLER's — so it must
+	// not run while a conflict stands, or a plain compression change would
+	// silently re-stamp the log and destroy the disagreement this open just
+	// found. That is the adopt-on-open failure arriving by the back door, and
+	// it would only show up on the subset of opens that also retune a codec.
+	if conflict == nil &&
+		(got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes) {
+		return nil, publishDescriptor(opts, want)
 	}
-	return nil
+	return conflict, nil
+}
+
+// IdentityConflict reports that a log was opened with an Options.Identity that
+// disagrees with the one stored beside it: the caller believes these bytes
+// belong to one of its entities, and the log says they belong to another.
+//
+// Stored is nil when the log carries no identity at all — a log created before
+// its caller used the feature, or by a caller that does not. That is a
+// different fact from "belongs to someone else" and is kept distinguishable,
+// because the two warrant opposite actions: unidentified data may still be the
+// caller's own, while data stamped for another owner is not.
+type IdentityConflict struct {
+	// Stored is the identity found beside the log, or nil if it had none.
+	Stored []byte
+	// Opened is the Options.Identity this open was given.
+	Opened []byte
+}
+
+// identityConflict compares a stored identity with the one the caller opened
+// with, returning nil when there is nothing to report.
+//
+// A caller that passes no identity conflicts with nothing, whatever is stored.
+// The feature is opt-in, and a process that does not use identity has no
+// opinion to disagree with — reporting one would make every existing tool that
+// opens a stamped log start receiving a conflict it cannot interpret.
+func identityConflict(stored, opened []byte) *IdentityConflict {
+	if len(opened) == 0 || bytes.Equal(stored, opened) {
+		return nil
+	}
+	return &IdentityConflict{Stored: stored, Opened: opened}
 }
 
 // descriptorHome names the place the descriptor was read from, for an error

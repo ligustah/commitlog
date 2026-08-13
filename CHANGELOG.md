@@ -5,6 +5,59 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.80.0 — 2026-08-13
+
+### Added
+
+- **`Options.Identity` and `CommitLog.IdentityConflict()`** — opaque caller
+  bytes saying which of its own entities a log's data belongs to, recorded
+  atomically with the log's creation.
+
+  It closes a gap that could only be closed here. A caller that stamps identity
+  *after* `New` returns has a window — log on disk, not yet stamped — and a crash
+  inside it leaves bytes nothing identifies. That state is unrecoverable rather
+  than untidy: an unstamped copy and a stale one look identical, so neither can
+  be reclaimed without risking the wrong one, and the copy leaks permanently.
+  commitlog creates the directory, so it is the only layer that can make the
+  stamp and the log appear together. `New` already settled the descriptor before
+  opening anything; the identity now rides that same atomic write.
+
+  A mismatch on reopen is **reported, not refused and not adopted**. Refusing
+  would take a partition offline over bookkeeping. Adopting would consume the
+  signal — and consuming it at open time means a crash immediately after loses
+  it, which moves the window instead of closing it. The stored bytes are left
+  alone, so the disagreement is still there on the next open and the one after
+  that. `AdoptOptions` re-stamps and is the deliberate resolution.
+
+  `IdentityConflict.Stored` is nil when the log carried no identity at all,
+  which is kept distinguishable from "stamped for someone else" because the two
+  warrant opposite actions: unidentified data may still be the caller's own.
+
+  The descriptor file is now version 1. Version 0 is still read — an older log
+  simply has no identity — so this is additive and no log needs migrating. The
+  identity is hex-encoded because the descriptor is line-based and the bytes are
+  the caller's: a raw newline would otherwise write a descriptor that does not
+  parse back, turning a legal choice of identity into an unopenable log.
+
+### Changed
+
+- **`hack/layercheck.sh` replaces a layering metric that could not fail.**
+  `docs/layering.md` defended its stack with "`*commitLog` is named by six
+  files". That count is now ten with nothing violated in between: almost every
+  hit is a `func (l *commitLog)` method *declaration*, and a file full of
+  commitLog methods is by definition the top layer — so the number measured how
+  the log's methods are spread across files, and would have read identically on
+  a tree where `index.go` had started calling the log.
+
+  The check now measures direction: nothing in the lower half of the stack may
+  name `*commitLog`, as receiver, field, or parameter. A non-test `.go` file in
+  neither half is also an error, so a new file cannot escape the rule by not
+  being mentioned. Runs in CI beside `docdrift`.
+
+  `docs/audit-2026-08-13-separation.md` records the full separation-of-concerns
+  pass, including the two boundary findings that are still open questions rather
+  than code.
+
 ## v0.79.2 — 2026-08-13
 
 ### Fixed

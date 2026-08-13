@@ -502,6 +502,23 @@ type CommitLog interface {
 	// sidecar is a no-op.
 	RemoveSidecar(name string) error
 
+	// IdentityConflict returns the disagreement between Options.Identity and
+	// the identity stored beside the log, found when this log was opened, or
+	// nil if there was none.
+	//
+	// A conflict means the caller believes these bytes belong to one of its
+	// entities and the log says otherwise — typically that a name was reused
+	// and this copy predates the reuse. The log is fully open and usable; what
+	// to do about it is the caller's, since only the caller knows what its
+	// identities mean.
+	//
+	// The conflict is NOT written back, so it is still there on the next open.
+	// That is deliberate: a signal consumed at open time is lost by a crash
+	// immediately after, which moves the window instead of closing it.
+	// AdoptOptions re-stamps the log and is how a caller says "these are mine
+	// after all".
+	IdentityConflict() *IdentityConflict
+
 	// Close closes each log segment file and stops the background goroutine
 	// checkpointing the high watermark to disk.
 	Close() error
