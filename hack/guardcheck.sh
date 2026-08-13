@@ -1666,6 +1666,18 @@ run_guard "a prefix read that runs out of segment says so" prefix_read.go   $'		
 					ErrSegmentUnreadable, seg.BaseOffset, run.offs[i])'   $'				return nil, errors.Wrapf(err,
 					"prefix read reached the end of segment %d before offset %d",
 					seg.BaseOffset, run.offs[i])'   '^TestAPrefixReadReportsADamagedSegmentAsUnreadable$'
+# A caller's store may wrap the io.EOF it returns. SegmentStore is implemented
+# OUTSIDE commitlog, and its own doc tells implementers that ErrObjectNotFound
+# may be wrapped -- so an implementation that wraps everything is following the
+# interface, not abusing it. Neutralized to the `==` that shipped, which skips
+# the short-read arm for exactly those stores: a buffer holding valid bytes is
+# discarded and a hard error returned in its place.
+#
+# Anchored on refill's condition rather than the sibling in storeBacking.ReadAt.
+# That one is changed for consistency and its comment says so, but the error it
+# sees can only be commitlog's own bare io.EOF today, so no test asserts it and a
+# guard there would be neutralizing a line nothing reaches.
+run_guard "a store may wrap the io.EOF it returns" segment_store.go   '	if err != nil && !(errors.Is(err, io.EOF) && nread > 0) {'   '	if err != nil && !(err == io.EOF && nread > 0) {'   '^TestAStoreMayWrapTheIoEOFItReturns$'
 run_guard "a prefix read that cannot parse a frame says so" prefix_read.go   $'			return nil, fmt.Errorf("%w: prefix read of segment %d at offset %d: %w",
 				ErrSegmentUnreadable, seg.BaseOffset, run.offs[i], err)'   $'			return nil, errors.Wrapf(err, "prefix read of segment %d at offset %d",
 				seg.BaseOffset, run.offs[i])'   '^TestAPrefixReadReportsAnUnparseableFrameAsUnreadable$'

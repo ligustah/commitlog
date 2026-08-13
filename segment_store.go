@@ -154,6 +154,16 @@ type SegmentStore interface {
 	// ReadAt reads len(p) bytes at off from the object under key, with
 	// io.ReaderAt semantics (a short read returns io.EOF). A restore-required
 	// store returns ErrRestoreRequired; an absent key returns ErrObjectNotFound.
+	//
+	// Every one of those may be WRAPPED, as ErrObjectNotFound's own doc already
+	// says of itself — commitlog compares with errors.Is. Stated here because it
+	// was not, and the omission was load-bearing: the two places that read a
+	// caller's store compared io.EOF with `==`, so an implementation that
+	// wrapped its errors (which is simply what Go code does) had one sentinel on
+	// this method survive and the sibling beside it not. What that cost was the
+	// short-read arm — the object smaller than the size commitlog recorded —
+	// where a buffer holding valid bytes was discarded and a hard error returned
+	// in its place.
 	ReadAt(key string, p []byte, off int64) (int, error)
 	// Stream returns a reader over the object under key from off to its end,
 	// for a caller that knows it is going to read all of it. The caller must
@@ -452,7 +462,10 @@ func (b *storeBacking) ReadAt(p []byte, off int64) (int, error) {
 		m, err := b.readOne(p[n:], cur)
 		n += m
 		if err != nil {
-			if err == io.EOF && n == len(p) {
+			// errors.Is, not ==: this error came from readOne, and readOne
+			// forwards what the CALLER's store returned. See ReadAt on the
+			// SegmentStore interface.
+			if errors.Is(err, io.EOF) && n == len(p) {
 				return n, nil
 			}
 			return n, err
@@ -487,7 +500,13 @@ func (b *storeBacking) refill(off int64) error {
 	}
 	b.buf = b.buf[:want]
 	nread, err := b.store.ReadAt(b.key, b.buf, off)
-	if err != nil && !(err == io.EOF && nread > 0) {
+	// errors.Is rather than ==, because b.store is the CALLER's implementation
+	// and a wrapped io.EOF is a legal thing for it to return. With ==, a store
+	// that wrapped its errors skipped this arm entirely: the short read at the
+	// tail stopped being "expected and fine" and became a discarded buffer plus
+	// a hard error, with the bytes it did return thrown away. See the ReadAt
+	// contract on the SegmentStore interface, which now says so out loud.
+	if err != nil && !(errors.Is(err, io.EOF) && nread > 0) {
 		b.bufOff = -1
 		b.buf = b.buf[:0]
 		return err

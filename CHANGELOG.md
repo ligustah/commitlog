@@ -9,6 +9,22 @@ library from that fork onward.
 
 ### Fixed
 
+- **A `SegmentStore` that wraps its errors had its short reads treated as
+  failures.** `SegmentStore` is implemented by callers — that is the point of
+  the interface, so the cloud dependency never enters commitlog — and wrapping
+  an error with `%w` is simply what Go code does. `ErrObjectNotFound`'s doc says
+  so explicitly ("possibly wrapped, so callers use `errors.Is`") and commitlog
+  honours it. `io.EOF`, returned by the *same* `ReadAt`, had no such statement
+  and was compared with `==` in the two places that read a caller's store.
+
+  The cost is on the short-read path, where the object is smaller than the size
+  commitlog recorded: the arm that exists to accept that (`nread > 0`) was
+  skipped for a wrapping store, so a buffer holding valid bytes was discarded
+  and a hard error returned in its place. `refill` and `storeBacking.ReadAt` now
+  use `errors.Is`, and `ReadAt`'s contract states that any of its sentinels may
+  arrive wrapped — which is the half that keeps this from recurring, since an
+  implementer had no way to know.
+
 - **A digest-planned prefix read reported a damaged segment as `io.EOF`.**
   `KeyPrefix` reads plan from the key digest and then collect the named offsets
   in one forward pass. When the segment ended before an offset its own digest
