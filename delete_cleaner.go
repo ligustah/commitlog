@@ -51,8 +51,14 @@ func dropOldestPrefix(segments []*segment, idx, maxDrop int) ([]*segment, error)
 // A segment is eligible only if the whole of it lies below the floor, which is
 // to say the NEXT segment starts at or below it — deletion happens at segment
 // granularity, so a segment holding one protected record is protected entire.
-// The last segment is never eligible, which costs nothing: every local limit
-// already retains it as the active one.
+//
+// The last segment is never eligible THERE, in the walk below, and that costs
+// nothing because a local limit retains it anyway — as keepActiveSegment, which
+// is where the rule actually lives. It is worth being exact about which branch
+// this describes: with no floor there is no walk, and the answer is every
+// segment including the last. Nothing downstream of that would stop retention
+// deleting the active segment, so a reader taking "never eligible" for the
+// whole function would conclude the protection is redundant, and it is not.
 func deletablePrefix(segments []*segment, floor Bound) int {
 	f, ok := floor.Get()
 	if !ok {
