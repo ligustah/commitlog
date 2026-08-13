@@ -43,6 +43,15 @@ func TestNegativeOptionsAreRefused(t *testing.T) {
 		// the future, which makes every sealed segment older than it and
 		// offloads the whole log on the first pass.
 		"LocalRetentionAge": func(o *Options) { o.LocalRetentionAge = -time.Second },
+		// concurrencyBudget defaults on `v <= 0`, so these were the same defect
+		// in a fourth and fifth place — but reachable by FOLLOWING THE
+		// DOCUMENTATION rather than by fumbling a subtraction. The sibling
+		// CoalesceBytes knobs are described in the same Options paragraph and
+		// that paragraph teaches that a negative is meaningful and powerful
+		// here, so a caller who reads it and asks for the analogous extreme
+		// silently received 8 or 64 instead.
+		"PrefixReadConcurrency":     func(o *Options) { o.PrefixReadConcurrency = -1 },
+		"PrefixReadTierConcurrency": func(o *Options) { o.PrefixReadTierConcurrency = -1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := Options{Path: tempDir(t), Compact: true}
@@ -56,6 +65,33 @@ func TestNegativeOptionsAreRefused(t *testing.T) {
 				"the error must name the option the caller got wrong")
 		})
 	}
+}
+
+// The other side of the asymmetry, pinned so it is not "tidied up" into
+// consistency. Four PrefixRead knobs sit in one Options paragraph and only two
+// of them refuse a negative, which looks like an oversight and is not: a
+// negative CoalesceBytes is the documented way to say "never coalesce, one
+// request per isolated record", a behaviour a caller can want and cannot
+// otherwise express, while a negative Concurrency has no defensible meaning —
+// the analogous extreme is unbounded on one reading and serial on the other.
+//
+// Without this test, adding the two CoalesceBytes fields to the refusal list
+// above reads as finishing the job, and the only thing that would go red is a
+// cost test in another file that does not mention New.
+func TestANegativeCoalesceBudgetIsAValueNotAMistake(t *testing.T) {
+	l, err := New(Options{
+		Path: tempDir(t), Compact: true,
+		PrefixReadCoalesceBytes:     -1,
+		PrefixReadTierCoalesceBytes: -1,
+	})
+	require.NoError(t, err, "a negative coalesce budget means 'never coalesce', not a mistake")
+	t.Cleanup(func() { l.Close() })
+
+	// And it resolves to a zero-byte budget rather than to the default, which
+	// is the behaviour the sign is there to express.
+	require.Equal(t, int64(0), coalesceBudget(-1, defaultPrefixReadCoalesceBytes))
+	require.Equal(t, int64(defaultPrefixReadCoalesceBytes),
+		coalesceBudget(0, defaultPrefixReadCoalesceBytes))
 }
 
 // Zero still means "use the default", which is the whole reason these checks

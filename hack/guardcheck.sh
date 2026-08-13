@@ -1432,6 +1432,15 @@ run_guard "an oversized store descriptor is refused, not allocated" descriptor.g
 run_guard "a conflicted identity survives an unrelated retune" descriptor.go   '	if conflict == nil &&
 		(got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes) {' '	if got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes {'   '^TestAConflictIsNotErasedByAnUnrelatedSettingChange$'
 
+# concurrencyBudget defaults on `v <= 0`, so a negative reaches the arm that
+# exists to catch a MISSING value and the caller silently gets 8 or 64. Needs a
+# guard rather than a comment because it is reachable by following the docs: the
+# sibling CoalesceBytes knobs sit in the same Options paragraph and that
+# paragraph teaches that a negative is meaningful there. Neutralized by dropping
+# the tier entry alone, which compiles and leaves the pair half-checked -- the
+# state this was in before, and the one a reader skims past.
+run_guard "a negative prefix-read concurrency is refused, not defaulted" commitlog.go   '		{"PrefixReadTierConcurrency", opts.PrefixReadTierConcurrency < 0, opts.PrefixReadTierConcurrency},' ''   '^TestNegativeOptionsAreRefused$'
+
 # The other direction of the same republish. Building the published record from
 # `want` lets a caller with NO identity publish an empty one, which renders as no
 # identity line at all and erases the stamp -- manufacturing the unstamped copy

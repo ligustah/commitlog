@@ -308,6 +308,12 @@ type Options struct {
 	// reads ReadKeyPrefix keeps in flight against LOCAL segments and against
 	// segments offloaded to the tier. Zero takes the defaults.
 	//
+	// Unlike the CoalesceBytes pair above, a NEGATIVE value is refused by New
+	// rather than meaning anything. The asymmetry is deliberate: "never
+	// coalesce" is one specific behaviour a caller can want and cannot
+	// otherwise express, whereas the analogous extreme here is unbounded on one
+	// reading and serial on the other, and this package should not pick.
+	//
 	// The unit is a RUN — a span of wanted records read contiguously (see
 	// PrefixReadCoalesceBytes) — not a segment, so a prefix whose keys are
 	// concentrated in a few segments still fans out.
@@ -497,12 +503,38 @@ func New(opts Options) (_ CommitLog, err error) {
 		{"HWCheckpointInterval", opts.HWCheckpointInterval < 0, opts.HWCheckpointInterval},
 		{"CleanerInterval", opts.CleanerInterval < 0, opts.CleanerInterval},
 		{"LocalRetentionAge", opts.LocalRetentionAge < 0, opts.LocalRetentionAge},
+		// The two Concurrency knobs, because concurrencyBudget defaults on
+		// `v <= 0` — a negative reaches the arm that exists to catch a missing
+		// value, and the caller silently gets 8 or 64 instead of what it asked
+		// for. That is the same defect as the three above wearing a fourth hat,
+		// but it is reachable by FOLLOWING THE DOCUMENTATION rather than by
+		// fumbling a subtraction: the sibling CoalesceBytes knobs are described
+		// in the same Options paragraph, and that paragraph teaches that a
+		// negative is meaningful and powerful here ("NEGATIVE means never
+		// coalesce... the maximum-concurrency and maximum-request-count
+		// setting"). A caller who reads that and writes PrefixReadConcurrency:
+		// -1 expecting the analogous extreme gets the default, and nothing says
+		// otherwise.
+		//
+		// Refused rather than given a meaning, because there is no defensible
+		// one to give: the analogous "extreme" is unbounded on one reading and
+		// serial on the other, and inventing either would be this package
+		// deciding something the caller was trying to say.
+		{"PrefixReadConcurrency", opts.PrefixReadConcurrency < 0, opts.PrefixReadConcurrency},
+		{"PrefixReadTierConcurrency", opts.PrefixReadTierConcurrency < 0, opts.PrefixReadTierConcurrency},
 		// CleanRewriteBudget is NOT here, and the omission is deliberate: a
 		// negative budget means "no budget at all", which is what every
 		// spec-less pass had before one existed. It is the one field in this
 		// group where a negative is a value the caller can mean, and
 		// TestTheAutomaticCleanIsBounded asserts it survives the
 		// zero-means-default rule. Adding it here turns that assertion red.
+		//
+		// PrefixReadCoalesceBytes and PrefixReadTierCoalesceBytes are NOT here
+		// either, for the same reason and with the same hazard: coalesceBudget
+		// maps a negative to a zero-byte budget, which is the documented way to
+		// say "never coalesce, one request per isolated record". Named here
+		// because they sit beside the two Concurrency fields just added, and
+		// the next person to extend this list will be looking at all four.
 	} {
 		if c.bad {
 			return nil, errors.Errorf("commitlog: %s is %v; it must not be negative",
