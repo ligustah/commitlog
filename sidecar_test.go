@@ -240,7 +240,14 @@ func TestAClientSidecarSurvivesAnOpenWhateverItIsCalled(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600))
 	}
 
-	reopened, err := New(Options{Name: "survives", Path: dir, MaxSegmentBytes: 1 << 20})
+	// DisableAutoClean because the assertion below reads l.segments directly, and
+	// the cleaner loop New starts writes it — cleanAtOpen races the read, which
+	// the -race job caught and nothing else would have. It costs this test
+	// nothing: the cleaner works off l.segments and never reads the directory, so
+	// it is not one of the things that could have eaten a sidecar.
+	reopened, err := New(Options{
+		Name: "survives", Path: dir, MaxSegmentBytes: 1 << 20, DisableAutoClean: true,
+	})
 	require.NoError(t, err, "a client's own sidecar stopped the log from opening")
 	t.Cleanup(func() { _ = reopened.Close() })
 
