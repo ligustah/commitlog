@@ -60,6 +60,72 @@ func TestADescriptorRoundTripsEveryField(t *testing.T) {
 	require.Equal(t, full, got, "a descriptor field did not survive the round trip")
 }
 
+// Every disagreement enforced() refuses, describeDifference names.
+//
+// The two methods enumerate the same fields, separately — the third copy of the
+// descriptor's field list in this file, after renderDescriptor and set(). A
+// field added to enforced() and not to describeDifference is not a crash: the
+// open is refused with ErrDescriptorMismatch and an EMPTY explanation, so the
+// caller is told their options disagree with the log and not which knob. That
+// error is the one thing standing between a caller and a silently different
+// retention policy, and it is read by a human at exactly the moment they have
+// the least context.
+//
+// Found the same way as the two lists the sidecar prefix replaced, and derived
+// the same way: perturb one field of a full descriptor at a time, ask enforced()
+// whether it cares, and require an explanation whenever it does. The fields come
+// from the struct, so a new one arrives here without anyone adding it.
+func TestEveryEnforcedDisagreementIsNamed(t *testing.T) {
+	base := descriptor{
+		Compact:                   true,
+		CompactMinAge:             90 * time.Minute,
+		CompactTombstoneRetention: 36 * time.Hour,
+		Compression:               compress.Zstd,
+		MaxSegmentBytes:           12345,
+		Identity:                  []byte{0xde, 0xad, 0xbe, 0xef},
+	}
+
+	enforcedFields := 0
+	bt := reflect.TypeOf(base)
+	for i := range bt.NumField() {
+		name := bt.Field(i).Name
+		other := base
+		field := reflect.ValueOf(&other).Elem().Field(i)
+		switch field.Kind() {
+		case reflect.Bool:
+			field.SetBool(!field.Bool())
+		case reflect.Int, reflect.Int64:
+			field.SetInt(field.Int() + 1)
+		case reflect.Uint, reflect.Uint8:
+			field.SetUint(field.Uint() + 1)
+		case reflect.Slice:
+			field.SetBytes([]byte{0x01})
+		default:
+			// Loud rather than skipped. A field this test does not know how to
+			// perturb is a field it silently reports nothing about, which is the
+			// exact failure it exists to catch, one level up.
+			t.Fatalf("descriptor.%s has kind %s and this test does not know how to "+
+				"change it, so it is asserting nothing about that field", name, field.Kind())
+		}
+
+		if base.enforced(other) {
+			continue // Not a gating field; enforced() is entitled not to care.
+		}
+		enforcedFields++
+		require.NotEmpty(t, base.describeDifference(other),
+			"descriptor.%s gates the open — enforced() refuses a log that disagrees "+
+				"about it — but describeDifference says nothing, so New returns "+
+				"ErrDescriptorMismatch with an empty explanation and the caller is not "+
+				"told which knob is wrong", name)
+	}
+
+	// enforced() comparing nothing would make every field skip the assertion and
+	// leave this green over an empty loop.
+	require.GreaterOrEqual(t, enforcedFields, 3,
+		"only %d descriptor fields gate the open; enforced() is comparing less than it "+
+			"should, or this fixture no longer differs where it needs to", enforcedFields)
+}
+
 // appendOne writes a record so the directory holds a real log.
 func appendOne(t *testing.T, l CommitLog) {
 	t.Helper()

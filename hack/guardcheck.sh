@@ -1533,6 +1533,14 @@ run_guard "every descriptor field is written" descriptor.go   '	fmt.Fprintf(&b, 
 
 run_guard "every descriptor field is read back" descriptor.go   '	case "max_segment_bytes":' '	case "max_segment_bytes_unreachable":'   '^TestADescriptorRoundTripsEveryField$'
 
+# describeDifference enumerates the same fields as enforced(), separately -- the
+# third copy of the descriptor's field list in that file. A field in enforced()
+# and not here is not a crash: the open is refused with ErrDescriptorMismatch and
+# an EMPTY explanation, so the caller is told their options disagree with the log
+# and not which knob. Neutralized by making one arm unreachable, which is exactly
+# what forgetting to add one looks like.
+run_guard "an enforced disagreement is named" descriptor.go   '	if d.CompactMinAge != other.CompactMinAge {' '	if false && d.CompactMinAge != other.CompactMinAge {'   '^TestEveryEnforcedDisagreementIsNamed$'
+
 run_guard "a descriptor identity is written when it is set" descriptor.go   '	if len(d.Identity) > 0 {' '	if false {'   '^TestADescriptorRoundTripsEveryField$'
 
 # An input a join did not rename over must leave WITH a link. Marked as left and
