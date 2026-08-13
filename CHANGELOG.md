@@ -5,6 +5,39 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.79.1 — 2026-08-13
+
+### Fixed
+
+- **A failed `Truncate` could strand the replacement it had already built.** A
+  rewrite builds a suffixed working copy and publishes it by renaming the suffix
+  off, so a copy still carrying its suffix has not been published and has to be
+  dropped. Five paths build one — `cleanSegment`, `consolidateOne`, `joinOne`,
+  `Truncate` and `TruncateBefore` — and each carried its own transcription of
+  that disposal.
+
+  `Truncate`'s was a closure wired into three of its four error returns. The
+  fourth is a failed `Replace`, which strands the copy in exactly the same state:
+  open, mapped, named by nothing, its handle and index mapping held for the life
+  of the process. On Windows that is a directory that cannot be removed after a
+  `Close` that reported success.
+
+  All five now share `segment.dropIfUnpublished`, which reads the suffix and also
+  honours `left`, so a segment that has already departed is not deleted twice.
+  `TruncateBefore` was the last one found and the only one with no test asserting
+  it disposed of anything; it now has one. Guards re-anchored per call site
+  rather than on the shared method — one anchor would prove the rule exists and
+  stop proving each path invokes it, and the invocation is the half that gets
+  forgotten.
+
+### Internal
+
+- `GUARDCHECK_ANCHORS=1 hack/guardcheck.sh` resolves every guard's anchor and
+  runs nothing else: seconds instead of forty minutes, for the one question worth
+  asking after any refactor — did I move text a guard is standing on? It ignores
+  the platform deferral, so it is also the only thing on a Linux box that can
+  speak for the Windows-only anchors.
+
 ## v0.79.0 — 2026-08-13
 
 ### Fixed
