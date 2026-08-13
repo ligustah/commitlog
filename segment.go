@@ -117,7 +117,10 @@ type segment struct {
 	// index would then be silently skipped by the next full one.
 	//
 	// Both start true: a segment opened from disk was written by a process whose
-	// flush state we cannot know. Guarded by the segment lock.
+	// flush state we cannot know. reconcileIndexTail clears dirtyIndex again for
+	// a segment whose index it finds already describing its log — see there for
+	// why that is the only thing that can establish it, and why an fsync at close
+	// never could. Guarded by the segment lock.
 	dirtyData  bool
 	dirtyIndex bool
 
@@ -1088,10 +1091,44 @@ func (s *segment) reconcileIndexTail(committedThrough int64) error {
 	if s.Index == nil {
 		return nil // offloaded: index is remote and the segment is immutable
 	}
+	before := s.Index.numEntries()
+	var err error
 	if s.blockMode {
-		return s.reconcileIndexTailBlocks()
+		err = s.reconcileIndexTailBlocks()
+	} else {
+		err = s.reconcileIndexTailRaw(committedThrough)
 	}
-	return s.reconcileIndexTailRaw(committedThrough)
+	if err != nil {
+		return err
+	}
+	// A reconcile that wrote NOTHING is the only proof this package has that the
+	// index on disk describes the log beside it, and it is the reason a segment
+	// opened from disk need not be fsynced on the way out.
+	//
+	// dirtyIndex starts true for anything opened from disk, on the ground that it
+	// "was written by a process whose flush state we cannot know". That was the
+	// right worry and the wrong remedy: fsyncing at CLOSE does not recover a
+	// predecessor's lost tail, it only re-writes whatever survived. What recovers
+	// it is this walk — and until it ran on sealed segments too, the worry was
+	// answered by a flush that could not have fixed the thing it was worried
+	// about.
+	//
+	// So the mark now says what it can actually establish: nothing here needs
+	// writing back. The index is derived, every segment's is checked at open, and
+	// a short one is filled in. Where this walk DID write, the mark is left alone
+	// — those entries are genuinely unflushed, and close still flushes them.
+	//
+	// Not a claim that the bytes are on stable storage in every case: a
+	// predecessor that crashed between writing index bytes and flushing them
+	// leaves them in the page cache, complete, and they can still be lost to
+	// power failure afterwards. What changed is that losing them is now
+	// recoverable rather than silent — the next open walks the gap and rebuilds
+	// it. See TestAShortIndexOnASealedSegmentHidesRecords for what that cost
+	// while it was silent.
+	if s.Index.numEntries() == before {
+		s.dirtyIndex = false
+	}
+	return nil
 }
 
 // reconcileIndexTailRaw scans raw message-set frames past the last indexed one

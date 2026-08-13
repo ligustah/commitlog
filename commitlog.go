@@ -729,6 +729,50 @@ func (l *commitLog) open() error {
 	if _, err := l.adoptTierManifestLocked(tier); err != nil {
 		return err
 	}
+	// Every SEALED segment's index tail, before anything reads an offset off one.
+	//
+	// The active segment has been reconciled here since the beginning, on the
+	// stated ground that the write path appends the log frame before its index
+	// entry so a crash leaves a short index — and indexOvershootsLog's own
+	// comment calls an index behind its log "ordinary ... and reconcileIndexTail
+	// fills it in". That was true of the active segment and of nothing else.
+	// setupIndex's rebuild fires on the OPPOSITE direction, an index reaching
+	// PAST its log, so a sealed segment whose index stopped short was repaired by
+	// no one.
+	//
+	// It is not a slow read either. setupIndex takes lastOffset straight from the
+	// index's last entry, so the segment answers as if the records past it are
+	// not there: one lost index entry in the first of a 60-record log cost 56 of
+	// them, permanently. See TestAShortIndexOnASealedSegmentHidesRecords.
+	//
+	// This is O(1) per healthy segment and does NOT scan the log. The walk starts
+	// at the last indexed frame's end and runs while that is below the file size,
+	// so an index that covers its log executes the loop body zero times; the only
+	// segments that read anything are the ones that are actually short, and only
+	// over the part that is missing.
+	//
+	// Runs BEFORE resolveSegmentOverlaps because that decides containment from
+	// NextOffset, which is derived from the very lastOffset a short index
+	// understates — resolving first would judge overlaps on offsets this pass is
+	// about to correct, and keeping the wrong segment there opens a hole.
+	for i, s := range l.segments {
+		if i == len(l.segments)-1 {
+			// The last one is the active segment, reconciled below against l.hw.
+			// Its torn tail is the ordinary unclean shutdown and may be dropped;
+			// a sealed segment's may not, which is a different floor, so it is
+			// left to the call that already knows the right one.
+			break
+		}
+		// The floor is the NEXT segment's base, not the high watermark. Anything
+		// this segment drops below that is not a discarded uncommitted tail, it
+		// is a HOLE between two segments that both still exist — and a hole is
+		// the one outcome the recovery paths here consistently refuse. The
+		// watermark is the right floor only for the segment nothing follows.
+		if err := s.reconcileIndexTail(l.segments[i+1].BaseOffset - 1); err != nil {
+			return errors.Wrapf(err, "reconcile index tail of sealed segment %d",
+				s.BaseOffset)
+		}
+	}
 	// After every source of segments has been read, and before anything reads
 	// the list: two of them can describe the same records.
 	if err := l.resolveSegmentOverlaps(); err != nil {

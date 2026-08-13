@@ -796,7 +796,8 @@ run_guard "a walk at open keeps the table it built" segment.go   '	if s.blocksWa
 # design, so an unconditional clear asserts a durability that did not happen. It
 # was harmless only while closeSegment fsynced every index again on the way out;
 # now that close honours the mark, a failed seal would skip the last chance to
-# get those bytes down, and nothing repairs a short index on a SEALED segment.
+# get those bytes down -- and while open() does now reconcile a short index on a
+# sealed segment, paying that walk on every restart is not the plan.
 # The neutralization is the exact line that shipped before the fix.
 run_guard "seal keeps the dirty mark when the flush fails" segment.go   '	if s.Index.Sync() == nil {' '	if s.Index.Sync() != nil || true {'   '^TestSealKeepsTheDirtyMarkWhenTheFlushFails$'
 
@@ -805,6 +806,20 @@ run_guard "seal keeps the dirty mark when the flush fails" segment.go   '	if s.I
 # is what the code did before, so the test that asserts a clean segment is closed
 # WITHOUT a flush has to go red.
 run_guard "close honours the index dirty mark" segment.go   '		case s.dirtyIndex:' '		case s.dirtyIndex || true:'   '^TestACleanIndexIsClosedWithoutAFlush$'
+
+# Every SEALED segment's index tail is reconciled at open, not just the active
+# one. setupIndex takes lastOffset straight from the index's last entry, so a
+# segment whose index stopped short answers as if the records past it are not
+# there -- and the only repair ran on the active segment. The neutralization
+# restores that: the loop breaks before it reaches any segment.
+run_guard "a sealed segment's index tail is reconciled" commitlog.go   '		if i == len(l.segments)-1 {' '		if i >= 0 {'   '^TestAShortIndexOnASealedSegmentHidesRecords$'
+
+# And a reconcile that found nothing to do is what clears dirtyIndex, which is
+# the whole reason a reopened log stops fsyncing indexes it never wrote. Inverted,
+# the mark survives on every segment and the restart pays one device-cache flush
+# per segment again -- the state before the fix, and invisible from file contents,
+# which is what the flushes counter exists for.
+run_guard "a clean reconcile clears the dirty mark" segment.go   '	if s.Index.numEntries() == before {' '	if s.Index.numEntries() != before {'   '^TestAReopenedLogFlushesNoIndexAtClose$'
 
 # A block table is refused when damaged, never approximated and never rebuilt by
 # walking the object -- that walk is the cost the table exists to remove, so a
