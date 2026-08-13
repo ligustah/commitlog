@@ -747,9 +747,21 @@ func (l *commitLog) open() error {
 		offloaded[o.BaseOffset] = true
 	}
 
-	files, err := os.ReadDir(l.Path)
+	all, err := os.ReadDir(l.Path)
 	if err != nil {
 		return errors.Wrap(err, "read dir failed")
+	}
+	// Sidecars belong to the client, and this scan dispatches on SUFFIX, so a
+	// sidecar is dropped before either loop sees it — see isClientSidecar for
+	// what the two loops below would otherwise do with one. Filtered ONCE into
+	// the slice both loops range over, rather than tested in each: the two have
+	// to agree about what is a segment, and a skip added to one of them is the
+	// shape that disagreement takes.
+	files := make([]os.DirEntry, 0, len(all))
+	for _, file := range all {
+		if !isClientSidecar(file.Name()) {
+			files = append(files, file)
+		}
 	}
 	// Which base offsets have local log bytes. The listing above already answers
 	// that for every file in the directory, so the orphan check below reads it

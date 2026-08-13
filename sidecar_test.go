@@ -47,11 +47,18 @@ func TestASidecarNameCannotReachOutsideTheLog(t *testing.T) {
 	require.Equal(t, "not the log's", string(b), "a sidecar write landed outside the log")
 }
 
-// A name the log owns is refused whatever the caller meant by it.
+// A name the log owns is refused whatever the caller meant by it — now as one
+// case of a wider rule: a name without ClientSidecarPrefix is refused, and no
+// file the log writes carries the prefix.
 //
-// Checked against the log's own constants rather than spelled-out strings: the
-// point is that these names are the log's, and a test that re-types them would
-// keep passing after a rename while the code it guards stopped matching.
+// The log's own names are still spelled through its constants rather than
+// re-typed, even though the check no longer consults them. What is under test
+// is that THESE files cannot be named, and a test that re-typed them would keep
+// passing after a rename while saying nothing about the files that exist.
+//
+// The plain names at the end of the fixture are the other half. Before the
+// prefix they were all legal, including "recovery-floor" — the name this
+// package's own doc comment offered as the example sidecar.
 func TestASidecarCannotNameOneOfTheLogsOwnFiles(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(Options{Name: "own", Path: dir, MaxSegmentBytes: 1 << 20})
@@ -81,6 +88,16 @@ func TestASidecarCannotNameOneOfTheLogsOwnFiles(t *testing.T) {
 		// fails the open outright on a .log whose stem is not an integer.
 		"notes" + logFileSuffix,
 		"",
+		// Ordinary names, refused because they are unclaimed rather than because
+		// they are taken. "recovery-floor" was durable_streams' real sidecar and
+		// this package's documented example, so if the prefix is ever weakened
+		// to "refuse only what looks like the log's", this is the line that goes
+		// green while the reservation quietly stops being one.
+		"notes",
+		"state.json",
+		"recovery-floor",
+		// The reservation with no name after it.
+		ClientSidecarPrefix,
 	}
 	for _, name := range refused {
 		require.ErrorIs(t, l.PutSidecar(name, []byte("x")), ErrInvalidSidecarName, "put %q", name)
@@ -100,16 +117,24 @@ func TestASidecarCannotNameOneOfTheLogsOwnFiles(t *testing.T) {
 	require.NoError(t, reopened.Close())
 }
 
-// The list of names the log owns is derived from a real log directory, not from
-// the list the code keeps.
+// The names the log owns are derived from a real log directory, not from a list
+// the code keeps.
 //
-// logOwnedFileNames and logOwnedFileSuffixes are an enumeration, and an
-// enumeration rots: the log gains a new kind of file, nobody thinks about the
-// sidecar rule, and a client can name the new file from that day on. The two
-// tests above cannot see that happen — they check the names the list already
-// has. This one exercises the log until its directory is full of its own work
-// and then requires that EVERY entry in it is refused, so the thing under test
-// is what the log actually writes.
+// This test outlived the lists it was written against. It existed because
+// logOwnedFileNames and logOwnedFileSuffixes were an enumeration and an
+// enumeration rots — the log gains a kind of file, nobody thinks about the
+// sidecar rule, and a client can name the new file from that day on. The
+// reserved prefix removed the lists, so the rot is gone; what the test proves
+// now is the promise that replaced them, and it proves it in BOTH directions:
+//
+//   - no file the log writes can be named by a client (unchanged), and
+//   - no file the log writes carries ClientSidecarPrefix.
+//
+// The second is the one that has to be checked against a real directory rather
+// than argued. It is a promise about every file commitlog will ever add, and
+// the only thing that can falsify it is commitlog adding one — at which point
+// the client whose sidecar it collides with finds out by having its file
+// overwritten, on a machine that is not this one.
 func TestEveryFileTheLogWritesIsRefusedAsASidecarName(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(Options{
@@ -151,6 +176,9 @@ func TestEveryFileTheLogWritesIsRefusedAsASidecarName(t *testing.T) {
 		}
 		require.ErrorIs(t, checkSidecarName(name), ErrInvalidSidecarName,
 			"the log writes %q into its own directory and a client may name it", name)
+		require.False(t, isClientSidecar(name),
+			"the log writes %q, which carries the prefix reserved for its clients — "+
+				"a client sidecar of that name is overwritten, and this scan skips it", name)
 	}
 
 	// What the fixture actually reached, stated rather than assumed. A log that
@@ -163,6 +191,77 @@ func TestEveryFileTheLogWritesIsRefusedAsASidecarName(t *testing.T) {
 		"only %v in the log directory; the fixture is too thin to say much about suffixes", suffixes)
 }
 
+// A sidecar survives an open whatever it is called, which is the half of the
+// reservation the refusal cannot deliver.
+//
+// checkSidecarName only governs names arriving through PutSidecar. It says
+// nothing about what openLog does with the file once it is on disk, and openLog
+// dispatches on SUFFIX. So the two names below were reachable only by refusing
+// them at the door — and refusing them is what the prefix was supposed to stop
+// needing, since it is exactly the enumerate-the-log's-suffixes list that rots.
+//
+// Both are planted directly rather than through PutSidecar. A client that wrote
+// its sidecars under an older commitlog has files in that directory already,
+// and this is what an upgrade finds. The stems are non-integer on purpose:
+//
+//   - "client-notes.log" fails strconv.Atoi in openLog, which RETURNS the
+//     error, so the log does not open at all. The client's own file bricks it.
+//   - "client-notes.index" has no matching .log and no manifest entry, so it is
+//     an orphaned index and openLog DELETES it. That one is silent.
+//
+// The delete is why the assertion is on the file's contents surviving and not
+// on the open returning nil: an open that succeeds having eaten the sidecar is
+// the failure, and it looks like success from the caller's side.
+func TestAClientSidecarSurvivesAnOpenWhateverItIsCalled(t *testing.T) {
+	dir := tempDir(t)
+	l, err := New(Options{Name: "survives", Path: dir, MaxSegmentBytes: 1 << 20})
+	require.NoError(t, err)
+	_, err = l.Append([]*Message{{Key: []byte("k"), Value: []byte("v")}})
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	planted := map[string]string{
+		ClientSidecarPrefix + "notes" + logFileSuffix:   "read as a segment",
+		ClientSidecarPrefix + "notes" + indexFileSuffix: "removed as an orphan index",
+		ClientSidecarPrefix + "state":                   "ordinary",
+	}
+	for name, body := range planted {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600))
+	}
+
+	reopened, err := New(Options{Name: "survives", Path: dir, MaxSegmentBytes: 1 << 20})
+	require.NoError(t, err, "a client's own sidecar stopped the log from opening")
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	for name, body := range planted {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		require.NoError(t, err, "the open consumed the sidecar %q", name)
+		require.Equal(t, body, string(got), "the open rewrote the sidecar %q", name)
+	}
+
+	// The log is still the log: the planted .log did not become a segment.
+	require.Len(t, reopened.(*commitLog).segments, 1, "a sidecar was adopted as a segment")
+	require.EqualValues(t, 0, reopened.NewestOffset(), "the log lost or gained records")
+}
+
+// A sidecar written before the first append does not make the log look old.
+//
+// logIsNew answers by looking for log bytes in the directory, and it decides
+// whether the descriptor records what the caller created the log with or gets
+// checked against it. A client that writes its config sidecar first — which is
+// the natural order, since the config is what says how to create the log —
+// would otherwise be creating a log that believes it already existed.
+func TestASidecarWrittenBeforeTheFirstAppendLeavesTheLogNew(t *testing.T) {
+	dir := tempDir(t)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dir, ClientSidecarPrefix+"config"+logFileSuffix), []byte("{}"), 0o600))
+
+	isNew, err := logIsNew(Options{Path: dir})
+	require.NoError(t, err)
+	require.True(t, isNew, "a client sidecar counted as the log's own bytes")
+}
+
 // The ordinary case still works, end to end. GetSidecar and RemoveSidecar had
 // no caller anywhere in the repo before this — not in the log, not in a test —
 // so nothing said what they did, and a refusal added above them could have
@@ -173,21 +272,21 @@ func TestASidecarRoundTrips(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
 
-	_, err = l.GetSidecar("recovery-floor")
+	_, err = l.GetSidecar(ClientSidecarPrefix+"recovery-floor")
 	require.True(t, os.IsNotExist(err), "an absent sidecar must satisfy os.IsNotExist, got %v", err)
 
-	require.NoError(t, l.PutSidecar("recovery-floor", []byte("42")))
-	b, err := l.GetSidecar("recovery-floor")
+	require.NoError(t, l.PutSidecar(ClientSidecarPrefix+"recovery-floor",[]byte("42")))
+	b, err := l.GetSidecar(ClientSidecarPrefix+"recovery-floor")
 	require.NoError(t, err)
 	require.Equal(t, "42", string(b))
 
-	require.NoError(t, l.PutSidecar("recovery-floor", []byte("43")), "a sidecar must be overwritable")
-	b, err = l.GetSidecar("recovery-floor")
+	require.NoError(t, l.PutSidecar(ClientSidecarPrefix+"recovery-floor",[]byte("43")), "a sidecar must be overwritable")
+	b, err = l.GetSidecar(ClientSidecarPrefix+"recovery-floor")
 	require.NoError(t, err)
 	require.Equal(t, "43", string(b))
 
-	require.NoError(t, l.RemoveSidecar("recovery-floor"))
-	_, err = l.GetSidecar("recovery-floor")
+	require.NoError(t, l.RemoveSidecar(ClientSidecarPrefix+"recovery-floor"))
+	_, err = l.GetSidecar(ClientSidecarPrefix+"recovery-floor")
 	require.True(t, os.IsNotExist(err), "the sidecar outlived its removal")
-	require.NoError(t, l.RemoveSidecar("recovery-floor"), "removing an absent sidecar is a no-op")
+	require.NoError(t, l.RemoveSidecar(ClientSidecarPrefix+"recovery-floor"), "removing an absent sidecar is a no-op")
 }

@@ -42,7 +42,9 @@ the log removed); substantially extended since — see
   with pin counts, so an index cannot be evicted out from under a live seek.
 - **Client sidecars**: atomic named metadata files in the log directory
   (`PutSidecar`/`GetSidecar`/`RemoveSidecar`) for checkpoints like
-  recovery floors.
+  recovery floors. Names carry the reserved `ClientSidecarPrefix`, which the
+  log never writes and its directory scans skip — so neither side has to know
+  what the other calls its files.
 - Zero-allocation metadata scans, buffered sequential readers, on-demand
   full-durability barrier (`SyncAll`), leader-epoch tracking.
 

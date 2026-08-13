@@ -361,6 +361,15 @@ func logIsNew(opts Options) (bool, error) {
 	}
 	for _, e := range entries {
 		name := e.Name()
+		// A client sidecar is not log bytes however it is named. Skipped here as
+		// well as in openLog because this decides whether the log is NEW, and a
+		// client that wrote its sidecar before the first append would otherwise
+		// make an empty directory look like an existing log — which is the
+		// branch that stops the descriptor from recording what it was created
+		// with. See isClientSidecar.
+		if isClientSidecar(name) {
+			continue
+		}
 		if strings.HasSuffix(name, logFileSuffix) {
 			return false, nil
 		}

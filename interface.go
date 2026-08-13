@@ -510,9 +510,16 @@ type CommitLog interface {
 
 	// PutSidecar atomically writes a small named metadata file owned by the
 	// log's client into the log directory (e.g. a recovery checkpoint). The
-	// name must be a plain file name that does not collide with the log's own
-	// files; all three calls REFUSE one that is not, with
-	// ErrInvalidSidecarName, rather than acting on it.
+	// name must be a plain file name carrying ClientSidecarPrefix; all three
+	// calls REFUSE one that is not, with ErrInvalidSidecarName, rather than
+	// acting on it.
+	//
+	// The prefix is what keeps the two namespaces apart in BOTH directions: the
+	// log promises never to write a file carrying it and its own directory
+	// scans skip files that do, so commitlog adding a file can never collide
+	// with a name a client is already using, and a client sidecar can be called
+	// anything — including something ending in .log — without confusing the
+	// log about what its own segments are.
 	PutSidecar(name string, data []byte) error
 
 	// GetSidecar reads a client sidecar file; the error satisfies

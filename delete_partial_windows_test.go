@@ -32,9 +32,9 @@ func TestAFailedDeleteLeavesALogThatStillOpens(t *testing.T) {
 	require.NoError(t, err)
 	_, err = l.Append([]*Message{{Key: []byte("k"), Value: []byte("v")}})
 	require.NoError(t, err)
-	require.NoError(t, l.PutSidecar("stubborn", []byte("held open")))
+	require.NoError(t, l.PutSidecar(ClientSidecarPrefix+"stubborn", []byte("held open")))
 
-	h := openDenyAll(t, filepath.Join(dir, "stubborn"))
+	h := openDenyAll(t, filepath.Join(dir, ClientSidecarPrefix+"stubborn"))
 	err = l.Delete()
 	require.Error(t, err, "a held entry must fail the delete, or this test proves nothing")
 

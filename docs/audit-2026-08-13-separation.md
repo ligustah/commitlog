@@ -137,7 +137,7 @@ destroyed. An erase manufactures exactly that, from a correctly stamped log, on
 an open that did nothing wrong. The feature shipped with a path that produced
 the condition it was built to eliminate.
 
-### 3b. Two reserved-name lists guard one directory, from two repos
+### 3b. Two reserved-name lists guard one directory, from two repos — FIXED in v0.83.0
 
 commitlog refuses names it owns (`logOwnedFileNames`, `logOwnedFileSuffixes`);
 durable_streams separately refuses names *it* owns (`reservedSidecars`). Each
@@ -154,6 +154,19 @@ prefix commitlog promises never to take. Then commitlog can add files freely,
 the client can name freely, and neither list needs to know the other. Breaking
 change, no migration burden pre-v1 — but it changes durable_streams' names, so
 it is an ask and not a unilateral edit.
+
+**Shipped as `ClientSidecarPrefix` after durable_streams agreed** ("both are
+cheap to rename now and impossible later"). Both lists are gone. Implementing it
+turned up a half the finding had missed: the refusal is not enough on its own.
+`checkSidecarName` governs names arriving through `PutSidecar`, but the log's
+directory scans — `openLog` and `logIsNew` — dispatch on SUFFIX over whatever is
+already on disk, so a file named `client-notes.log` fails the open on its
+non-integer stem and `client-notes.index` is deleted as an orphaned index, with
+no call for a refusal to intercept. Both scans now skip the prefix.
+
+That is the load-bearing part. Without it the prefix buys the client nothing it
+did not already have: it would still be commitlog's suffix list defining the
+client's namespace by subtraction, just enforced one layer further in.
 
 ## 3c. The public surface was not the interface — FIXED in v0.80.0
 

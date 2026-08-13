@@ -594,17 +594,26 @@ run_guard "a sidecar name stays inside the log" util.go   '	if strings.ContainsA
 # because openLog scans by suffix and fails on a stem that is not an integer.
 # This contract existed for as long as the API did, as a sentence on the
 # interface telling the caller not to do it.
-run_guard "a sidecar cannot name a log file" sidecar.go   '	for _, suffix := range logOwnedFileSuffixes {'   '	for _, suffix := range []string(nil) {'   '^TestASidecarCannotNameOneOfTheLogsOwnFiles$'
+run_guard "a sidecar must carry the reserved prefix" sidecar.go   '	if !isClientSidecar(name) || name == ClientSidecarPrefix {'   '	if false {'   '^TestASidecarCannotNameOneOfTheLogsOwnFiles$'
 
-run_guard "a sidecar cannot name a log checkpoint" sidecar.go   '	for _, owned := range logOwnedFileNames {'   '	for _, owned := range []string(nil) {'   '^TestASidecarCannotNameOneOfTheLogsOwnFiles$'
+# Same removal against the test that derives its names from a real log directory
+# instead of from a list. Registered separately because that test does not read
+# the rule, it reads the DIRECTORY -- and a test which could not notice the rule
+# being dropped would have been proving nothing about it.
+run_guard "the derived name check is not vacuous" sidecar.go   '	if !isClientSidecar(name) || name == ClientSidecarPrefix {'   '	if false {'   '^TestEveryFileTheLogWritesIsRefusedAsASidecarName$'
 
-# Same two removals against the test that derives its names from a real log
-# directory instead of from the list. Registered separately because the point of
-# that test is that it does NOT read the list, and a test which cannot notice the
-# list being emptied would have been proving nothing about it.
-run_guard "the derived name list is not vacuous" sidecar.go   '	for _, suffix := range logOwnedFileSuffixes {'   '	for _, suffix := range []string(nil) {'   '^TestEveryFileTheLogWritesIsRefusedAsASidecarName$'
+# The other half, and the half a refusal cannot deliver: the log's own directory
+# scans must SKIP the client's files. Both scans dispatch on suffix, so without
+# these a sidecar named "client-notes.log" fails the open on its non-integer stem
+# and "client-notes.index" is deleted as an orphaned index -- neither reachable
+# through checkSidecarName, because by then the file is already on disk.
+run_guard "openLog skips the client's sidecars" commitlog.go   '		if !isClientSidecar(file.Name()) {'   '		if true {'   '^TestAClientSidecarSurvivesAnOpenWhateverItIsCalled$'
 
-run_guard "the derived checkpoint list is not vacuous" sidecar.go   '	for _, owned := range logOwnedFileNames {'   '	for _, owned := range []string(nil) {'   '^TestEveryFileTheLogWritesIsRefusedAsASidecarName$'
+# logIsNew scans for the same suffix and decides whether the descriptor RECORDS
+# the caller's options or is checked against them. A client that writes its
+# config sidecar before the first append is the natural order, and it would make
+# a brand-new log believe it already existed.
+run_guard "logIsNew skips the client's sidecars" descriptor.go   '		if isClientSidecar(name) {'   '		if false {'   '^TestASidecarWrittenBeforeTheFirstAppendLeavesTheLogNew$'
 
 # Nothing REFERENCES the descriptor -- it is what the store says about itself,
 # not part of what it holds -- so the reference-based garbage rule collects it
