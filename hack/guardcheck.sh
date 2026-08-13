@@ -1646,6 +1646,30 @@ run_guard "a join that cannot commit queues nothing" clean_join.go   '		return n
 # of an uncovered guard.
 run_guard "a rewrite publishes under its own tier" compact_cleaner.go   '		segTier := seg.tier' '		segTier := defaultTierName'   '^TestNoManifestAPassPublishesEverDropsALiveSegment$'
 
+# The digest-planned read calls a damaged segment damaged. Both arms guarded,
+# because they were ONE `errors.Wrapf(err, ...)` before and each is neutralized
+# back to exactly that -- a guard on one alone would leave the other free to
+# regress to the shape it just came from.
+#
+# Neutralized to a wrap that still compiles and still reports an error, which is
+# the point: the read fails either way, so nothing goes red on the strength of
+# failing. What is lost is only the SENTINEL, and with it the one thing a replica
+# uses to tell "these bytes are damaged, copy from a peer" apart from a failure
+# worth retrying.
+#
+# The EOF arm is the one that shipped wrong. Every other scan loop in the package
+# runs to the end of a segment, so io.EOF is how it stops; this one stops when it
+# has collected what the digest promised, so EOF means those records are not
+# there. Damage arriving as the ordinary end-of-file value.
+run_guard "a prefix read that runs out of segment says so" prefix_read.go   $'				return nil, fmt.Errorf(
+					"%w: prefix read reached the end of segment %d before offset %d, which its digest names",
+					ErrSegmentUnreadable, seg.BaseOffset, run.offs[i])'   $'				return nil, errors.Wrapf(err,
+					"prefix read reached the end of segment %d before offset %d",
+					seg.BaseOffset, run.offs[i])'   '^TestAPrefixReadReportsADamagedSegmentAsUnreadable$'
+run_guard "a prefix read that cannot parse a frame says so" prefix_read.go   $'			return nil, fmt.Errorf("%w: prefix read of segment %d at offset %d: %w",
+				ErrSegmentUnreadable, seg.BaseOffset, run.offs[i], err)'   $'			return nil, errors.Wrapf(err, "prefix read of segment %d at offset %d",
+				seg.BaseOffset, run.offs[i])'   '^TestAPrefixReadReportsAnUnparseableFrameAsUnreadable$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   if [ -n "$anchors_only" ]; then

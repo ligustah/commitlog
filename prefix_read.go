@@ -1,7 +1,9 @@
 package commitlog
 
 import (
+	"fmt"
 	"hash/crc32"
+	"io"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -199,7 +201,32 @@ func collectRun(seg *segment, run prefixRun, sc *blockCache) (map[int64]prefixQu
 	for i := 0; i < len(run.offs); {
 		ms, _, err := ss.Scan()
 		if err != nil {
-			return nil, errors.Wrapf(err, "read prefix-read record at offset %d", run.offs[i])
+			// io.EOF is damage HERE, which is the opposite of what it means in
+			// every other scan loop in this package. Those run to the end of the
+			// segment, so EOF is how they stop and only a non-EOF error is a
+			// problem. This one stops when it has collected the offsets the
+			// digest promised, so reaching the end of the segment first means
+			// those records are not where the digest says they are — the same
+			// damage, arriving as the ordinary end-of-file value.
+			//
+			// Which is why it used to be returned as one. `errors.Wrapf(err,
+			// ...)` handed the caller a wrapped io.EOF, so the one route that
+			// can tell a replica "these bytes are damaged, copy from a peer"
+			// instead told it the segment ended.
+			//
+			// Both arms carry ErrSegmentUnreadable, for the reason the CRC
+			// refusal below states about ErrCorruptRecord: which route found the
+			// damage is this package's business, not the caller's, and a caller
+			// matching on it should not have to know whether a digest happened
+			// to plan the read. The sequential path returns that sentinel for
+			// these same bytes.
+			if errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf(
+					"%w: prefix read reached the end of segment %d before offset %d, which its digest names",
+					ErrSegmentUnreadable, seg.BaseOffset, run.offs[i])
+			}
+			return nil, fmt.Errorf("%w: prefix read of segment %d at offset %d: %w",
+				ErrSegmentUnreadable, seg.BaseOffset, run.offs[i], err)
 		}
 		switch off := ms.Offset(); {
 		case off < run.offs[i]:
@@ -244,9 +271,16 @@ func collectRun(seg *segment, run prefixRun, sc *blockCache) (map[int64]prefixQu
 			// Ran past a wanted offset: the digest named a record the segment
 			// does not hold there. Fail rather than return a short answer that
 			// looks like the key was never written.
-			return nil, errors.Errorf(
-				"commitlog: prefix read overshot offset %d in segment %d (next record is %d)",
-				run.offs[i], seg.BaseOffset, off)
+			//
+			// ErrSegmentUnreadable for the same reason as the two arms above, and
+			// it is one fact reached from the other side: there the segment ended
+			// before an offset the digest names, here its records step over one.
+			// Either way the segment does not hold what the log says it holds,
+			// which is a thing a replica with a peer can act on and a retry
+			// cannot fix.
+			return nil, fmt.Errorf(
+				"%w: prefix read overshot offset %d in segment %d (next record is %d)",
+				ErrSegmentUnreadable, run.offs[i], seg.BaseOffset, off)
 		}
 	}
 	return out, nil

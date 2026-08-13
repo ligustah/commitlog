@@ -54,10 +54,17 @@ var ErrTimestampBeforeLog = errors.New("commitlog: timestamp is before the begin
 // ReadMessage already handles an error return, and none can handle a panic.
 var ErrCorruptRecord = errors.New("commitlog: record failed its CRC check")
 
-// ErrSegmentUnreadable reports that a scan could not reach the end of a
-// segment, so anything derived from that scan describes a prefix rather than the
-// segment. Truncate, TruncateBefore and Clean wrap it, and leave the segment
+// ErrSegmentUnreadable reports that a segment does not hold what the log says
+// it holds. Truncate, TruncateBefore and Clean wrap it, and leave the segment
 // exactly as they found it when they return it.
+//
+// Usually that is a scan which could not reach the end of the segment, so
+// anything derived from it describes a prefix rather than the segment. The
+// digest-planned prefix read reaches the same fact from the other side and is
+// worth naming, because it does not look like a short scan: it stops when it
+// has collected the offsets the digest promised, so the segment ENDING first —
+// or its records stepping over one of those offsets — is the damage, and
+// io.EOF is how it arrives. See collectRun.
 //
 // It is worth telling apart from any other failure of those calls: it says the
 // bytes on this replica are damaged, which is a thing a caller with a peer to

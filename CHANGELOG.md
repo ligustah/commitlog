@@ -5,6 +5,46 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A digest-planned prefix read reported a damaged segment as `io.EOF`.**
+  `KeyPrefix` reads plan from the key digest and then collect the named offsets
+  in one forward pass. When the segment ended before an offset its own digest
+  names, `collectRun` returned a wrapped `io.EOF` — so the one route that can
+  tell a replica *these bytes are damaged, copy from a peer* instead told it the
+  segment ended. The sequential route returns `ErrSegmentUnreadable` for exactly
+  those bytes.
+
+  `io.EOF` is the ordinary value in every other scan loop in the package, which
+  is what made this easy to miss: those run to the end of a segment, so EOF is
+  how they stop and only a non-EOF error is damage. This loop is the opposite —
+  it stops once it has collected what the digest promised — so EOF *is* the
+  damage. All three failure arms (end of segment, unparseable frame, and a
+  record the segment steps over) now carry `ErrSegmentUnreadable`.
+
+  The same argument was already written in this file, twenty lines below, for
+  `ErrCorruptRecord`: which route found the damage is the package's business,
+  not the caller's, and a caller matching on it should not have to know whether
+  a digest happened to plan the read. It had been applied to one sentinel and
+  not the other.
+
+  `ErrSegmentUnreadable`'s doc said "a scan could not reach the end of a
+  segment", which described only the loops that had it. It now states the fact
+  those loops are evidence of — the segment does not hold what the log says it
+  holds — and names the prefix read as the case that reaches it from the other
+  side.
+
+### Changed
+
+- `commitLog.Segments()` is now unexported (`segmentsSnapshot`). It returned
+  `[]*segment`, an unexported type, and was deliberately absent from the
+  `CommitLog` interface that `New` returns — so no caller outside the package
+  could reach it or do anything with the result. `hack/layercheck.sh` carried a
+  hand-written exception for it whose own justification argued for unexporting;
+  the exception list is now empty.
+
 ## v0.83.0 — 2026-08-13
 
 ### Breaking
