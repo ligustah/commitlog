@@ -37,7 +37,11 @@
 # confused with your own work.
 
 set -uo pipefail
-cd "$(dirname "$0")/.."
+# `|| exit` matters more here than in the sibling scripts, which only READ. This
+# one edits .go files in place and restores them with `git checkout --`, so a cd
+# that failed and was ignored would aim both halves of that at whatever
+# directory the caller happened to be in. There is no `set -e` to catch it.
+cd "$(dirname "$0")/.." || exit 1
 
 # GitHub's ubuntu runners ship python3 but not always a bare `python`.
 PY_BIN="${PYTHON:-}"
