@@ -138,6 +138,43 @@ func TestDeleteCleanerMessagesKeepActiveSegment(t *testing.T) {
 	require.Equal(t, int64(10), actual[0].BaseOffset)
 }
 
+// Ensure Clean deletes segments to maintain the bytes limit but keeps at least
+// the active segment.
+//
+// The same rule TestDeleteCleanerMessagesKeepActiveSegment asserts for the other
+// local limit, and worth its own test for a reason the code no longer shows: the
+// rule used to be written out once per limit, and only the messages copy had a
+// test. Deleting the bytes copy's protection outright left the whole suite green.
+func TestDeleteCleanerBytesKeepActiveSegment(t *testing.T) {
+	opts := deleteCleanerOptions{Path: "foo"}
+	dir := tempDir(t)
+
+	segs := []*segment{
+		createSegment(t, dir, 0, 128),
+		createSegment(t, dir, 10, 128),
+	}
+	offset := int64(0)
+	for _, seg := range segs {
+		for i := 0; i < 10; i++ {
+			writeToSegment(t, seg, offset, []byte("blah"))
+			offset++
+		}
+	}
+
+	// Half of what the active segment occupies, so it is over the limit on its
+	// own and survives anyway. Derived rather than a literal for the reason
+	// TestDeleteCleanerBytes gives: a literal silently encodes the frame header.
+	opts.Retention.Bytes = segs[1].Position() / 2
+	require.Greater(t, segs[1].Position(), opts.Retention.Bytes,
+		"fixture is vacuous: the active segment must exceed the limit by itself")
+	cleaner := newDeleteCleaner(opts)
+
+	actual, err := cleaner.Clean(segs, nil, Bound{})
+	require.NoError(t, err)
+	require.Len(t, actual, 1)
+	require.Equal(t, int64(10), actual[0].BaseOffset)
+}
+
 // Ensure Clean is a no-op when there are segments and a messages limit but the
 // segments don't exceed the limit.
 func TestDeleteCleanerMessagesBelowLimit(t *testing.T) {
