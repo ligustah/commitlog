@@ -1981,6 +1981,24 @@ func (s *segment) closeSegment(durable bool) error {
 		return ierr
 	}
 	s.closed = true
+	// seal() runs AFTER both halves are closed, so on this path only its last
+	// step does anything: writeLocalBlockTable writes its own file and does not
+	// touch the index. seal's two index calls both land on a closed index and
+	// fail — Sync on the closed check, Shrink one layer deeper, where the mapping
+	// is already nil and Truncate reaches a closed handle — and the nolint there
+	// discards both errors along with every other reason those two can fail.
+	//
+	// That is correct rather than merely harmless, and for a different reason on
+	// each side of durable. With durable, Index.Close already did the same sync
+	// and shrink a moment ago, so seal would be repeating them. Without it,
+	// CloseDiscarding skipped them ON PURPOSE — the caller is about to unlink the
+	// file — and seal must not put them back.
+	//
+	// Written down because seal's own comment says sealing is the index's flush
+	// point, and that is true of the ROLL, not of this. A reader following the
+	// close path with that sentence in mind concludes the index is flushed here
+	// by seal, and would then be surprised by durable=false, where nothing
+	// flushes it at all and nothing should.
 	s.seal()
 	return nil
 }
