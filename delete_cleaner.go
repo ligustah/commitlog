@@ -190,8 +190,21 @@ func (c *deleteCleaner) cleanLocal(segments []*segment, floor Bound) ([]*segment
 	return segments, nil
 }
 
+// noRetentionLimits reports that nothing bounds the local half.
+//
+// `<= 0` rather than `== 0`, to agree with the three gates in cleanLocal that
+// actually apply the limits. They ask `> 0`, so with `== 0` here a NEGATIVE
+// limit was "retention is configured" to this function and "do not apply it" to
+// those: Clean took the do-work path, logged the policy it was enforcing, and
+// enforced none of it. Two checks disagreeing about one value.
+//
+// New refuses a negative limit outright, which is the caller-facing fix and the
+// only one that produces a message. This one is for the type itself — a
+// deleteCleaner is constructed directly in tests and takes its Retention as a
+// plain struct, so "the boundary already checked" is a promise this file cannot
+// read.
 func (c *deleteCleaner) noRetentionLimits() bool {
-	return c.Retention.Bytes == 0 && c.Retention.Messages == 0 && c.Retention.Age == 0
+	return c.Retention.Bytes <= 0 && c.Retention.Messages <= 0 && c.Retention.Age <= 0
 }
 
 // noTierLimits is true when NO tier bounds anything, which is the only case in

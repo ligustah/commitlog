@@ -216,13 +216,19 @@ func TestDescriptorCorruptionIsNotTreatedAsMissing(t *testing.T) {
 // accepted, leaving a descriptor that reads as valid while describing a log
 // nobody configured. The version line is what makes a real format change
 // detectable, and it stays.
+//
+// The fixtures carry version 1 deliberately. They read "0" until v0.82.0 dropped
+// V0, and leaving them there would have kept this test GREEN for the wrong
+// reason: every body would fail on the version check without ever reaching the
+// key parsing the test exists to exercise, and require.Error cannot tell those
+// apart.
 func TestDescriptorRefusesUnknownKeysAndBadValues(t *testing.T) {
 	dir := tempDir(t)
 
 	for name, body := range map[string]string{
-		"an unknown key":       "0\ncompact=true\nsomething_new=42\n",
-		"a typo'd key":         "0\ncompact_min_ag=1h\n",
-		"an unparseable value": "0\ncompact_min_age=not-a-duration\n",
+		"an unknown key":       "1\ncompact=true\nsomething_new=42\n",
+		"a typo'd key":         "1\ncompact_min_ag=1h\n",
+		"an unparseable value": "1\ncompact_min_age=not-a-duration\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, descriptorFileName),

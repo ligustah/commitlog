@@ -5,6 +5,56 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.82.0 — 2026-08-13
+
+### Removed
+
+- **Descriptor format v0 is no longer read.** V0 — the same file without the
+  optional identity line — was read for one release so v0.79.x directories kept
+  opening across the v0.80.0 upgrade. Both downstream repos confirmed they hold
+  no v0.79.x data worth keeping ("every dir is created by a test or soak run and
+  thrown away with it"), so it goes now rather than becoming permanent. Pre-v1, a
+  format this package reads but never writes is a branch with no live input.
+
+  A v0 descriptor is now refused by name — "unsupported descriptor version 0" —
+  which matters because every *other* line in a v0 file parses fine. The version
+  line is the only thing that catches one, so a test asserting merely "some
+  error" would not have distinguished a working check from a deleted one.
+
+  The version line itself stays. `set()` refuses an unknown key on purpose, so a
+  build handed a file from a *newer* writer would otherwise report "unknown
+  descriptor field" — loud, but it names a field instead of a version and reads
+  like corruption. That value is about future formats and never depended on a
+  past one still being readable.
+
+### Fixed
+
+- **A negative `MaxSegmentAge` rolled a new segment on every append.**
+  `CheckSplit` disables rolling on `logRollTime == 0`, so a negative got past
+  that and reached `timestamp()-firstWriteTime >= int64(logRollTime)`, true for
+  anything a clock can produce. This is the identical failure already documented
+  in `New`'s refusal table for a negative `MaxSegmentBytes` — the two fields sit
+  one line apart in `Options`, and only one was checked.
+
+- **A negative `MaxLogBytes`/`MaxLogMessages`/`MaxLogAge` disabled retention
+  while reporting it as configured.** `noRetentionLimits()` asked `== 0` while
+  the three apply-gates in `cleanLocal` ask `> 0`, so a negative was "retention
+  is configured" to the first and "do not apply it" to the others. `Clean` took
+  the do-work path, split the tiers, walked the segments, logged the policy it
+  was enforcing — and enforced none of it. The log grew without bound while the
+  caller believed a limit was in force.
+
+  Fixed at both ends, which are different fixes rather than redundancy: `New`
+  refuses a negative, which is the caller-facing answer and the only one that
+  produces a message; and `noRetentionLimits()` now asks `<= 0` so it agrees with
+  its own apply-gates. A `deleteCleaner` is constructed directly in tests and
+  takes `Retention` as a plain struct, so "the boundary already checked" is a
+  promise that file cannot read.
+
+  Not affected, checked with the same lens: `CompactMinAge` and
+  `CompactTombstoneRetention` gate on `> 0` consistently, so a negative reads as
+  disabled everywhere.
+
 ## v0.81.0 — 2026-08-13
 
 ### Changed

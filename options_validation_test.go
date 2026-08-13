@@ -52,6 +52,18 @@ func TestNegativeOptionsAreRefused(t *testing.T) {
 		// silently received 8 or 64 instead.
 		"PrefixReadConcurrency":     func(o *Options) { o.PrefixReadConcurrency = -1 },
 		"PrefixReadTierConcurrency": func(o *Options) { o.PrefixReadTierConcurrency = -1 },
+		// The same failure as MaxSegmentBytes, one field away in Options and
+		// missed for as long: CheckSplit disables rolling on `logRollTime == 0`,
+		// so a negative reaches `timestamp()-firstWriteTime >= int64(...)`, which
+		// is true for anything a clock can produce, and every append rolls.
+		"MaxSegmentAge": func(o *Options) { o.MaxSegmentAge = -time.Second },
+		// The retention three, which fail worse: noRetentionLimits() asked `== 0`
+		// while the apply gates ask `> 0`, so a negative was "configured" to one
+		// and "skip" to the others. The log grew unbounded while the debug line
+		// reported the policy it was about to ignore.
+		"MaxLogBytes":    func(o *Options) { o.MaxLogBytes = -1 },
+		"MaxLogMessages": func(o *Options) { o.MaxLogMessages = -1 },
+		"MaxLogAge":      func(o *Options) { o.MaxLogAge = -time.Second },
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := Options{Path: tempDir(t), Compact: true}
@@ -63,6 +75,36 @@ func TestNegativeOptionsAreRefused(t *testing.T) {
 			require.Error(t, err, "New accepted a negative %s", name)
 			require.Contains(t, err.Error(), name,
 				"the error must name the option the caller got wrong")
+		})
+	}
+}
+
+// The deleteCleaner's own consistency, checked where New cannot reach.
+//
+// noRetentionLimits() decides whether the pass runs at all; the three gates in
+// cleanLocal decide whether each limit applies. They must agree about every
+// value, because a value the first calls "configured" and the second calls
+// "skip" is a pass that does the walk, logs the policy, and enforces nothing.
+//
+// Asserted against the cleaner rather than through New on purpose: New now
+// refuses a negative, so routing this through New would test the refusal a
+// second time and never reach the disagreement. A deleteCleaner is built
+// directly in tests and takes Retention as a plain struct, so the boundary
+// check is not a promise this type can rely on.
+func TestTheCleanerAgreesWithItselfAboutANegativeLimit(t *testing.T) {
+	for name, mut := range map[string]func(*deleteCleanerOptions){
+		"Bytes":    func(o *deleteCleanerOptions) { o.Retention.Bytes = -1 },
+		"Messages": func(o *deleteCleanerOptions) { o.Retention.Messages = -1 },
+		"Age":      func(o *deleteCleanerOptions) { o.Retention.Age = -time.Second },
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := deleteCleanerOptions{Name: "agree"}
+			mut(&opts)
+			c := &deleteCleaner{deleteCleanerOptions: opts}
+			require.True(t, c.noRetentionLimits(),
+				"a negative %s is not applied by cleanLocal's `> 0` gate, so it must "+
+					"not count as a configured limit here — otherwise the pass runs "+
+					"and enforces nothing", name)
 		})
 	}
 }

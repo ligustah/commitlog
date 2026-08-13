@@ -32,19 +32,23 @@ const (
 	// be able to ask what the log IS from the same place it asks what the log
 	// HOLDS. The directory can only answer for logs that live entirely in it.
 	descriptorKey = "log-descriptor"
-	// descriptorFileV0 is the original format. descriptorFileV1 adds the
-	// optional identity line.
+	// descriptorFileV1 is the only descriptor format: the one this build writes
+	// and the only one it reads.
 	//
-	// Both are READ; only V1 is written. The bump is not ceremony: set()
-	// refuses an unknown key on purpose, so a V0 build handed a file with an
-	// identity line reports "unknown descriptor field" — technically loud, but
-	// it names a field instead of a version and reads like corruption. The
-	// version line is what turns that into "this file is newer than me", which
-	// is the thing that is actually true.
+	// V0 — the same file without the optional identity line — was read for one
+	// release so v0.79.x directories kept opening across the v0.80.0 upgrade.
+	// Both downstream repos confirmed they hold no v0.79.x data worth keeping
+	// ("every dir is created by a test or soak run and thrown away with it"), so
+	// it went in v0.82.0 rather than becoming permanent. Pre-v1, a format this
+	// package reads but never writes is a branch with no live input.
 	//
-	// Reading V0 rather than refusing it is what makes this additive: an
-	// existing log simply has no identity, which is exactly what it means.
-	descriptorFileV0 = 0
+	// The version line stays, and is not ceremony. set() refuses an unknown key
+	// on purpose, so a build handed a file from a NEWER writer would otherwise
+	// report "unknown descriptor field" — technically loud, but it names a field
+	// instead of a version and reads like corruption. The version line turns that
+	// into "this file is newer than me", which is the thing that is actually
+	// true. That value is about future formats and does not depend on any past
+	// one still being readable.
 	descriptorFileV1 = 1
 	// maxDescriptorBytes bounds what readStoreDescriptor will allocate for an
 	// object the store claims is the descriptor. Equal to bufio.Scanner's
@@ -211,7 +215,7 @@ func parseDescriptor(r io.Reader) (descriptor, error) {
 	if err != nil {
 		return d, errors.Wrap(err, "parse descriptor version")
 	}
-	if version != descriptorFileV0 && version != descriptorFileV1 {
+	if version != descriptorFileV1 {
 		return d, errors.Errorf("unsupported descriptor version %d", version)
 	}
 	for scanner.Scan() {

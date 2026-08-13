@@ -1432,6 +1432,26 @@ run_guard "an oversized store descriptor is refused, not allocated" descriptor.g
 run_guard "a conflicted identity survives an unrelated retune" descriptor.go   '	if conflict == nil &&
 		(got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes) {' '	if got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes {'   '^TestAConflictIsNotErasedByAnUnrelatedSettingChange$'
 
+# V0 was dropped in v0.82.0, and the version line is the ONLY thing that catches
+# a V0 file: every remaining line in one parses fine, so without this check a V0
+# descriptor opens silently as though it were current. Neutralized with `false
+# &&`, which compiles.
+run_guard "a v0 descriptor is refused by its version line" descriptor.go   '	if version != descriptorFileV1 {' '	if false && version != descriptorFileV1 {'   '^TestAVersion0DescriptorIsRefusedByVersion$'
+
+# noRetentionLimits() decides whether the retention pass runs; the three gates in
+# cleanLocal decide whether each limit applies. With `== 0` here they disagreed
+# about a negative -- "configured" to the first, "skip" to the others -- so the
+# pass walked the segments, logged the policy, and enforced nothing while the log
+# grew. Neutralized back to `== 0`, which compiles and is what the code said.
+run_guard "the cleaner agrees with itself about a negative limit" delete_cleaner.go   '	return c.Retention.Bytes <= 0 && c.Retention.Messages <= 0 && c.Retention.Age <= 0' '	return c.Retention.Bytes == 0 && c.Retention.Messages == 0 && c.Retention.Age == 0'   '^TestTheCleanerAgreesWithItselfAboutANegativeLimit$'
+
+# CheckSplit disables rolling on `logRollTime == 0`, so a negative MaxSegmentAge
+# reaches `timestamp()-firstWriteTime >= int64(logRollTime)`, true for anything a
+# clock can produce -- every append rolls a new segment. Identical to the
+# MaxSegmentBytes failure already in this table, one field away in Options.
+# Neutralized by dropping the entry, which compiles.
+run_guard "a negative segment age is refused, not rolled forever" commitlog.go   '		{"MaxSegmentAge", opts.MaxSegmentAge < 0, opts.MaxSegmentAge},' ''   '^TestNegativeOptionsAreRefused$'
+
 # concurrencyBudget defaults on `v <= 0`, so a negative reaches the arm that
 # exists to catch a MISSING value and the caller silently gets 8 or 64. Needs a
 # guard rather than a comment because it is reachable by following the docs: the

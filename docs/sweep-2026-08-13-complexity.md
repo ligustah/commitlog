@@ -38,9 +38,30 @@ instruction says we do not want before v1, and it is the more sophisticated of
 the two — the sweep is supposed to remove that kind of cleverness, not add it.
 B's end state is strictly simpler.
 
-Sequenced rather than done: peers hold live v0.79.x dirs. sqlcdc cleared it
-(*"every dir we own is recreated per soak/test run"*); durable_streams asked.
-Tracked as #203.
+**Done in v0.82.0.** Both peers cleared it — sqlcdc: *"every dir we own is
+recreated per soak/test run, no v0.79.x data we cannot discard"*;
+durable_streams: *"Go ahead, delete it... No deadline to work around."*
+
+Two things the deletion turned up that the deletion itself would not have:
+
+- `TestDescriptorRefusesUnknownKeysAndBadValues` built its fixtures with a `"0"`
+  version line. Dropping V0 leaves that test **green for the wrong reason**:
+  every body now fails on the version check without ever reaching the key
+  parsing the test exists to exercise, and `require.Error` cannot tell those
+  apart. The fixtures moved to version 1.
+- `TestReopeningAnUnchangedLogDoesNotRewriteItsDescriptor` was written to answer
+  a downstream compatibility question, so it looked like it should go with the
+  compatibility. It should not. Its stated *reason* expired; its *property* —
+  a reopen that changes nothing must not touch the file — did not, and is
+  worth more without V0 than with it, because every write is a window a crash
+  can land in. Rewritten to assert it directly, and tightened to compare mtime
+  as well as bytes: equal content would be satisfied by a rewrite that happened
+  to reproduce it, and the write is the thing under test.
+
+The general rule, since it caught two tests in one small deletion: **when
+removing a feature, the tests to re-read are the ones whose SETUP mentions it,
+not the ones whose name does.** A fixture that encodes the removed thing keeps
+passing and stops testing.
 
 ### Checked and clean
 
@@ -86,6 +107,50 @@ and two not — is now pinned by a test, because it reads as an oversight and is
 not. Without that test, "finishing the job" by adding the two `CoalesceBytes`
 fields to the refusal list would go red only in a cost test that never mentions
 `New`.
+
+### The retention and rolling knobs — four more, and the worse ones
+
+The pass above stopped at the prefix-read paragraph, which was a sample and not a
+sweep. Carrying the same lens across the rest of `Options` found four more, two
+of which fail worse than the one already fixed.
+
+**`MaxSegmentAge`.** `CheckSplit` disables rolling on `logRollTime == 0`, so a
+negative slips past and reaches
+`timestamp()-firstWriteTime >= int64(logRollTime)` — true for anything a clock
+can produce. Every append rolls a new segment, forever.
+
+That is the *identical* failure the refusal table already documents for a
+negative `MaxSegmentBytes`, whose comment reads "no panic — every append rolls,
+forever. Measured: the probe never returned." The two fields sit one line apart
+in `Options`, produce the same hang by the same mechanism, and only one of them
+was checked. Worth stating plainly: the table was written by someone who had
+just measured this exact failure and still did not generalise it to the field
+next door.
+
+**`MaxLogBytes` / `MaxLogMessages` / `MaxLogAge`.** These make two checks
+disagree about one value. `noRetentionLimits()` asked `== 0`; the three apply
+gates in `cleanLocal` ask `> 0`. A negative is therefore "retention is
+configured" to the first and "do not apply it" to the others, so `Clean` takes
+the do-work path, splits the tiers, walks the segments, emits a debug line naming
+the policy it is enforcing — and enforces none of it. The log grows without bound
+while the caller believes a limit is in force, and the only thing that would say
+otherwise is the log line reporting the policy it is about to ignore.
+
+Fixed at both ends, which are genuinely different fixes rather than belt and
+braces: `New` refuses a negative, which is the caller-facing answer and the only
+one that produces a message; and `noRetentionLimits()` now asks `<= 0` so it
+agrees with its own apply gates. The second is for the type itself — a
+`deleteCleaner` is constructed directly in tests and takes `Retention` as a plain
+struct, so "the boundary already checked" is a promise that file cannot read.
+
+### Not findings, checked with the same lens
+
+- **`CompactMinAge`** — `compact_cleaner.go:186` gates the horizon on `> 0`, so a
+  negative leaves it at zero and means "no protection", the same as unset.
+- **`CompactTombstoneRetention`** — `> 0` at both `clean.go:412` and
+  `compact_cleaner.go:527`. A negative reads as disabled everywhere. Worth having
+  checked rather than assumed: a negative retention that had been *subtracted*
+  would have meant "every tombstone is old enough", i.e. silent key destruction.
 
 ### Not a finding: `RewriteBudget`'s two zero-semantics
 

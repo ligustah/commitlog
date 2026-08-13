@@ -522,6 +522,26 @@ func New(opts Options) (_ CommitLog, err error) {
 		// deciding something the caller was trying to say.
 		{"PrefixReadConcurrency", opts.PrefixReadConcurrency < 0, opts.PrefixReadConcurrency},
 		{"PrefixReadTierConcurrency", opts.PrefixReadTierConcurrency < 0, opts.PrefixReadTierConcurrency},
+		// MaxSegmentAge is the same failure as MaxSegmentBytes above, exactly:
+		// CheckSplit disables rolling on `logRollTime == 0`, so a negative gets
+		// past that and reaches `timestamp()-firstWriteTime >= int64(logRollTime)`,
+		// which is true for every value a clock can produce. Every append rolls a
+		// new segment, forever. The two fields sit one line apart in Options and
+		// only one of them was checked.
+		{"MaxSegmentAge", opts.MaxSegmentAge < 0, opts.MaxSegmentAge},
+		// The three retention limits, which fail differently and worse: they make
+		// two checks DISAGREE about one value. noRetentionLimits() asks `== 0` and
+		// the three apply gates in cleanLocal ask `> 0`, so a negative is
+		// "retention is configured" to the first and "do not apply it" to the
+		// others. The cleaner takes the do-work path, walks the segments, logs the
+		// policy it is enforcing, and enforces none of it.
+		//
+		// Silent and unbounded rather than loud: the log simply grows while the
+		// caller believes a limit is in force, and the one place that would say
+		// otherwise is the debug line reporting the policy it is about to ignore.
+		{"MaxLogBytes", opts.MaxLogBytes < 0, opts.MaxLogBytes},
+		{"MaxLogMessages", opts.MaxLogMessages < 0, opts.MaxLogMessages},
+		{"MaxLogAge", opts.MaxLogAge < 0, opts.MaxLogAge},
 		// CleanRewriteBudget is NOT here, and the omission is deliberate: a
 		// negative budget means "no budget at all", which is what every
 		// spec-less pass had before one existed. It is the one field in this

@@ -275,16 +275,20 @@ func TestIdentityRoundTripsThroughTheTierStore(t *testing.T) {
 	require.NoError(t, l3.Close())
 }
 
-// The compatibility question a downstream repo asked directly, pinned rather
-// than reasoned about: does a v0.80.0 process rewrite the descriptor of a log
-// created by an older one?
+// A plain reopen must not rewrite the descriptor.
 //
-// It must not. renderDescriptor now emits version 1 unconditionally, so ANY
-// rewrite makes the file unreadable to an older build — and a plain reopen is
-// the case where that would be a surprise rather than a decision. The rewrite
-// is reachable (a legitimate compression or segment-size change republishes),
-// so this asserts the specific path where it must not happen: same options, no
-// identity, nothing to reconcile.
+// This began as a downstream compatibility question — does a v0.80.0 process
+// rewrite a v0.79.x log's descriptor and make it unreadable to the older build?
+// v0.82.0 dropped V0, so that framing is gone, but the property it was checking
+// is not about old readers at all: a reopen that changes nothing must not
+// TOUCH the file. The rewrite path is reachable (a legitimate compression or
+// segment-size change republishes), and every write is a window a crash can land
+// in, so the case where nothing changed is the case where writing is pure risk.
+//
+// Kept rather than deleted with the V0 support that motivated it, because a test
+// whose stated reason expires is not the same as a test whose property expires —
+// see the note about assertions outliving their justification in
+// docs/sweep-2026-08-13-complexity.md.
 func TestReopeningAnUnchangedLogDoesNotRewriteItsDescriptor(t *testing.T) {
 	dir := tempDir(t)
 	opts := Options{Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20}
@@ -294,14 +298,9 @@ func TestReopeningAnUnchangedLogDoesNotRewriteItsDescriptor(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, l.Close())
 
-	// Put the file back the way a v0.79.x build wrote it, then reopen with the
-	// options that build would have passed.
 	path := filepath.Join(dir, descriptorFileName)
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
-	old := strings.Replace(string(body), "1\n", "0\n", 1)
-	require.NotEqual(t, string(body), old, "the fixture did not downgrade the version")
-	require.NoError(t, os.WriteFile(path, []byte(old), 0644))
 	before, err := os.Stat(path)
 	require.NoError(t, err)
 
@@ -311,25 +310,34 @@ func TestReopeningAnUnchangedLogDoesNotRewriteItsDescriptor(t *testing.T) {
 
 	after, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Equal(t, old, string(after),
-		"an unchanged reopen rewrote the descriptor, so an older build can no "+
-			"longer read this log")
+	require.Equal(t, string(body), string(after),
+		"an unchanged reopen rewrote the descriptor")
 	afterStat, err := os.Stat(path)
 	require.NoError(t, err)
 	require.Equal(t, before.Size(), afterStat.Size())
+
+	// The mtime too, because equal CONTENT would be satisfied by a rewrite that
+	// happened to produce the same bytes — and a rewrite is exactly what must
+	// not happen, not merely a change.
+	require.Equal(t, before.ModTime(), afterStat.ModTime(),
+		"the descriptor was rewritten with identical bytes; the write is the "+
+			"thing under test, not the content")
 }
 
-// A descriptor written before identity existed carries no version line for it
-// and must still open — that is what makes the field additive rather than a
-// migration. The log simply has no identity, which is exactly what it means.
-func TestAVersion0DescriptorStillOpens(t *testing.T) {
+// V0 is refused now, and refused LOUDLY: it must name the version rather than
+// fail somewhere downstream as a parse error or an unknown field.
+//
+// This replaces TestAVersion0DescriptorStillOpens, which asserted the opposite
+// until v0.82.0. Deleting it without putting this in its place would have left
+// the drop untested in both directions — nothing would have noticed if the
+// version check had been removed entirely along with the constant, since a V0
+// file's remaining lines all parse.
+func TestAVersion0DescriptorIsRefusedByVersion(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(Options{Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20})
 	require.NoError(t, err)
 	require.NoError(t, l.Close())
 
-	// Rewrite the descriptor in the old format, exactly as an older build left
-	// it: version 0 and no identity line.
 	path := filepath.Join(dir, descriptorFileName)
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -337,8 +345,9 @@ func TestAVersion0DescriptorStillOpens(t *testing.T) {
 	require.NotEqual(t, string(body), old, "the fixture did not actually downgrade the version")
 	require.NoError(t, os.WriteFile(path, []byte(old), 0644))
 
-	l2, err := New(Options{Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20})
-	require.NoError(t, err, "a v0 descriptor must still open")
-	require.Nil(t, l2.IdentityConflict())
-	require.NoError(t, l2.Close())
+	_, err = New(Options{Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20})
+	require.Error(t, err, "a v0 descriptor must be refused")
+	require.Contains(t, err.Error(), "unsupported descriptor version 0",
+		"the refusal must name the version; every other line in a v0 file parses "+
+			"fine, so any other error means the version check is not what caught it")
 }
