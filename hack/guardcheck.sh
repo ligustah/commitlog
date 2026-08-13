@@ -853,9 +853,9 @@ run_guard "index expansion asks the mapping" index.go   '	if pSize := int64(len(
 # makes the segment permanently undeletable. The rule is in closeIndex's own
 # comment; it was applied to the flush and not to the shrink after it. The
 # neutralization is that early return put back.
-run_guard_windows "a failed close still frees the handle" index.go   '	if durable && stderrors.Join(errs...) == nil {
+run_guard_windows "a failed close still frees the handle" index.go   '	if trim && idx.position < idx.size && stderrors.Join(errs...) == nil {
 		errs = append(errs, idx.shrink())
-	}' '	if durable && stderrors.Join(errs...) == nil {
+	}' '	if trim && idx.position < idx.size && stderrors.Join(errs...) == nil {
 		if err := idx.shrink(); err != nil {
 			return err
 		}
