@@ -6,16 +6,25 @@ approach would be the better solution."*
 
 Scope: commitlog, the 52 non-merge commits from v0.70.0 to v0.79.0, plus anything
 older those point at. Findings are ordered by how much I would want to change,
-not by how bad the original bug was. Nothing here has been acted on — this is the
-inspection, and two of the three recommendations are breaking-ish enough to want
-a yes first.
+not by how bad the original bug was.
+
+## Outcome, added after acting (v0.79.1)
+
+- **Finding 1: done.** Shipped in v0.79.1. It was worse than the audit says —
+  four copies of the rule, not three, and doing the work turned up a fifth.
+- **Finding 2: I no longer recommend it as written.** Acting on finding 1
+  produced evidence against my own diagnosis; the revised reasoning is in that
+  section. I did the cheap part of the problem instead and left the migration
+  undone. This is the one thing here I have changed my mind about.
+- **Finding 3: unchanged.** Already fixed at the root, recorded as a shape.
 
 ---
 
 ## 1. The working-copy disposal rule is a convention, and it has been forgotten
    three times
 
-**Verdict: duct tape. Recommend rebuilding.**
+**Verdict: duct tape. Recommend rebuilding.** — *Done in v0.79.1; see the note at
+the end of this section for what the work turned up.*
 
 Every rewrite path in this package builds a suffixed working copy
 (`.cleaned`/`.truncated`/`.trimmed`/`.joined`), fills it, and then renames it
@@ -73,6 +82,37 @@ constructors. No file format changes, no behaviour change intended — the guard
 that cover the four existing sites should stay green throughout, which is a good
 falsification test for the refactor.
 
+### What it turned out to be (v0.79.1)
+
+Built as a method on `*segment` rather than a `workingCopy` wrapper type — the
+rule needs the suffix and `left`, both of which the segment already holds, and a
+wrapper would have bought a name at the cost of threading a new type through
+three constructors. `defer seg.dropIfUnpublished()` reads the same at the call
+site, which was the point.
+
+Three corrections to the finding above:
+
+- **Four copies, not three.** And the count in the heading was wrong for a
+  better reason than miscounting: `Truncate`'s closure was wired into three of
+  its four error returns. The fourth is a failed `Replace`, which strands the
+  copy identically. So the rule had been forgotten a fourth time *inside* one of
+  the sites that appeared to implement it.
+- **There was a fifth site**, `TruncateBefore`, found by reading rather than
+  grepping. It publishes with `Finalize` — renames the suffix off in place rather
+  than over a source — so it does not look like the others and had grown its own
+  transcription. It is the same rule: `Finalize` clears the suffix exactly as
+  `Replace` does. It was also the only one of the five with no test asserting it
+  disposed of anything, which is how four became five unnoticed. It has a guard
+  now, 144 total.
+- **The falsification test worked, and it was not sufficient.** All four guards
+  stayed green. CI still went red — on a *fifth* guard,
+  `truncate unlinks outside the lock`, which stands on the same lines for an
+  unrelated reason and which I never thought to check because its name says
+  nothing about disposal. See finding 2.
+
+Net −39 lines across the first commit. `git log`: `24b14b1`, `ec60392`,
+`cd53855`.
+
 ---
 
 ## 2. guardcheck anchors on literal source text, and pays for it every refactor
@@ -112,6 +152,44 @@ the file, and it is chosen for no reason other than being easy to `sed`.
 
 I would do (1). (2) is a real program and the failure it prevents is already
 loud.
+
+### Revised after doing finding 1 — I would now not do (1) yet
+
+Two things came out of the disposal refactor that bear directly on this, and both
+point the other way.
+
+**The contorted anchors were a symptom of duplicated code, not of literal
+anchoring.** Three of the four guards on the disposal were anchored on
+deliberately awkward multi-line snippets, and their own comments said in as many
+words that they existed to tell three byte-identical blocks apart. I read that as
+the anchoring scheme straining. It was guardcheck correctly reporting that the
+same code existed three times. Deduplicating it left all four anchored on a
+single short line each — shorter and more stable than a marker comment would
+have been, and achieved by making the code better rather than by adding a
+convention on top of it. A marker comment would have made those three guards
+*comfortable* while leaving the triplication in place, which is the opposite of
+what this audit is for.
+
+**The expensive part was never the re-anchoring; it was not knowing.** Nine
+dedicated commits sounds like the cost, and it is not. Each of those was a
+two-minute edit. What actually hurt was that finding out required a ~40-minute
+full run (~3 minutes when the tooling was written, at 22 guards; there are now
+144), so in practice nobody ran it and CI found the SKIP after the push — twice
+in two days. `GUARDCHECK_ANCHORS=1` resolves every anchor and runs nothing else,
+in seconds, which collapses that specific cost to about zero. It also ignores the
+platform deferral, so it is the only thing on a Linux box that can speak for the
+Windows-only anchors. Shipped in v0.79.1.
+
+What remains true is the original observation: a literal line is the most
+volatile thing in the file. What is no longer true is that this is expensive. A
+migration touching 144 guards to save an edit that is now cheap to detect and
+quick to make is not obviously worth its own risk — and every guard rewritten is
+a guard whose claim has to be re-verified, which is the one operation in this
+repo I most want to avoid doing 144 times in a batch.
+
+**Recommendation: leave it. Revisit if the re-anchor commits keep coming now that
+detecting them is free** — that is the measurement that would settle it, and it
+did not exist when I wrote the finding above.
 
 ---
 
