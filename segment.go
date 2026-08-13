@@ -2774,6 +2774,53 @@ func (s *segment) current() (*segment, bool) {
 // offset >= the target, yielding an exact per-message entry (position, size,
 // timestamp) just as the dense path does.
 func (s *segment) findEntry(offset int64) (*entry, error) {
+	return s.findEntryBy(entrySearch{
+		anchor:  func() (int64, error) { return s.anchorPositionForOffset(offset) },
+		message: func(m messageSet) bool { return m.Offset() >= offset },
+		entry:   func(e *entry) bool { return e.Offset >= offset },
+	})
+}
+
+// findEntryByTimestamp returns the first entry whose timestamp is greater than
+// or equal to the given timestamp. For a block-compressed segment the sparse
+// index gives per-block granularity; findEntryByTimestamp locates the block
+// that may contain the first qualifying message and scans forward to it,
+// returning an exact per-message entry.
+func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
+	return s.findEntryBy(entrySearch{
+		anchor:  func() (int64, error) { return s.anchorPositionForTimestamp(timestamp) },
+		message: func(m messageSet) bool { return m.Timestamp() >= timestamp },
+		entry:   func(e *entry) bool { return e.Timestamp >= timestamp },
+	})
+}
+
+// entrySearch is the coordinate a search runs on, and it is three predicates
+// rather than one because the segment has two shapes to search.
+//
+// anchor and message serve BLOCK mode: the sparse index locates the block that
+// may hold the answer, and the scan forward through that block's frames finds
+// the first message that qualifies. entry serves the dense index, where the
+// binary search lands on the answer itself and there is nothing to scan.
+//
+// Splitting message from entry is not an accident of types. A messageSet is a
+// frame in the file and an *entry is a row in the index, and the two carry the
+// same coordinate under different names — so a caller cannot supply one and have
+// the other derived, and both have to be stated.
+type entrySearch struct {
+	anchor  func() (int64, error)
+	message func(m messageSet) bool
+	entry   func(e *entry) bool
+}
+
+// findEntryBy is the shared body of findEntry and findEntryByTimestamp: pick the
+// index shape, search it, and return an exact per-message entry either way.
+//
+// The two were verbatim copies but for the predicates above, down to a
+// five-line comment about ErrSegmentReplaced that appeared twice. That comment
+// is the reason this is one function and not two similar ones: it records a
+// rule about what a segment answers when it has left the log, and a rule stated
+// in two places is a rule that can be corrected in one of them.
+func (s *segment) findEntryBy(by entrySearch) (*entry, error) {
 	// Before the read lock: a block-mode search runs scanForward, which reads
 	// through readAtLocked and so cannot build the table itself.
 	if err := s.ensureBlocksLoaded(); err != nil {
@@ -2790,73 +2837,21 @@ func (s *segment) findEntry(offset int64) (*entry, error) {
 		return nil, ErrSegmentReplaced
 	}
 	if s.blockMode {
-		anchor, err := s.anchorPositionForOffset(offset)
+		anchor, err := by.anchor()
 		if err != nil {
 			return nil, err
 		}
-		return s.scanForward(anchor, func(m messageSet) bool {
-			return m.Offset() >= offset
-		})
+		return s.scanForward(anchor, by.message)
 	}
 	var result *entry
 	err := s.withIndex(func(index *index) error {
 		ent := &entry{}
-		i, n, err := index.searchEntries(ent, func(e *entry) bool {
-			return e.Offset >= offset
-		})
+		i, n, err := index.searchEntries(ent, by.entry)
 		if err != nil {
 			return err
 		}
 		// Fatal, not a hint: this path returns the entry itself, so there is
 		// nothing to scan forward from.
-		if i == n {
-			return ErrEntryNotFound
-		}
-		result = ent
-		return nil
-	})
-	return result, err
-}
-
-// findEntryByTimestamp returns the first entry whose timestamp is greater than
-// or equal to the given timestamp. For a block-compressed segment the sparse
-// index gives per-block granularity; findEntryByTimestamp locates the block
-// that may contain the first qualifying message and scans forward to it,
-// returning an exact per-message entry.
-func (s *segment) findEntryByTimestamp(timestamp int64) (*entry, error) {
-	// See findEntry: same scanForward, same reason.
-	if err := s.ensureBlocksLoaded(); err != nil {
-		return nil, err
-	}
-	s.RLock()
-	defer s.RUnlock()
-	// A segment that has left the log answers "re-resolve", not "closed". The
-	// index only knows it is shut, so without this a lookup on a segment a pass
-	// had already swapped or deleted came back as ErrSegmentClosed — which a
-	// reader can do nothing with, where ErrSegmentReplaced sends it to the
-	// segment list for the live one.
-	if s.left {
-		return nil, ErrSegmentReplaced
-	}
-	if s.blockMode {
-		anchor, err := s.anchorPositionForTimestamp(timestamp)
-		if err != nil {
-			return nil, err
-		}
-		return s.scanForward(anchor, func(m messageSet) bool {
-			return m.Timestamp() >= timestamp
-		})
-	}
-	var result *entry
-	err := s.withIndex(func(index *index) error {
-		ent := &entry{}
-		i, n, err := index.searchEntries(ent, func(e *entry) bool {
-			return e.Timestamp >= timestamp
-		})
-		if err != nil {
-			return err
-		}
-		// Fatal here too, for findEntry's reason.
 		if i == n {
 			return ErrEntryNotFound
 		}

@@ -72,6 +72,13 @@ library from that fork onward.
   one forever; three transcriptions were three chances for the next object kind
   to reach only two of them. No behaviour change.
 
+- `findEntry` and `findEntryByTimestamp` were verbatim copies of one another but
+  for three predicates — the sparse-index anchor, the frame test and the index
+  test. One `findEntryBy` now takes those three and owns the body. What they
+  also copied was the five-line comment on what a segment answers once it has
+  left the log, and a rule written down twice is a rule that can be corrected in
+  one place. No behaviour change.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking
