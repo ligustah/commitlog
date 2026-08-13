@@ -5,6 +5,71 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.79.0 — 2026-08-13
+
+### Fixed
+
+- **Nothing repaired a short index on a sealed segment, and a short index made
+  its records unreadable.** `setupIndex` takes `lastOffset` straight from the
+  index's last entry, so a segment whose index stops short of its log answers as
+  if the records past that point are not there. They are in the file; the log
+  will not serve them. Measured: **one lost index entry in the first segment of a
+  60-record log cost 56 of them, permanently.**
+
+  The repair already existed. `reconcileIndexTail` appends entries for exactly
+  the frames past the last indexed one — but it ran on the ACTIVE segment and on
+  adopted tiers, and on nothing else. `setupIndex`'s own rebuild fires on
+  `indexOvershootsLog`, the OPPOSITE direction: an index reaching PAST its log.
+  `indexOvershootsLog`'s comment calls an index BEHIND its log "ordinary ... and
+  `reconcileIndexTail` fills it in", which was true of one segment out of however
+  many the directory held.
+
+  `open()` now reconciles every segment. It is O(1) per healthy segment and reads
+  no log bytes: the walk starts at the last indexed frame's end and runs while
+  that is below the file size, so an index that covers its log executes the loop
+  body zero times. Only a segment that is actually short reads anything, and only
+  over the part that is missing.
+
+  Two details that are not incidental. The floor is the NEXT segment's base
+  offset, not the high watermark — what a sealed segment drops below that is not
+  an uncommitted tail but a HOLE between two segments that both still exist; the
+  watermark is the right floor only for the segment nothing follows, which is why
+  the active segment keeps its own call. And it runs BEFORE
+  `resolveSegmentOverlaps`, which decides containment from `NextOffset`, derived
+  from the very `lastOffset` a short index understates.
+
+  `TestAShortIndexOnASealedSegmentHidesRecords` pins it, with a guard.
+
+### Performance
+
+- **A reopened log now fsyncs no index it did not write.** v0.78.0 skipped the
+  per-segment index fsync for segments the process sealed itself. The shape that
+  costs most is the restart: a broker opens 336 segments, serves reads, shuts
+  down, and paid one device-cache flush per segment for bytes it never touched.
+  That is now none — counted directly off the flush counter, not inferred.
+
+  `dirtyIndex` started true for everything opened from disk on the ground that it
+  "was written by a process whose flush state we cannot know". That was the right
+  worry and the wrong remedy: an fsync at CLOSE does not recover a predecessor's
+  lost tail, it only writes back whatever survived. What recovers it is the walk
+  above — so until that ran on sealed segments, the worry was answered by a flush
+  that could not fix the thing it was worried about.
+
+  A reconcile that wrote NOTHING is the proof that the index on disk describes
+  the log beside it, and that is what now clears the mark. Where it DID write the
+  mark stands and close still flushes: those entries exist nowhere else.
+
+  This is not a claim that the bytes are on stable storage in every case. A
+  predecessor that crashed between writing index bytes and flushing them leaves
+  them in the page cache, complete, and a power failure can still take them. What
+  changed is that losing them is recoverable rather than silent — the next open
+  walks the gap and rebuilds it.
+
+  Closing a 44-segment log, ms per segment: **reopened 7.3 → 3.2**, against 2.6
+  for the same log rolled in-process. At 9 segments the two are a dead heat and
+  at 3 the reopened log is the faster of the two. `BenchmarkCloseCleanLog`
+  carries the numbers.
+
 ## v0.78.0 — 2026-08-13
 
 ### Fixed
