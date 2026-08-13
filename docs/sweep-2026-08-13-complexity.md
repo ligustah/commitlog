@@ -143,7 +143,7 @@ agrees with its own apply gates. The second is for the type itself — a
 `deleteCleaner` is constructed directly in tests and takes `Retention` as a plain
 struct, so "the boundary already checked" is a promise that file cannot read.
 
-### Not findings, checked with the same lens
+### Not findings, checked with the same lens — SUPERSEDED, see below
 
 - **`CompactMinAge`** — `compact_cleaner.go:186` gates the horizon on `> 0`, so a
   negative leaves it at zero and means "no protection", the same as unset.
@@ -151,6 +151,18 @@ struct, so "the boundary already checked" is a promise that file cannot read.
   `compact_cleaner.go:527`. A negative reads as disabled everywhere. Worth having
   checked rather than assumed: a negative retention that had been *subtracted*
   would have meant "every tombstone is old enough", i.e. silent key destruction.
+
+Both readings above are correct and both are now **refused anyway**. The lens
+asked "does a negative misbehave?" and the answer is no. It did not ask what a
+negative does to the log's IDENTITY, and both fields are in
+`descriptor.enforced()` — so the negative is written into the descriptor and a
+log created with `-1h` refuses a reopen with `0`. Two values that do the
+identical thing, one permanently rejecting the other, surfacing months later as
+a mismatch naming a knob whose two spellings mean the same.
+
+Worth recording as a miss, not an update: a lens finds what it asks about. "Is
+this value handled correctly?" and "is this value a second spelling of one we
+already have?" are different questions, and only the second one finds this.
 
 ### Not a finding: `RewriteBudget`'s two zero-semantics
 
@@ -169,3 +181,89 @@ is deliberate, documented at both ends, and `clean_tier_budget_zero_test.go`
 already reasons about it directly.
 
 Recorded so the next sweep does not re-open it.
+
+---
+
+## Second half: one lens, four findings
+
+Everything above came from two lenses ("a default arm launders bad input", "a
+knob whose doc apologises"). The rest of the day came from one, and it was by
+far the most productive:
+
+> **A list, maintained by hand, that has to stay in sync with something the list
+> does not own.**
+
+It describes the world as it is today, so the world changing IS the defect, and
+nothing goes red — the list is still valid, just incomplete.
+
+### 1. Two reserved-name lists guarding one directory
+
+`logOwnedFileNames` and `logOwnedFileSuffixes`. The client's namespace was
+defined by subtraction from a set only commitlog could change. Replaced by
+`ClientSidecarPrefix`; both lists deleted. Full write-up in
+`audit-2026-08-13-separation.md` §3b.
+
+The part worth repeating here: **a refusal was not enough.** It governs names
+arriving through `PutSidecar` and says nothing about files already on disk, and
+`openLog`/`logIsNew` dispatch on suffix over whatever the directory holds. Until
+the scans skipped the prefix, the prefix bought the client nothing — it was
+still commitlog's suffix list defining the client's namespace, one layer in.
+
+### 2. `renderDescriptor` and `set()` enumerate the `descriptor` struct
+
+Twice, by hand, with no test tying either to the struct. Every other descriptor
+test goes through `New` and `Options`, so each covers only the fields it happens
+to set; a field that persists NOWHERE is invisible to all of them. Three
+reachable failures, none of which anything would have caught:
+
+- in the struct, not in `renderDescriptor` — silently not persisted, and for a
+  field `reconcileDescriptor` keeps current that means the descriptor is
+  rewritten on every single open;
+- in the struct, not in `set()` — the file is unreadable by the build that
+  wrote it;
+- formatted differently either side — the value comes back changed.
+
+### 3. `New`'s negative-refusal table enumerates `Options`
+
+Missing an entry twice in one day (§ above). A test built from the same hand
+list cannot see that. Now built from the struct by reflection, with an
+**allowlist** of the three fields where a negative has a meaning — inverted
+deliberately, because the refused list is the one that grows with the struct and
+forgetting is silent, while the allowlist only grows when someone is already
+thinking about what a negative should mean.
+
+### 4. The codec set, written out five times
+
+`Compress`, `DecompressInto`, `Valid`, `String`, `Parse` — and both existing
+tests enumerate it a sixth and seventh time from literals, so a fifth codec was
+covered by none of them. Cases now derived from `Valid()`, which is what DEFINES
+the set: `New` refuses what `Valid` rejects, and that is the only reason
+`Compress` is allowed a silent default arm at all.
+
+Worst reachable failure: a codec in `Valid` and `DecompressInto` but not
+`Compress` stores the block RAW under a header that names the codec, so the read
+decompresses raw bytes as compressed ones. Silent corruption of data the write
+path accepted.
+
+## Two techniques worth reusing
+
+**Reflection for completeness, hand-written values for validity.** A generic
+"set every field to something non-zero" renders a `compress.Codec` that `Parse`
+rejects and reports the wrong defect. So the fixture is hand-written and
+reflection asserts that no field is left at its zero value. A newly added field
+fails at the fixture, with the two ways to resolve it named in the message.
+
+**Every derived assertion needs a floor.** A derivation that reaches zero cases
+passes. `checked >= 15`, `found >= 4`, `len(suffixes) >= 3` — each one exists
+because the loop above it would otherwise be green over an empty set.
+
+## Found by fixing the above: guardcheck read an empty selection as a pass
+
+`guard_finish` ran `go test -run "$re" ... .` — the root package only, with no
+check that anything matched. The two new codec guards reported NO COVERAGE for a
+test that was never selected. The existing `compress` guard had worked only by
+accident: its test happens to live in the root package.
+
+That is the fourth layer of one bug in one tool (build tags, the filter
+argument, the package selection, "did anything match"), each found only after
+the previous was fixed. Hardening one selector says nothing about the others.
