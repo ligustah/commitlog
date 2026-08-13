@@ -6,130 +6,89 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// StripBelow above Ceiling is refused, and the pass does not run.
+// StripBelow ABOVE Ceiling is a legitimate spec, and this is the regression test
+// for the release that refused it.
 //
-// The two fields are one caller's account of one boundary. Ceiling says records
-// at or above it MAY BE UNDECIDED and are retained verbatim; StripBelow says
-// records below it ARE DECIDED and no longer need their transactional
-// bookkeeping. Set StripBelow higher and the range between them is described
-// both ways at once — and the pass acts on the second: mergeDigests marks a
-// record for stripping on `r.offset < spec.StripBelow` BEFORE it consults the
-// ceiling, so the records the ceiling was set to protect keep their offsets and
-// lose their pid/epoch/seq headers. Those headers are how the caller decides the
-// transaction they belong to, so an undecided record that loses them cannot be
-// decided by anyone, ever.
+// v0.76.0 added a check that StripBelow must not exceed a supplied Ceiling, on
+// the reasoning that the two describe one boundary from opposite sides and so
+// could not disagree. Two things were wrong with that. Ceiling is not a claim
+// about decidedness — it bounds COMPACTION, and a caller has reasons to hold it
+// down other than the LSO: durable_streams builds both fields equal at the LSO
+// and then lowers Ceiling ALONE to pin records a lagging consumer group has not
+// read yet. And the pass could not have done harm with the pairing regardless,
+// because classify returns dispRetain for `offset >= spec.ceiling` before it
+// considers stripping at all.
 //
-// This is the invariant docs/layering.md asked for by name — "if a cheap
-// invariant on Ceiling ever becomes available, it belongs at the top of
-// CleanWithSpec" — and it is cheap because it compares two numbers the caller
-// supplied together, with nothing about the log involved.
-func TestAStripBelowAboveTheCeilingIsRefused(t *testing.T) {
+// So the refusal protected against something that could not happen, while
+// rejecting every pass on a stream that had a decided transaction and a slow
+// group at the same time. What this pins is the behaviour that makes the spec
+// worth writing: the ceiling wins where the two overlap, and StripBelow still
+// does its job below it.
+func TestAStripBelowAboveTheCeilingIsHonoured(t *testing.T) {
 	l, app := specLog(t)
+	txHdrs := func() map[string][]byte {
+		return map[string][]byte{
+			"pid":   {0, 0, 0, 0, 0, 0, 0, 7},
+			"epoch": {0, 0, 0, 1},
+			"seq":   {0, 0, 0, 0, 0, 0, 0, 3},
+			"app":   []byte("keep-me"),
+		}
+	}
 
-	app(&Message{Key: []byte("k"), Value: []byte("first")})
-	app(&Message{Key: []byte("k"), Value: []byte("second")})
+	// Below the consumer floor: decided, unpinned, and so strippable.
+	offLow := app(&Message{Key: []byte("low"), Value: []byte("v"), Headers: txHdrs()})
+	// At and above it: two copies of one key. The FIRST is superseded by the
+	// second, so it is exactly the record compaction would drop if the ceiling
+	// were not holding it — which is what the lagging group is protected from.
+	offPinnedOld := app(&Message{Key: []byte("k"), Value: []byte("v1"), Headers: txHdrs()})
+	offPinnedNew := app(&Message{Key: []byte("k"), Value: []byte("v2"), Headers: txHdrs()})
 	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
 
-	before := readAllMsgs(t, l)
-	hw := l.HighWatermark()
+	// The consumer floor pins from offPinnedOld up. StripBelow stays at the LSO,
+	// above all of them, because every one of these records is decided.
+	ceiling := offPinnedOld
+	stripBelow := l.HighWatermark()
+	require.Greater(t, stripBelow, ceiling,
+		"the fixture must put StripBelow above Ceiling or it tests nothing")
 
 	_, err := l.CleanWithSpec(CleanSpec{
-		Ceiling:      At(hw),
-		StripBelow:   hw + 1,
-		StripHeaders: []string{"pid", "epoch", "seq"},
-	})
-	require.Error(t, err, "a StripBelow above the ceiling must be refused")
-	require.ErrorContains(t, err, "StripBelow",
-		"the error must name the field the caller has to fix")
-
-	// Refused BEFORE the pass, not partway through it: a spec rejected after
-	// records were rewritten would be the worst of both, an error the caller has
-	// to handle and a log that changed anyway.
-	require.Equal(t, before, readAllMsgs(t, l), "the refused pass still ran")
-}
-
-// The refusal is about StripBelow EXCEEDING the ceiling, and this holds it there.
-//
-// Every caller in this repo and in durable_streams passes the two equal —
-// `Ceiling: At(hw), StripBelow: hw` — because the LSO is one boundary and both
-// fields describe it. A refusal written one notch too wide (`>=`) rejects exactly
-// that spec, which is the normal one, and reads as stricter while being simply
-// broken. The equal case is the case that has to keep working.
-func TestAStripBelowAtTheCeilingStillRuns(t *testing.T) {
-	l, app := specLog(t)
-
-	app(&Message{Key: []byte("k"), Value: []byte("first")})
-	app(&Message{Key: []byte("k"), Value: []byte("second")})
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
-
-	hw := l.HighWatermark()
-	_, err := l.CleanWithSpec(CleanSpec{
-		Ceiling:      At(hw),
-		StripBelow:   hw,
+		Ceiling:      At(ceiling),
+		StripBelow:   stripBelow,
 		StripHeaders: []string{"pid", "epoch", "seq"},
 	})
 	require.NoError(t, err,
-		"StripBelow equal to Ceiling is the spec every transactional caller "+
-			"passes; it describes one boundary from both sides and contradicts "+
-			"nothing")
-}
+		"a StripBelow above the ceiling is what a caller pinning records for a "+
+			"lagging consumer ends up writing; it must not be refused")
 
-// A StripBelow that strips NOTHING is not judged against the ceiling either.
-//
-// The contradiction the refusal catches is only reachable where stripping
-// happens, and stripping needs both fields: mergeDigests gates on
-// `spec.StripBelow > 0 && len(spec.StripHeaders) > 0`, and classify gates marker
-// removal on the same pair. With no headers named, a StripBelow above the ceiling
-// removes nothing from anything and contradicts nothing.
-//
-// This is the arm the first version of the refusal did not have, and its absence
-// was not a theoretical gap. StripBelow's zero value means "no stripping", not
-// "strip below offset 0"; HighWatermark returns -1 for "nothing committed yet";
-// `Ceiling: At(l.HighWatermark())` is what callers write. So an unset StripBelow
-// of 0 sat above a legitimate ceiling of -1 and the pass was refused —
-// TestACeilingBelowEveryOffsetIsLegitimate went red across every CI platform.
-// Reading a field the caller never set as a value they wrote down is the same
-// laundering the TierBudgets refusal exists to stop, committed by the check
-// written to stop it.
-func TestAStripBelowWithoutStripHeadersIsNotJudged(t *testing.T) {
-	l, app := specLog(t)
+	got := readAllMsgs(t, l)
 
-	app(&Message{Key: []byte("k"), Value: []byte("first")})
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
+	// Pinned: the superseded copy is still here. Without the ceiling holding it
+	// down, latest-per-key would have taken it.
+	require.Contains(t, got, offPinnedOld,
+		"the ceiling did not pin the superseded copy; a lagging consumer would "+
+			"have lost a record it had not read")
+	require.Equal(t, "v1", string(got[offPinnedOld].Value()))
+	require.Contains(t, got, offPinnedNew)
 
-	hw := l.HighWatermark()
-	_, err := l.CleanWithSpec(CleanSpec{
-		Ceiling:    At(hw),
-		StripBelow: hw + 1,
-		// No StripHeaders: nothing is stripped, so nothing above the ceiling can
-		// lose the bookkeeping the ceiling protects.
-	})
-	require.NoError(t, err,
-		"a StripBelow with no StripHeaders strips nothing and cannot contradict "+
-			"the ceiling, but was refused anyway")
-}
+	// And verbatim, headers included: at or above the ceiling classify retains
+	// before it considers stripping, so StripBelow does not reach up here. This
+	// is the half the refusal got backwards — it believed these records were
+	// being stripped, which is why it thought there was anything to prevent.
+	for _, off := range []int64{offPinnedOld, offPinnedNew} {
+		require.Contains(t, got[off].Headers(), "pid",
+			"record %d sits at or above the ceiling and must be retained "+
+				"verbatim, StripBelow notwithstanding", off)
+	}
 
-// A spec with no Ceiling is not judged against StripBelow at all.
-//
-// With the field unset the bound is the log's own high watermark, resolved
-// inside the pass and free to move between any check here and any use of it
-// there — so a refusal on that pairing would be a race wearing an invariant's
-// clothes. What the refusal above compares is two numbers the caller wrote down
-// together, which disagree or do not, and a spec that supplies only one of them
-// has said nothing to contradict.
-func TestAStripBelowWithNoCeilingIsNotJudged(t *testing.T) {
-	l, app := specLog(t)
-
-	app(&Message{Key: []byte("k"), Value: []byte("first")})
-	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
-
-	// Far above anything this log holds, which is what would trip the refusal if
-	// it reached for the high watermark to stand in for the missing ceiling.
-	_, err := l.CleanWithSpec(CleanSpec{
-		StripBelow:   l.HighWatermark() + 1000,
-		StripHeaders: []string{"pid", "epoch", "seq"},
-	})
-	require.NoError(t, err,
-		"a spec with no Ceiling was refused against the high watermark, which "+
-			"moves under the pass and cannot be checked here")
+	// Below the ceiling StripBelow still applies, so the spec is not merely being
+	// tolerated — it is doing its job on the range it can reach.
+	require.Contains(t, got, offLow)
+	lowHdrs := got[offLow].Headers()
+	require.NotContains(t, lowHdrs, "pid",
+		"a decided record below the ceiling should still lose its transactional "+
+			"headers; the spec was accepted but did nothing")
+	require.NotContains(t, lowHdrs, "epoch")
+	require.NotContains(t, lowHdrs, "seq")
+	require.Equal(t, "keep-me", string(lowHdrs["app"]),
+		"a non-transactional header must survive the strip")
 }

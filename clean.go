@@ -204,10 +204,15 @@ type CleanSpec struct {
 	// spec would be honoured on every pass the caller drives and ignored on every
 	// pass it does not.
 	//
-	// StripBelow must not exceed a supplied Ceiling, and CleanWithSpec refuses a
-	// spec where it does. The two fields describe one boundary from opposite
-	// sides, and "retained verbatim" above is only true while they agree — see
-	// StripBelow.
+	// Ceiling bounds COMPACTION and says nothing about decidedness — that is
+	// StripBelow's job. A transactional caller passes At(lso) because undecided
+	// records must not be compacted, but holding the bound lower for an unrelated
+	// reason is legitimate: durable_streams lowers it below its LSO to pin records
+	// a lagging consumer group has not read. StripBelow may therefore exceed
+	// Ceiling, and it costs nothing when it does — classify retains everything at
+	// or above the ceiling before it considers stripping, so the ceiling wins. Do
+	// not add a check refusing that pairing; v0.76.0 did and v0.77.0 reverted it.
+	// See CleanWithSpec.
 	Ceiling Bound
 	// ceiling is Ceiling resolved against the log's high watermark. clean() sets
 	// it and the compaction pass reads only it, so no code below this line has
@@ -223,12 +228,14 @@ type CleanSpec struct {
 	// and rewrites the survivors without StripHeaders. Offsets, timestamps,
 	// leader epochs, keys, values and attribute bits survive the rewrite.
 	//
-	// It may not exceed a supplied Ceiling, and CleanWithSpec refuses a spec
-	// where it does. Stripping is decided BEFORE the ceiling is consulted —
-	// mergeDigests marks a record on r.offset < StripBelow and only then skips
-	// what is above the ceiling — so a StripBelow reaching past the ceiling
-	// takes the transactional headers off records the ceiling exists to leave
-	// alone, and an undecided record without them can never be decided.
+	// Independent of Ceiling, and legitimately above it. Where the two overlap
+	// the ceiling wins: classify retains everything at or above spec.ceiling
+	// before it considers stripping, so a record in [Ceiling, StripBelow) is kept
+	// verbatim, headers and all. A StripBelow above the ceiling is therefore not a
+	// contradiction to refuse but a bound that simply stops applying up there —
+	// which is what a caller pinning records for a lagging consumer group ends up
+	// writing. This field is the only one of the two that speaks about
+	// decidedness.
 	StripBelow int64
 	// StripHeaders are the per-message header keys removed below StripBelow.
 	// Empty disables stripping, and with it marker removal — the two are only
@@ -453,52 +460,33 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 					"give it a duration longer than a pass", tier)
 		}
 	}
-	// The one invariant on Ceiling this package can actually check, and
-	// docs/layering.md asks for it here by name: "if a cheap invariant on Ceiling
-	// ever becomes available, it belongs at the top of CleanWithSpec".
+	// DO NOT add a check that StripBelow must not exceed Ceiling. v0.76.0 did,
+	// and v0.77.0 took it back out after it broke durable_streams in production.
 	//
-	// Ceiling and StripBelow are two statements by the same caller about the same
-	// boundary, and StripBelow above Ceiling makes them contradict each other.
-	// Ceiling says records at or above it MAY BE UNDECIDED; StripBelow says
-	// records below it ARE DECIDED. Set StripBelow higher and the range in
-	// between is both at once — and the pass believes the second one. mergeDigests
-	// marks a record for stripping on `r.offset < spec.StripBelow` BEFORE it
-	// consults the ceiling, so those records keep their place in the log and lose
-	// their transactional headers: pid, epoch and seq, the bookkeeping the caller
-	// needs to decide the transaction they belong to. An undecided record whose
-	// headers are gone cannot be decided by anyone afterwards.
+	// The premise was that the two fields describe one boundary from opposite
+	// sides — Ceiling saying "at or above me records may be UNDECIDED", StripBelow
+	// saying "below me records ARE DECIDED" — so StripBelow above Ceiling had to
+	// be a contradiction that the pass would resolve destructively. Both halves of
+	// that were wrong.
 	//
-	// That also makes Ceiling's own doc true. It promises records at or above the
-	// ceiling are "retained verbatim", and verbatim is what a spec refused here
-	// leaves them.
+	// Ceiling is not a claim about decidedness. It bounds COMPACTION: a
+	// transactional caller passes the LSO because undecided records must not be
+	// compacted, but holding the bound lower for an unrelated reason is
+	// legitimate, and durable_streams does exactly that — both fields built equal
+	// at the LSO, then Ceiling lowered ALONE to pin records a lagging consumer
+	// group has not read. Nothing about that pairing is inconsistent.
 	//
-	// Only against a SUPPLIED ceiling. With the field unset the bound is the log's
-	// own high watermark, resolved inside the pass and free to move between any
-	// check and any use of it, so a refusal there would be a race dressed as an
-	// invariant. What is checked here is two numbers the caller wrote down
-	// together, and they disagree or they do not.
+	// Nor could the pass have done damage with it. classify returns dispRetain for
+	// `offset >= spec.ceiling` BEFORE it looks at StripBelow at all, so the
+	// ceiling already wins: a StripBelow reaching above it simply has no effect up
+	// there. The thing the refusal was protecting against could not happen, and
+	// the refusal itself rejected every pass on a stream that had a decided
+	// transaction and a slow group at the same time.
 	//
-	// And only when stripping is ACTIVE, on exactly the pair that activates it in
-	// mergeDigests. StripBelow's zero value means "no stripping", not "strip below
-	// offset 0" — so without this gate the check reads a field the caller never
-	// set as a value they wrote down, which is the same laundering the TierBudgets
-	// refusal above exists to stop. It is not hypothetical: HighWatermark returns
-	// -1 for "nothing committed yet", At(l.HighWatermark()) is what callers write,
-	// and an unset StripBelow of 0 is above -1. The first version of this refusal
-	// rejected that spec, and TestACeilingBelowEveryOffsetIsLegitimate — which
-	// exists because an earlier change made the same mistake about the sign —
-	// caught it in CI.
-	stripActive := spec.StripBelow > 0 && len(spec.StripHeaders) > 0
-	if ceiling, ok := spec.Ceiling.Get(); ok && stripActive && spec.StripBelow > ceiling {
-		return 0, errors.Errorf(
-			"commitlog: CleanSpec.StripBelow is %d and CleanSpec.Ceiling is %d, so "+
-				"records in [%d, %d) are declared decided by the first and possibly "+
-				"undecided by the second; the pass would strip the transactional "+
-				"headers off records the ceiling exists to leave verbatim, and an "+
-				"undecided record without them can never be decided; StripBelow must "+
-				"not exceed Ceiling", spec.StripBelow, ceiling, ceiling, spec.StripBelow)
-	}
-
+	// The lesson is the one docs/layering.md already carries and this failed to
+	// respect: this package does not own these concepts. An invariant that reads
+	// as arithmetic between two fields is still a claim about their MEANING, and
+	// the meaning lives in the caller.
 	verified, err := l.cleanPass(spec)
 	// AFTER the pass, and outside it, for a reason that is not stylistic:
 	// cleanPass holds cleanMu for its whole body and OffloadBefore takes cleanMu

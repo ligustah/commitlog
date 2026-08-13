@@ -5,6 +5,46 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.77.0 — 2026-08-13
+
+### Fixed
+
+- **Reverted: `CleanWithSpec` no longer refuses a `StripBelow` above a supplied
+  `Ceiling`.** v0.76.0 added that refusal. It was wrong twice over, and it broke
+  durable_streams in production — every clean pass on a stream that had a decided
+  transaction and a lagging consumer group at the same time was rejected. They
+  reported it and worked around it by clamping `StripBelow` to the ceiling; the
+  clamp can come off on this release.
+
+  The first error was about what `Ceiling` means. The refusal read it as a claim
+  about DECIDEDNESS — "at or above me, records may be undecided" — so a
+  `StripBelow` above it looked like the caller asserting decided and undecided
+  about the same range. `Ceiling` makes no such claim. It bounds COMPACTION.
+  Passing the LSO is one reason to hold it down, not the only one:
+  durable_streams builds both fields equal at the LSO and then lowers `Ceiling`
+  ALONE to pin records a slow group has not read yet. Nothing about that is
+  inconsistent, and only `StripBelow` speaks about decidedness at all.
+
+  The second error was about what the pass does. The refusal claimed the pass
+  would strip records above the ceiling, citing `mergeDigests` marking on
+  `r.offset < spec.StripBelow` before the ceiling is consulted. That mark only
+  says a segment MAY have strip work in it. The decision that matters is
+  `classify`, which returns `dispRetain` for `offset >= spec.ceiling` before it
+  considers stripping at all — so the ceiling already wins, and a `StripBelow`
+  reaching above it stops applying rather than doing damage. The hazard the
+  refusal existed to prevent could not occur.
+
+  What replaces it is a comment at the same spot saying not to add it back, and
+  why. `TestAStripBelowAboveTheCeilingIsHonoured` pins the behaviour: the pinned
+  copies survive compaction and keep their headers, and a decided record below
+  the ceiling is still stripped, so the spec is honoured rather than merely
+  tolerated. The three guards that held the refusal are gone with it.
+
+  `docs/layering.md` keeps the episode rather than the invariant. It used to
+  invite a cheap check on `Ceiling` "at the top of `CleanWithSpec`"; it now
+  records that an invariant which reads as arithmetic between two fields is still
+  a claim about their MEANING, and the meaning lives in the caller.
+
 ## v0.76.0 — 2026-08-13
 
 ### Changed

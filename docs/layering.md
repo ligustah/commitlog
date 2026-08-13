@@ -89,23 +89,30 @@ NUMBER is undetectable here and catchable only in the caller. The same holds for
 That is a trade, not an oversight, and it is recorded here so the next person
 finds it stated rather than rediscovers it from a bug.
 
-What the layer CAN check is the caller contradicting itself, and one such check
-now sits at the top of `CleanWithSpec`: **`StripBelow` must not exceed
-`Ceiling`.** Both fields describe the same boundary — `Ceiling` says records at
-or above it may be undecided and are retained verbatim, `StripBelow` says records
-below it are decided and no longer need their transactional bookkeeping — so
-`StripBelow > Ceiling` asserts both about the range in between. The pass acts on
-the second: `mergeDigests` marks a record for stripping on
-`r.offset < spec.StripBelow` before it consults the ceiling, so records the
-ceiling was set to protect keep their offsets and lose the `pid`/`epoch`/`seq`
-that would let anyone decide them later.
+It is tempting to think the layer can at least catch the caller contradicting
+ITSELF — two fields that must agree, checkable without knowing what either
+means. v0.76.0 tried exactly that and shipped a bug: it refused
+`StripBelow > Ceiling` on the reasoning that `Ceiling` says "records at or above
+me may be undecided" while `StripBelow` says "records below me are decided", so
+the range between them was described both ways at once.
 
-Note the shape of what makes it checkable, because it is the shape any future
-check will have: nothing about the log is consulted. It compares two numbers the
-caller wrote down together. The refusal deliberately does NOT fire when `Ceiling`
-is unset — the bound is then the log's own high watermark, resolved inside the
-pass and free to move, so a check against it would be a race rather than an
-invariant.
+`Ceiling` says no such thing. It bounds COMPACTION. A transactional caller passes
+the LSO because undecided records must not be compacted, but that is one reason
+to hold the bound down and not the only one — durable_streams builds both fields
+equal at the LSO and then lowers `Ceiling` alone to pin records a lagging
+consumer group has not read. And the pass could not have done damage with the
+pairing anyway: `classify` returns `dispRetain` for `offset >= spec.ceiling`
+before it looks at `StripBelow`, so the ceiling already wins and a `StripBelow`
+above it simply stops applying. The refusal protected against something that
+could not happen, while rejecting every pass on a stream that had a decided
+transaction and a slow group at once. v0.77.0 took it back out.
+
+The lesson is not "be more careful with invariants" — it is that an invariant
+which reads as arithmetic between two fields is still a claim about their
+MEANING, and the meaning lives in the caller. That is what "this layer does not
+own these concepts" costs, stated concretely. If a check on `Ceiling` is ever
+proposed again, the question to answer first is not whether it is cheap but
+whether this package is entitled to hold the opinion it encodes.
 
 ## Reading the format from outside
 
