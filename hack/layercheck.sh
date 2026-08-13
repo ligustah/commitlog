@@ -87,6 +87,37 @@ for f in $LOWER; do
 	fi
 done
 
+# 3. Every exported method on *commitLog must be ON the CommitLog interface.
+#
+# New returns the INTERFACE, so a method missing from it is not public in any
+# useful sense: the only way to reach it is a structural type assertion, and
+# that degrades SILENTLY when it misses — the caller gets the zero value or
+# skips the call, with nothing to log. durable_streams was reaching RecoverTail
+# and ActiveSegmentBase exactly that way, and RecoverTail at open is what makes
+# their producer-id records survive a restart. Five methods had drifted off the
+# interface before anyone noticed, which is what makes this worth a check
+# rather than a habit.
+#
+# EXPORTED_EXCEPT lists the ones that are deliberately not on it, each of which
+# needs a reason that is about the SIGNATURE and not about convenience:
+#
+#   Segments  returns []*segment, an unexported type. Nothing outside this
+#             package can do anything with the result, so putting it on the
+#             interface would advertise a method no external caller can use.
+EXPORTED_EXCEPT="Segments"
+
+iface=$(awk '/^type CommitLog interface \{/,/^\}$/' interface.go)
+for m in $(grep -ohE '^func \(l \*commitLog\) [A-Z][A-Za-z0-9]*' *.go | sed 's/.*) //' | sort -u); do
+	case " $EXPORTED_EXCEPT " in *" $m "*) continue ;; esac
+	if ! echo "$iface" | grep -qE "^[[:space:]]+$m\("; then
+		echo "layercheck: commitLog.$m is exported but not on the CommitLog interface."
+		echo "  New returns the interface, so callers can only reach it through a"
+		echo "  structural assertion that fails silently. Add it, or add it to"
+		echo "  EXPORTED_EXCEPT in $0 with a reason about its signature."
+		fail=1
+	fi
+done
+
 if [ "$fail" -ne 0 ]; then
 	echo
 	echo "See docs/layering.md. Either move the code up, or take the file out of"
@@ -94,4 +125,5 @@ if [ "$fail" -ne 0 ]; then
 	exit 1
 fi
 
-echo "layercheck: OK — $(echo $LOWER | wc -w) files below the log, none of them name it"
+echo "layercheck: OK — $(echo $LOWER | wc -w) files below the log, none of them name it;"
+echo "  every exported commitLog method is on the interface but $EXPORTED_EXCEPT"

@@ -116,6 +116,27 @@ type CommitLog interface {
 	// SetHighWatermark could not have done it anyway, being monotonic.
 	Truncate(offset int64) error
 
+	// RecoverTail walks the records above the high-watermark checkpoint and
+	// keeps every structurally valid one, truncating only a torn suffix from a
+	// power loss mid-write.
+	//
+	// It is what makes records written since the last checkpoint survive a
+	// restart, so a caller that persists offsets elsewhere (a state WAL,
+	// producer-id records) runs it at open. Discarding the whole suffix instead
+	// would leave those markers overstating what the log holds.
+	//
+	// Visibility above the watermark stays gated by transaction markers: a
+	// dangling open transaction is aborted by recovery exactly as before, so
+	// recovering a record is not the same as committing it.
+	RecoverTail() error
+
+	// ActiveSegmentBase returns the base offset of the active (unsealed)
+	// segment. Cleaning passes only rewrite segments that were sealed before
+	// they started, so offsets at or above this value are untouched by any
+	// concurrently running clean — which is what makes it usable as a floor by
+	// a caller that must not have its records rewritten underneath it.
+	ActiveSegmentBase() int64
+
 	// Sync makes the log durable through offset: once it returns, a reopened log
 	// recovers every record up to and including offset.
 	//
@@ -519,7 +540,21 @@ type CommitLog interface {
 	// after all".
 	IdentityConflict() *IdentityConflict
 
+	// SegmentBlockCounts reports each segment's in-memory block-index size,
+	// oldest first; a raw (uncompressed) segment reports 0. An observability
+	// hook over the block-consolidation machinery, not a contract about how
+	// many blocks a segment ought to have.
+	SegmentBlockCounts() []int
+
 	// Close closes each log segment file and stops the background goroutine
 	// checkpointing the high watermark to disk.
 	Close() error
+
+	// IsClosed reports whether Close has run against this log.
+	IsClosed() bool
+
+	// IsDeleted reports whether Delete has run against this log. Distinct from
+	// IsClosed because Delete also closes: a deleted log is closed, and a
+	// closed one may still have its data.
+	IsDeleted() bool
 }

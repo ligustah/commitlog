@@ -39,6 +39,25 @@ library from that fork onward.
   the caller's: a raw newline would otherwise write a descriptor that does not
   parse back, turning a legal choice of identity into an unopenable log.
 
+- **Five exported methods joined the `CommitLog` interface**: `RecoverTail`,
+  `ActiveSegmentBase`, `SegmentBlockCounts`, `IsClosed` and `IsDeleted`.
+
+  All five were exported on the concrete type and absent from the interface
+  `New` returns — which means they were not public in any useful sense. The only
+  way to reach one was a structural type assertion, and that degrades *silently*
+  when it misses: the caller gets the zero value or skips the call, with nothing
+  to log. durable_streams was reaching `RecoverTail` and `ActiveSegmentBase`
+  exactly that way, and `RecoverTail` at open is what makes their producer-id
+  records survive a restart.
+
+  `Segments` stays off, and the reason is about its signature rather than
+  convenience: it returns `[]*segment`, an unexported type, so nothing outside
+  the package could use the result.
+
+  `hack/layercheck.sh` now enforces this — an exported `*commitLog` method must
+  be on the interface or be listed with a reason. Five had drifted off before
+  anyone noticed, which is what makes it worth a check rather than a habit.
+
 ### Changed
 
 - **`hack/layercheck.sh` replaces a layering metric that could not fail.**
