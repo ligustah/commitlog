@@ -133,6 +133,40 @@ the client can name freely, and neither list needs to know the other. Breaking
 change, no migration burden pre-v1 — but it changes durable_streams' names, so
 it is an ask and not a unilateral edit.
 
+## 3c. The public surface was not the interface — FIXED in v0.80.0
+
+Found by durable_streams' half of this audit rather than by mine, which is
+worth recording: they reported it as a workaround on their side, and it was a
+defect on ours. They were reaching `RecoverTail` and `ActiveSegmentBase`
+through anonymous type assertions.
+
+`New` returns the INTERFACE. So a method exported only on the concrete type is
+not public in any useful sense — the sole route to it is a structural
+assertion, and that degrades **silently** on a miss: the caller takes the zero
+value or skips the call, with nothing to log. `RecoverTail` at open is what
+makes their producer-id records survive a restart, so the failure mode there is
+data quietly ceasing to be recovered.
+
+Checking turned up five, not the two reported: `RecoverTail`,
+`ActiveSegmentBase`, `SegmentBlockCounts`, `IsClosed`, `IsDeleted`. All are now
+on the interface and documented there rather than only on the implementation.
+
+Named optional interfaces were offered as the alternative and declined. These
+are not optional — they were missing — and an optional interface preserves the
+silent-miss path instead of removing it.
+
+`Segments` stays off, on an argument about its SIGNATURE rather than about
+convenience: it returns `[]*segment`, an unexported type, so nothing outside
+the package could use the result. It is the one entry in layercheck's
+`EXPORTED_EXCEPT`, with that reason written beside it.
+
+**Why this needed a check and not a habit.** Five methods drifted off an
+interface that is the package's entire public contract, and nothing anywhere
+noticed — not the compiler, not staticcheck, not review. The concrete type
+satisfies the interface either way, so there is no error to produce. Same
+shape as finding 1: the failure is invisible because nothing was ever asking
+the question.
+
 ## 4. Checked and clean
 
 - **Leader epochs, high watermark.** Replication vocabulary, but the log is the

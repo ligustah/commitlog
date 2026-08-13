@@ -180,6 +180,48 @@ func TestAnIdentityWithFileFormatBytesRoundTrips(t *testing.T) {
 	require.Equal(t, nasty, l3.IdentityConflict().Stored)
 }
 
+// A store-backed log keeps its descriptor in the STORE, not in the directory —
+// that is the whole point of the store being self-describing, since a process
+// holding the store and not the directory still has the log. The identity rides
+// the same write, so it has to work there too, and every other test in this file
+// exercises only the directory path.
+//
+// This is also the case that matters most for the feature. A tiered log's data
+// outlives any particular directory, so "these bytes belong to a different
+// incarnation of the name" is a question a node ADOPTING a tier has to be able
+// to ask — and it has no local directory to have stamped.
+func TestIdentityRoundTripsThroughTheTierStore(t *testing.T) {
+	store, err := NewFileSegmentStore(filepath.Join(tempDir(t), "tier"))
+	require.NoError(t, err)
+	tiers := []Tier{{Name: "hot", Store: store}}
+
+	open := func(dir string, id []byte) CommitLog {
+		t.Helper()
+		l, err := New(Options{
+			Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20,
+			Tiers: tiers, Identity: id,
+		})
+		require.NoError(t, err)
+		return l
+	}
+
+	l := open(tempDir(t), []byte("stream-7"))
+	require.Nil(t, l.IdentityConflict())
+	require.NoError(t, l.Close())
+
+	// A DIFFERENT directory, as an adopting node would have: the identity can
+	// only have come from the store.
+	l2 := open(tempDir(t), []byte("stream-7"))
+	require.Nil(t, l2.IdentityConflict(), "the identity did not reach the store")
+	require.NoError(t, l2.Close())
+
+	l3 := open(tempDir(t), []byte("stream-9"))
+	c := l3.IdentityConflict()
+	require.NotNil(t, c, "an adopting node must be told the tier holds someone else's data")
+	require.Equal(t, []byte("stream-7"), c.Stored)
+	require.NoError(t, l3.Close())
+}
+
 // The compatibility question a downstream repo asked directly, pinned rather
 // than reasoned about: does a v0.80.0 process rewrite the descriptor of a log
 // created by an older one?
