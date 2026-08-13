@@ -37,6 +37,19 @@ library from that fork onward.
   transactional caller passes the two EQUAL and a `>=` would reject the normal
   spec.
 
+  It is scoped again to specs where stripping is ACTIVE, gated on the same pair
+  `mergeDigests` uses (`StripBelow > 0 && len(StripHeaders) > 0`). The first
+  version was not, and it was wrong in the way this refusal's own neighbour
+  exists to prevent: `StripBelow`'s zero value means "no stripping", not "strip
+  below offset 0", so an unset field was read as a value the caller wrote down.
+  `HighWatermark` returns -1 for "nothing committed yet" and
+  `Ceiling: At(l.HighWatermark())` is what callers write, so an unset `StripBelow`
+  of 0 sat above a legitimate ceiling of -1 and the pass was refused.
+  `TestACeilingBelowEveryOffsetIsLegitimate` — which exists because an earlier
+  change made the same class of mistake about that ceiling's sign — went red on
+  every CI platform. `TestAStripBelowWithoutStripHeadersIsNotJudged` now holds
+  the arm that was missing.
+
   Not breaking for any caller that exists: every spec in this repo and in
   durable_streams passes `Ceiling: At(hw), StripBelow: hw`, or the same pair at
   `hw+1`. What the refusal rejects is a combination nothing constructs on

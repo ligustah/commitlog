@@ -477,7 +477,19 @@ func (l *commitLog) CleanWithSpec(spec CleanSpec) (int64, error) {
 	// check and any use of it, so a refusal there would be a race dressed as an
 	// invariant. What is checked here is two numbers the caller wrote down
 	// together, and they disagree or they do not.
-	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow > ceiling {
+	//
+	// And only when stripping is ACTIVE, on exactly the pair that activates it in
+	// mergeDigests. StripBelow's zero value means "no stripping", not "strip below
+	// offset 0" — so without this gate the check reads a field the caller never
+	// set as a value they wrote down, which is the same laundering the TierBudgets
+	// refusal above exists to stop. It is not hypothetical: HighWatermark returns
+	// -1 for "nothing committed yet", At(l.HighWatermark()) is what callers write,
+	// and an unset StripBelow of 0 is above -1. The first version of this refusal
+	// rejected that spec, and TestACeilingBelowEveryOffsetIsLegitimate — which
+	// exists because an earlier change made the same mistake about the sign —
+	// caught it in CI.
+	stripActive := spec.StripBelow > 0 && len(spec.StripHeaders) > 0
+	if ceiling, ok := spec.Ceiling.Get(); ok && stripActive && spec.StripBelow > ceiling {
 		return 0, errors.Errorf(
 			"commitlog: CleanSpec.StripBelow is %d and CleanSpec.Ceiling is %d, so "+
 				"records in [%d, %d) are declared decided by the first and possibly "+

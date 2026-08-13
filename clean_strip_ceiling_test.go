@@ -74,6 +74,41 @@ func TestAStripBelowAtTheCeilingStillRuns(t *testing.T) {
 			"nothing")
 }
 
+// A StripBelow that strips NOTHING is not judged against the ceiling either.
+//
+// The contradiction the refusal catches is only reachable where stripping
+// happens, and stripping needs both fields: mergeDigests gates on
+// `spec.StripBelow > 0 && len(spec.StripHeaders) > 0`, and classify gates marker
+// removal on the same pair. With no headers named, a StripBelow above the ceiling
+// removes nothing from anything and contradicts nothing.
+//
+// This is the arm the first version of the refusal did not have, and its absence
+// was not a theoretical gap. StripBelow's zero value means "no stripping", not
+// "strip below offset 0"; HighWatermark returns -1 for "nothing committed yet";
+// `Ceiling: At(l.HighWatermark())` is what callers write. So an unset StripBelow
+// of 0 sat above a legitimate ceiling of -1 and the pass was refused —
+// TestACeilingBelowEveryOffsetIsLegitimate went red across every CI platform.
+// Reading a field the caller never set as a value they wrote down is the same
+// laundering the TierBudgets refusal exists to stop, committed by the check
+// written to stop it.
+func TestAStripBelowWithoutStripHeadersIsNotJudged(t *testing.T) {
+	l, app := specLog(t)
+
+	app(&Message{Key: []byte("k"), Value: []byte("first")})
+	app(&Message{Key: []byte("pad"), Value: []byte("pad")})
+
+	hw := l.HighWatermark()
+	_, err := l.CleanWithSpec(CleanSpec{
+		Ceiling:    At(hw),
+		StripBelow: hw + 1,
+		// No StripHeaders: nothing is stripped, so nothing above the ceiling can
+		// lose the bookkeeping the ceiling protects.
+	})
+	require.NoError(t, err,
+		"a StripBelow with no StripHeaders strips nothing and cannot contradict "+
+			"the ceiling, but was refused anyway")
+}
+
 // A spec with no Ceiling is not judged against StripBelow at all.
 //
 // With the field unset the bound is the log's own high watermark, resolved

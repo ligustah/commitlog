@@ -938,12 +938,19 @@ run_guard "a ceiling needs the auto cleaner off" clean.go   '	if _, ok := spec.C
 # marks a record for stripping before it consults the ceiling, so the records the
 # ceiling protects lose the pid/epoch/seq an undecided record needs to ever be
 # decided. The neutralization inverts the comparison, which lets that spec through.
-run_guard "a strip below above the ceiling is refused" clean.go   '	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow > ceiling {' '	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow < ceiling {'   '^TestAStripBelowAboveTheCeilingIsRefused$'
+run_guard "a strip below above the ceiling is refused" clean.go   '	if ceiling, ok := spec.Ceiling.Get(); ok && stripActive && spec.StripBelow > ceiling {' '	if ceiling, ok := spec.Ceiling.Get(); ok && stripActive && spec.StripBelow < ceiling {'   '^TestAStripBelowAboveTheCeilingIsRefused$'
+
+# ...and it only applies where stripping actually happens. StripBelow's zero value
+# means "no stripping", not "strip below offset 0", so an ungated check reads a
+# field the caller never set as a value they wrote down -- and HighWatermark
+# returns -1 before anything is committed, which every unset StripBelow of 0 is
+# above. The ungated version shipped and CI caught it on the ceiling-sign test.
+run_guard "the strip refusal only applies where stripping happens" clean.go   '	stripActive := spec.StripBelow > 0 && len(spec.StripHeaders) > 0' '	stripActive := true'   '^TestAStripBelowWithoutStripHeadersIsNotJudged$'
 
 # ...and the refusal is about EXCEEDING it. Every transactional caller passes the
 # two equal, because one LSO is being described from both sides. A `>=` reads as
 # stricter and simply rejects the normal spec.
-run_guard "a strip refusal is about exceeding the ceiling" clean.go   '	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow > ceiling {' '	if ceiling, ok := spec.Ceiling.Get(); ok && spec.StripBelow >= ceiling {'   '^TestAStripBelowAtTheCeilingStillRuns$'
+run_guard "a strip refusal is about exceeding the ceiling" clean.go   '	if ceiling, ok := spec.Ceiling.Get(); ok && stripActive && spec.StripBelow > ceiling {' '	if ceiling, ok := spec.Ceiling.Get(); ok && stripActive && spec.StripBelow >= ceiling {'   '^TestAStripBelowAtTheCeilingStillRuns$'
 
 # A named tier with a budget of 0 is refused. Neutralized to `d < 0`, which is
 # unreachable and keeps `d` used so the package still builds -- a `false` here
