@@ -686,6 +686,13 @@ run_guard "a manifest must be this version" manifest.go   '	if m.Version != mani
 # again.
 run_guard "an unknown codec is refused where it arrives" commitlog.go   '	if !opts.Compression.Valid() {'   '	if false {'   '^TestAnUnknownCompressionCodecIsRefusedAtOpen$'
 
+# One line is the whole of Options.MaxLogAge's wiring, and until this guard it
+# had no test: every age-retention test assigns deleteCleanerOptions.Retention.Age
+# by hand. Neutralized to zero, noRetentionLimits still reports that retention is
+# configured while the age gate never fires -- a log that grows forever with a
+# limit set and no error anywhere.
+run_guard "MaxLogAge reaches the cleaner" commitlog.go   '	cleanerOpts.Retention.Age = opts.MaxLogAge'   '	cleanerOpts.Retention.Age = 0'   '^TestOptionsMaxLogAgeReachesTheCleaner$'
+
 # The None codec used to return src itself, so the "decompressed" bytes were the
 # caller's compressed-payload buffer -- which in the block path is a recycled read
 # buffer that the next block refills. decodeBlock carried a pointer-identity check
