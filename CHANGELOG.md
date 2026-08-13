@@ -5,6 +5,33 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.79.2 — 2026-08-13
+
+### Fixed
+
+- **A half-done `Finalize` orphaned the log it had already renamed.**
+  `TruncateBefore` installs its trimmed segment with two renames — log, then
+  index — and had no rollback between them. `Replace` performs the same two
+  renames and does roll back; this was the odd one out.
+
+  What is at stake differs, which is why it read as a different situation.
+  `Replace`'s rollback protects the source it is renaming over. `Finalize` has no
+  source: it protects the **discriminator**. Publishing a working copy means
+  clearing its suffix, and `segment.dropIfUnpublished` reads that suffix to
+  decide whether the copy still needs dropping. Returning with the log already at
+  its final name and the suffix still set makes that answer wrong in the one
+  direction nothing checks — the caller's `defer` concludes "not published",
+  deletes by the *suffixed* paths, removes the index it can still see and leaves
+  the log it cannot. The result is an orphan `.log` at the trim's base offset
+  with no index beside it.
+
+  The next `open()` does survive it, which is how this could sit unnoticed: the
+  orphan overlaps the boundary segment that the failed call left in place, and
+  `resolveSegmentOverlaps` drops the contained one. Depending on that is the
+  thing the suffix rule exists to avoid, and it would go on passing every test
+  that only checks the log still reads. Now either both files are at their final
+  names or neither is.
+
 ## v0.79.1 — 2026-08-13
 
 ### Fixed
