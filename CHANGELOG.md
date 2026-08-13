@@ -5,6 +5,110 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.83.0 — 2026-08-13
+
+### Breaking
+
+- **Client sidecar names must now carry `ClientSidecarPrefix` (`"client-"`).**
+  `PutSidecar`, `GetSidecar` and `RemoveSidecar` refuse anything else with
+  `ErrInvalidSidecarName`. Rename existing sidecars; there is no compatibility
+  path and none is wanted pre-v1.
+
+  What it replaces: two hand-maintained lists — the exact file names the log
+  writes, and the suffixes it matches on — which the sidecar check consulted to
+  decide whether a client name collided with one of commitlog's. Enumerating one
+  side of a collision is a losing position. The lists described the log as it was
+  *that day*, so commitlog gaining a file was commitlog silently taking a name a
+  client might already be using: at runtime, on data already written, with no way
+  for the client to have checked. The client's namespace was defined by
+  subtraction from a set only commitlog could change.
+
+  The prefix closes the set from the other side. commitlog promises never to
+  write a file carrying it, so it may now add any file it likes — new name, new
+  suffix — and a client may use any name it likes after the prefix. Neither party
+  needs to know what the other calls things, and both lists are deleted.
+
+  **The refusal is only half of it, and the smaller half.** `checkSidecarName`
+  governs names arriving through the API and says nothing about files already on
+  disk — and the log's own directory scans dispatch on *suffix* over whatever the
+  directory holds. So a sidecar named `client-notes.log` failed the open outright
+  on its non-integer stem, and `client-notes.index` was *deleted* as an orphaned
+  index, neither of them reachable by a refusal. `openLog` and `logIsNew` now
+  skip the prefix, which is what makes the promise true rather than merely
+  stated.
+
+  `logIsNew` matters for a second reason: it decides whether the descriptor
+  *records* the caller's options or is *checked against* them. A client that
+  wrote its config sidecar before the first append — the natural order, since the
+  config is what says how to create the log — was creating a log that believed it
+  already existed.
+
+- **A negative `CompactMinAge` or `CompactTombstoneRetention` is now refused.**
+  v0.82.0's notes list both as "not affected, checked with the same lens", and
+  that reading was correct as far as it went: both consumers gate on `> 0`, so a
+  negative disables the feature exactly as zero does and nothing misbehaves.
+
+  What it missed is that both fields are in `descriptor.enforced()`. The negative
+  is written into the descriptor and becomes part of what the log IS, so a log
+  created with `-1h` refuses a reopen with `0` — two values that do the identical
+  thing, one permanently rejecting the other, surfacing later as a mismatch
+  naming a knob whose two spellings mean the same. Refused rather than normalised
+  to zero on the way in: normalising is a converter, and it would make the
+  descriptor disagree with the `Options` the caller can see in their own config.
+
+### Added
+
+- **`ClientSidecarPrefix`** is exported, because the clients that hold sidecar
+  names need to spell it — and a prefix nobody can name is a rule with no
+  affordance for obeying it.
+
+### Fixed
+
+- **`guardcheck` read an empty test selection as a passing one.** `guard_finish`
+  ran `go test -run "$re" ... .` — the root package only, and without asking
+  whether anything matched. `go test -run` with a pattern that selects nothing
+  exits 0, which the script read as "the test passed without the guard". A guard
+  whose test lives in a subpackage therefore reported `NO COVERAGE` for a test
+  that was never selected, and a guard whose test name went stale after a rename
+  produced the same output as a working one. Now `-v ./...`, with the run
+  required to have printed a `=== RUN` line; absent that it is a harness error
+  rather than a verdict. All 159 guard names were checked against the real test
+  functions, so the fix surfaced nothing pre-existing.
+
+### Testing
+
+Three test-only additions, all from one observation: a hand-maintained list that
+must stay in sync with something it does not own always rots, and a test built
+from a second copy of that list cannot see it happen. Each of these now derives
+its cases from the thing itself.
+
+- **Every `descriptor` field survives a render and a parse.**
+  `renderDescriptor` and `set()` enumerate the struct's fields twice, by hand,
+  and every other descriptor test goes through `New` and `Options` — so each
+  covers only the fields it happens to set, and a field that persists *nowhere*
+  was invisible to all of them. Three failures were reachable with nothing going
+  red: a field missing from the writer is silently not persisted (and, for a
+  field `reconcileDescriptor` keeps current, means the descriptor is rewritten on
+  every open); a field missing from the reader makes the file unreadable by the
+  build that wrote it; a formatting mismatch changes the value.
+
+- **Every signed numeric `Options` field has an opinion about negatives**, found
+  by reflection over the struct rather than from a list kept beside it. This is
+  the third time in one day that `New`'s refusal table turned out to be missing
+  an entry. It keeps an *allowlist* of the three fields where a negative has a
+  meaning, deliberately inverted: the refused list is the one that has to grow
+  with the struct and forgetting to grow it is silent, while an allowlist only
+  grows when someone is already deciding what a negative should mean.
+
+- **Every codec `Valid()` admits round-trips its data and its name.** The codec
+  set is written out five times in `compress/codec.go` and both existing tests
+  enumerate it again from literals, so a fifth codec was covered by none of them.
+  Cases now come from `Valid()`, which is what *defines* the set — `New` refuses
+  what `Valid` rejects, and that is the only reason `Compress` may have a silent
+  default arm at all. The worst failure it reaches: a codec present in `Valid`
+  and `DecompressInto` but not `Compress` stores the block **raw** under a header
+  that names the codec, so the read decompresses raw bytes as compressed ones.
+
 ## v0.82.0 — 2026-08-13
 
 ### Removed
