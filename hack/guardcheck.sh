@@ -1360,6 +1360,12 @@ run_guard "a join read failure stops the pass" clean_join.go   '				if !errors.I
 # The working-copy disposal on the join path.
 run_guard "a failed join drops its working copy" clean_join.go   '	defer joined.dropIfUnpublished()' '	defer func() {}()'   '^TestAJoinRefusesAnInputItCannotReadToTheEnd$'
 
+# And the fifth site, which had the duty and no test that it was doing it. This
+# one publishes with Finalize rather than Replace -- the suffix is renamed off in
+# place instead of over a source -- so it is the site that shows the
+# discriminator is the SUFFIX and not the rename target.
+run_guard "a failed truncate-before drops its trim" commitlog.go   '			defer t.dropIfUnpublished()' '			defer func() {}()'   '^TestAFailedTruncateBeforeDropsTheTrimItBuilt$'
+
 # An input a join did not rename over must leave WITH a link. Marked as left and
 # carrying none is the retention case — reader, skip me, those records are gone —
 # and taking that path here skips records sitting in the result. Neutralized by

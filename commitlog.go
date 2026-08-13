@@ -2146,15 +2146,18 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 			if err != nil {
 				return errors.Wrap(err, "create trimmed segment failed")
 			}
+			// The fifth site of the same rule; see segment.dropIfUnpublished.
+			// This path publishes by Finalize rather than Replace, but Finalize
+			// clears the suffix the same way, so the discriminator is the same
+			// one and the defer goes quiet from there on.
+			defer t.dropIfUnpublished()
 			for _, ms := range kept {
 				entries := entriesForMessageSet(t.Position(), ms)
 				if err := t.WriteMessageSet(ms, entries); err != nil {
-					t.Delete()
 					return errors.Wrap(err, "write trimmed segment failed")
 				}
 			}
 			if err := t.Finalize(); err != nil {
-				t.Delete()
 				return errors.Wrap(err, "finalize trimmed segment failed")
 			}
 			// Seal so that uncommitted readers hitting EOF on this
