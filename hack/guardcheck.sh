@@ -220,7 +220,20 @@ guard_finish() {
   local out rc
   out=$(go test -run "$test_re" -count=1 -timeout 300s ${extra[@]+"${extra[@]}"} -v ./... 2>&1)
   rc=$?
-  if ! printf '%s' "$out" | grep -qE '^=== RUN'; then
+  # Matched with bash's own pattern operator rather than `printf | grep -q`.
+  # That pipeline is a trap under the `set -o pipefail` on line 39: grep -q
+  # exits at the FIRST match, printf is still writing a verbose multi-package
+  # test log into a pipe nothing is reading any more, and takes EPIPE. pipefail
+  # then makes the pipeline non-zero BECAUSE THE MATCH SUCCEEDED, and the `!`
+  # reports a guard that is properly covered as a HARNESS ERROR.
+  #
+  # It only fires once the output outgrows the pipe buffer, so it passed on
+  # Windows and on every guard with a short neutralized run, and failed the
+  # linux job on the one guard that printed enough — a false red that looks
+  # exactly like the real thing this check was added to catch. No pipe, no
+  # EPIPE. The leading newline lets the pattern anchor `=== RUN` to the start of
+  # a line, the first one included.
+  if [[ $'\n'"$out" != *$'\n=== RUN'* ]]; then
     echo "HARNESS ERROR (no test matched $test_re)"
     failures=$((failures + 1))
   elif [ "$rc" -eq 0 ]; then
