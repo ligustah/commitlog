@@ -21,8 +21,16 @@ import (
 // It matters where the rename IS the commit point. Everything the log finishes
 // with a rename is in that position: the high watermark checkpoint a caller
 // waited on through SyncAll or Close, a client's sidecar, an object published
-// into a file-backed tier. For those, "the write returned" and "the write
-// survives" have to be the same statement.
+// into a file-backed tier, the log's DESCRIPTOR, and the leader epoch
+// checkpoint. For those, "the write returned" and "the write survives" have to
+// be the same statement.
+//
+// The last two were absent from that list because they were absent from this
+// path: both wrote through the atomic-file library directly instead of through
+// AtomicWriteFileWithRetry, so they got the torn-write guarantee and not the
+// durability one. A list of callers written out by hand does not notice a
+// caller that never arrives, which is why the check that keeps it honest is a
+// grep for the library rather than this sentence — see writeDescriptor.
 func syncDir(dir string) error {
 	f, err := os.Open(dir)
 	if err != nil {

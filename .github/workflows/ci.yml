@@ -181,6 +181,15 @@ jobs:
       # half rather than letting it escape the rule by not being mentioned.
       - name: layercheck
         run: bash hack/layercheck.sh
+      # An atomic write is not a durable one: the library ends with a rename,
+      # and the name is only durable once the DIRECTORY is fsynced. Two files
+      # wrote through the library directly and so promised a durability they did
+      # not deliver — one of them the descriptor, whose loss leaves a directory
+      # of segments that will not open again. The rule had been written down, in
+      # a doc comment listing the callers it covered, and a hand-written list
+      # cannot notice a caller that never joins it.
+      - name: atomicwrite
+        run: bash hack/atomicwrite.sh
       # The three scripts above and guardcheck decide whether this repo is
       # correct, and until now nothing checked THEM. Every bug they have had was
       # shell semantics rather than logic: a `| while` setting its flag in a

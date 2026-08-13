@@ -16,7 +16,6 @@ import (
 	pkgErrors "github.com/pkg/errors"
 
 	"github.com/dustin/go-humanize/english"
-	atomic_file "github.com/natefinch/atomic"
 )
 
 const (
@@ -268,6 +267,19 @@ func (l *leaderEpochCache) assign(epoch uint64, offset int64) error {
 // leader_epoch start_offset
 // leader_epoch start_offset
 // ...
+//
+// Through AtomicWriteFileWithRetry, matching the ReadFileWithRetry above it: the
+// read side already waits out the Windows window where a just-killed process's
+// handle is still open, and the write side is the half that window was named
+// for — an open handle is what makes ReplaceFile fail with "Access is denied",
+// and the comment on the read explicitly notes that a handle held here blocks
+// this replace. Retrying only the read moved the failure rather than removing
+// it.
+//
+// It also fsyncs the directory. The rename is the commit point for this file
+// like every other rename the log finishes with, and an epoch history that
+// survived only until the power went out is one a follower then truncates
+// against — see LastOffsetForLeaderEpoch, which the caller obeys.
 func (l *leaderEpochCache) flush() error {
 	if l.checkpointFile == "" {
 		return nil
@@ -284,7 +296,7 @@ func (l *leaderEpochCache) flush() error {
 			return err
 		}
 	}
-	return atomic_file.WriteFile(l.checkpointFile, b)
+	return AtomicWriteFileWithRetry(l.checkpointFile, b)
 }
 
 func (l *leaderEpochCache) warn(epoch, latestEpoch uint64, offset, latestOffset int64) {

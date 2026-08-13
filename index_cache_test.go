@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -46,6 +48,95 @@ func newCountingStore(t *testing.T) *countingStore {
 	fs, err := NewFileSegmentStore(t.TempDir())
 	require.NoError(t, err)
 	return &countingStore{FileSegmentStore: fs}
+}
+
+// gatedStore blocks inside the download so a second acquire of the same key is
+// guaranteed to overlap the first, and records every download that STARTED.
+type gatedStore struct {
+	*FileSegmentStore
+	entered chan struct{} // one send per download that reached the store
+	release chan struct{} // closed to let them finish
+	starts  atomic.Int64
+}
+
+func (g *gatedStore) Size(key string) (int64, error) {
+	g.starts.Add(1)
+	g.entered <- struct{}{}
+	<-g.release
+	return g.FileSegmentStore.Size(key)
+}
+
+// Two concurrent acquires of one key must produce ONE download.
+//
+// Not a saving — a correctness requirement. The cache file is named from the
+// object key alone, so a second download is a second os.Create of the SAME
+// path, truncating a file the first acquire has already mmapped. That is a
+// SIGBUS in the first reader's next seek on unix, and on Windows the loser's
+// discard deletes the winner's file. Two readers seeking into one cold segment
+// is ordinary: withIndex runs under the segment read lock.
+//
+// The gate is what makes this deterministic rather than a race the suite might
+// miss. The first acquire is parked inside the store, so the second cannot
+// possibly find a cached entry — it either waits for the first, or starts its
+// own download, and there is no third outcome to be lucky about.
+func TestRemoteIndexCache_ConcurrentAcquiresDownloadOnce(t *testing.T) {
+	fs, err := NewFileSegmentStore(t.TempDir())
+	require.NoError(t, err)
+	store := &gatedStore{
+		FileSegmentStore: fs,
+		entered:          make(chan struct{}, 4), // buffered: an extra start must not deadlock
+		release:          make(chan struct{}),
+	}
+	writeIndexObject(t, store, "k.index", 0, []*entry{{Offset: 0, Timestamp: 1, Position: 0, Size: 8}})
+	store.starts.Store(0) // writeIndexObject's own Put is not a download
+
+	c, err := NewRemoteIndexCache(filepath.Join(t.TempDir(), "cache"), 1<<20)
+	require.NoError(t, err)
+	defer c.Close()
+
+	var (
+		wg   sync.WaitGroup
+		idxs [2]*index
+		errs [2]error
+	)
+	acquire := func(i int) {
+		defer wg.Done()
+		idx, release, err := c.acquire(store, "k.index", 0)
+		idxs[i], errs[i] = idx, err
+		if err == nil {
+			t.Cleanup(release)
+		}
+	}
+	wg.Add(1)
+	go acquire(0)
+	<-store.entered // the first is now parked inside the download
+
+	wg.Add(1)
+	go acquire(1)
+
+	// The second either waits for the first (correct) or reaches the store on its
+	// own (the defect). Give it long enough that reaching the store is the only
+	// explanation for a second start, then let both finish either way — failing
+	// here would leak two goroutines blocked on release.
+	secondDownload := false
+	select {
+	case <-store.entered:
+		secondDownload = true
+	case <-time.After(time.Second):
+	}
+	close(store.release)
+	wg.Wait()
+
+	require.False(t, secondDownload,
+		"a second acquire started its own download into the same cache file")
+	require.Equal(t, int64(1), store.starts.Load(), "one key, one download")
+	for i := range idxs {
+		require.NoError(t, errs[i])
+		var e entry
+		require.NoError(t, idxs[i].ReadEntryAtFileOffset(&e, 0),
+			"acquire %d got an index it cannot read", i)
+		require.Equal(t, int64(0), e.Offset)
+	}
 }
 
 func TestRemoteIndexCache_AcquireReadsEntries(t *testing.T) {

@@ -34,6 +34,12 @@ type RemoteIndexCache struct {
 	entries map[string]*list.Element // index object key -> *cachedIndex element
 	lru     *list.List               // most-recently-used at the front
 	total   int64                    // sum of cached entries' on-disk bytes
+	// inflight names the object keys a download is currently running for, so a
+	// second acquire of the same key waits instead of starting its own. See
+	// acquire: the download deliberately runs outside mu, and the cache file it
+	// writes is named from the key alone, so "run both and discard one" is not
+	// available here — the two would be writing the same file.
+	inflight map[string]chan struct{}
 }
 
 // cachedIndex is one entry: the downloaded index file, opened, plus a pin count
@@ -80,6 +86,7 @@ func NewRemoteIndexCache(dir string, maxBytes int64) (*RemoteIndexCache, error) 
 		dir:      dir,
 		maxBytes: maxBytes,
 		entries:  make(map[string]*list.Element),
+		inflight: make(map[string]chan struct{}),
 		lru:      list.New(),
 	}, nil
 }
@@ -112,41 +119,70 @@ func (c *RemoteIndexCache) cacheFileName(objectKey string) string {
 // upload attempt, and openOffloadedSegment takes the key from the manifest
 // verbatim, so it is unique across logs and across incarnations by construction —
 // with no nonce to persist and no invalidation for a caller to remember.
+// One download runs per key at a time, and that is a correctness requirement
+// rather than a saving. The download runs outside c.mu, because it is I/O, and
+// it writes to cacheFileName(objectKey) — a path derived from the key and
+// nothing else. So two acquires of one key are two writers of ONE FILE: the
+// second os.Create TRUNCATES a file the first has already opened and MMAPPED,
+// which is a SIGBUS in the first one's next seek on unix, and on Windows a
+// discard of the loser that deletes the winner's file out from under it.
+//
+// It was reachable by ordinary use, not by a pathological caller: withIndex
+// runs under the segment READ lock, so two readers seeking into the same cold
+// segment race here by design. The arrangement it replaces — fetch twice and
+// discard the loser — is the right shape only when the two attempts are
+// independent, and a shared destination is exactly what makes them not.
 func (c *RemoteIndexCache) acquire(store SegmentStore, objectKey string, baseOffset int64) (*index, func(), error) {
-	c.mu.Lock()
-	if el, ok := c.entries[objectKey]; ok {
-		ci := el.Value.(*cachedIndex)
-		ci.refs++
-		c.lru.MoveToFront(el)
+	for {
+		c.mu.Lock()
+		if el, ok := c.entries[objectKey]; ok {
+			ci := el.Value.(*cachedIndex)
+			ci.refs++
+			c.lru.MoveToFront(el)
+			c.mu.Unlock()
+			return ci.idx, func() { c.release(ci) }, nil
+		}
+		if wait, ok := c.inflight[objectKey]; ok {
+			c.mu.Unlock()
+			<-wait
+			// Round again rather than taking the leader's result: by now the
+			// entry is normally in the map, but it may have been evicted, or the
+			// leader's fetch may have failed. Both are ordinary states this loop
+			// already handles, and re-reading the map is what makes the pin the
+			// waiter takes belong to the entry that actually survived.
+			continue
+		}
+		done := make(chan struct{})
+		c.inflight[objectKey] = done
 		c.mu.Unlock()
+
+		ci, err := c.fetch(store, objectKey, baseOffset)
+
+		c.mu.Lock()
+		delete(c.inflight, objectKey)
+		if err != nil {
+			c.mu.Unlock()
+			close(done)
+			// The waiters retry, each in turn, exactly as they would have if this
+			// caller had never arrived. A failed fetch is not a verdict to share:
+			// the store may have been briefly unreachable, and broadcasting one
+			// caller's error would fail every other caller on evidence that is
+			// already stale.
+			return nil, nil, err
+		}
+		ci.refs = 1
+		el := c.lru.PushFront(ci)
+		c.entries[objectKey] = el
+		c.total += ci.bytes
+		// Safe against the entry just inserted: refs is 1, and eviction skips
+		// anything pinned.
+		c.evictLocked()
+		c.mu.Unlock()
+		// After the insert, so a waiter that wakes finds the entry rather than
+		// racing back around to fetch it again.
+		close(done)
 		return ci.idx, func() { c.release(ci) }, nil
 	}
-	c.mu.Unlock()
-
-	// Miss: download and open outside the lock (it is I/O). A concurrent acquire
-	// of the same key may also fetch; the insert below dedups, discarding the
-	// loser's copy.
-	ci, err := c.fetch(store, objectKey, baseOffset)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	c.mu.Lock()
-	if el, ok := c.entries[objectKey]; ok {
-		existing := el.Value.(*cachedIndex)
-		existing.refs++
-		c.lru.MoveToFront(el)
-		c.mu.Unlock()
-		ci.close() // discard the duplicate we raced to fetch
-		return existing.idx, func() { c.release(existing) }, nil
-	}
-	ci.refs = 1
-	el := c.lru.PushFront(ci)
-	c.entries[objectKey] = el
-	c.total += ci.bytes
-	c.evictLocked()
-	c.mu.Unlock()
-	return ci.idx, func() { c.release(ci) }, nil
 }
 
 // fetch downloads the index object to the cache dir and opens it.

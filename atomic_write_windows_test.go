@@ -81,6 +81,44 @@ func TestAtomicWritePermanentHandleStillFails(t *testing.T) {
 	require.Equal(t, "first", string(got), "a failed write must leave the old contents")
 }
 
+// Reopening a log rides out a transient handle on its DESCRIPTOR.
+//
+// This is the same window as the checkpoint above, on the file that can least
+// afford it. The descriptor is what says the log exists and what it is, so a
+// sharing violation on it fails the whole of New() — not a degraded open, no
+// log at all — and the window is exactly a restart after a hard kill, which is
+// when a supervisor restarts a process in the first place.
+//
+// Both halves are exercised at once and neither is redundant: reconcileDescriptor
+// READS the descriptor and then WRITES it back to keep its fields current, so
+// the open needs openWithRetry on the read and AtomicWriteFileWithRetry on the
+// write. Both used to be bare — os.Open and the atomic-file library — and a
+// deny-all handle on this file failed the open with "The process cannot access
+// the file because it is being used by another process".
+func TestReopeningALogRidesOutAHeldDescriptor(t *testing.T) {
+	dir := tempDir(t)
+	l, err := New(Options{Path: dir, MaxSegmentBytes: 1 << 20, CleanerInterval: time.Hour})
+	require.NoError(t, err)
+	_, err = l.Append([]*Message{{Key: []byte("k"), Value: []byte("v")}})
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	h := openDenyAll(t, filepath.Join(dir, descriptorFileName))
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(120 * time.Millisecond) // well inside waitedOnRetryBudget
+		syscall.CloseHandle(h)             // nolint: errcheck
+		close(released)
+	}()
+
+	l2, err := New(Options{Path: dir, MaxSegmentBytes: 1 << 20, CleanerInterval: time.Hour})
+	require.NoError(t, err,
+		"a transient handle on the descriptor must be waited out, not fail the open")
+	<-released
+	require.NoError(t, l2.Close())
+	remove(t, dir)
+}
+
 // SyncAll rides out a handle that outlives the TICK's budget.
 //
 // This is the case a single budget could not express. The checkpoint write is

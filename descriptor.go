@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/ligustah/commitlog/compress"
-	atomic_file "github.com/natefinch/atomic"
 	"github.com/pkg/errors"
 )
 
@@ -147,8 +146,15 @@ func descriptorPath(path string) string {
 // log has no descriptor" from "a descriptor exists and is unreadable" — the
 // first is answerable with AdoptOptions, the second is corruption and must not
 // be papered over.
+//
+// openWithRetry rather than os.Open, for the reason that helper exists: this is
+// a boot read of the log's own metadata, so a Windows sharing violation from a
+// handle the OS has not finished reclaiming after a hard kill fails the entire
+// open() rather than costing a retry. It is the same read, on the same path, as
+// the high watermark checkpoint that got the retry first. A MISSING descriptor
+// still returns immediately, which the distinction above depends on.
 func readDescriptor(path string) (descriptor, error) {
-	f, err := os.Open(descriptorPath(path))
+	f, err := openWithRetry(descriptorPath(path))
 	if err != nil {
 		return descriptor{}, err
 	}
@@ -297,9 +303,30 @@ func renderDescriptor(d descriptor) string {
 
 // writeDescriptor persists d atomically, so a crash mid-write never leaves a
 // log with a torn descriptor it would then refuse to open.
+//
+// Through AtomicWriteFileWithRetry rather than the atomic_file library directly,
+// which is not a stylistic preference — the wrapper adds the two things a bare
+// atomic write is missing here, and both are load-bearing for THIS file above
+// any other.
+//
+// It fsyncs the DIRECTORY after the rename. An atomic write makes the bytes
+// durable and the name only visible: the rename can be undone by a power cut
+// after it has returned, so without syncDir a descriptor this function reported
+// as written can be absent on the next boot. That is not a lost update. The
+// descriptor is what says the log EXISTS and what it is — removeLogDir orders
+// the whole of Delete around exactly that — and readDescriptor refuses a
+// directory of segments with no descriptor, permanently. So the failure this
+// closes is a log bricked by a power cut, reached by a different route to the
+// one removeLogDir was fixed for.
+//
+// It also retries the Windows ReplaceFile. Any open handle to the destination
+// that was not opened with FILE_SHARE_DELETE fails the replace with "Access is
+// denied", including a scanner's or a just-killed process's, and this file is
+// republished at open to keep its fields current — so the failure lands on a
+// caller doing nothing unusual.
 func writeDescriptor(path string, d descriptor) error {
 	body := renderDescriptor(d)
-	if err := atomic_file.WriteFile(descriptorPath(path), strings.NewReader(body)); err != nil {
+	if err := AtomicWriteFileWithRetry(descriptorPath(path), strings.NewReader(body)); err != nil {
 		return errors.Wrap(err, "write log descriptor")
 	}
 	return nil

@@ -335,6 +335,17 @@ run_guard "digest sidecar CRC" keydigest.go \
   'if crc32.ChecksumIEEE(body) != encoding.Uint32(crcBytes) && false {' \
   '^FuzzCorruptDigestNeverChangesTheAnswer$'
 
+# One download per key, which is a correctness rule and not a saving: the cache
+# file is named from the object key alone, so a second concurrent download is a
+# second os.Create of the SAME path, truncating a file the first acquire has
+# already mmapped. Neutralized by not registering the leader, which is exactly
+# the fetch-twice-and-discard shape this replaced — `done` stays live so the
+# mutation still compiles.
+run_guard "index cache singleflight" index_cache.go \
+  '		c.inflight[objectKey] = done' \
+  '		_ = done // BREAK: nothing to wait on, so both fetch' \
+  '^TestRemoteIndexCache_ConcurrentAcquiresDownloadOnce$'
+
 run_guard "reclamation pin" tier_state.go \
   'if e.pin != nil && e.pin.referenced() {' \
   'if e.pin != nil && e.pin.referenced() && false {' \
@@ -749,8 +760,15 @@ run_guard "a copied manifest is published last" copy_tier.go   '	if err := copyT
 # "the read retry spends its whole budget" below -- a deny-all handle is Windows
 # only and this check runs on Linux, so that guard uses a directory instead,
 # which is unreadable everywhere.
-run_guard "a missing file is not retried" util.go   $'		b, err := os.ReadFile(path)
-		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {'   $'		b, err := os.ReadFile(path)
+#
+# Anchored in retryWhileHeld, which is now the only place the rule is written.
+# It used to be inside ReadFileWithRetry, one of three functions carrying a
+# verbatim copy of the loop -- so this guard covered a third of the rule and
+# read as covering all of it, and the two ends of a single Windows window (a
+# reader's open and a publisher's rename) were among the copies it did not
+# reach.
+run_guard "a missing file is not retried" util.go   $'		v, err := op()
+		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {'   $'		v, err := op()
 		if err == nil || time.Now().After(deadline) {'   '^TestAReadOfAMissingFileDoesNotWaitOutTheRetryBound$'
 
 # The three timestamp-lookup guards below all need a clock COARSER than the
@@ -821,8 +839,8 @@ run_guard "a ceiling of zero is not unset" clean.go   '	if !b.set {
 # not on how many times it is asked. The neutralization shortens the budget
 # without changing its shape, which is the bug it had: a 500ms ceiling nothing
 # named, that lost 2 of 86 daemon restarts on a loaded box.
-run_guard "the read retry spends its whole budget" util.go   $'func ReadFileWithRetry(path string) ([]byte, error) {
-	deadline := time.Now().Add(waitedOnRetryBudget)'   $'func ReadFileWithRetry(path string) ([]byte, error) {
+run_guard "the read retry spends its whole budget" util.go   $'func retryWhileHeld[T any](op func() (T, error)) (T, error) {
+	deadline := time.Now().Add(waitedOnRetryBudget)'   $'func retryWhileHeld[T any](op func() (T, error)) (T, error) {
 	deadline := time.Now().Add(waitedOnRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
 
 # Delete takes the descriptor LAST. Neutralized back to the plain RemoveAll,
@@ -1091,6 +1109,17 @@ run_guard "a tier budget refusal is about the value" clean.go   '		if d == 0 {' 
 # than neutralizing whichever it finds first.
 run_guard_windows "store read retries a held object" segment_store.go   $'\tf, err := openWithRetry(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound' $'\tf, err := os.Open(path)\n\tif os.IsNotExist(err) {\n\t\treturn 0, ErrObjectNotFound'   '^TestAStoreReadRetriesThroughAHeldObject$'
 run_guard_windows "store publish retries a held dest" segment_store.go   '	if err := renameWithRetry(tmp, path); err != nil {' '	if err := os.Rename(tmp, path); err != nil {'   '^TestAStorePublishRetriesThroughAHeldDestination$'
+# The same window on the file that can least afford it. A sharing violation on
+# the DESCRIPTOR fails the whole of New() — not a degraded open, no log at all —
+# and the window is a restart after a hard kill, which is when a supervisor
+# restarts a process in the first place.
+#
+# Only the read is guarded, and that is not an oversight about the write. The
+# open READS the descriptor before republishing it, so a handle held long enough
+# to reach the write is one the read has already waited out; the write half is
+# held instead by hack/atomicwrite.sh, which requires it to go through the
+# wrapper, plus the wrapper's own retry test above.
+run_guard_windows "descriptor read retries a held file" descriptor.go   '	f, err := openWithRetry(descriptorPath(path))' '	f, err := os.Open(descriptorPath(path))'   '^TestReopeningALogRidesOutAHeldDescriptor$'
 
 # A version 3 manifest names the tier of every object. Neutralized to `if false`
 # rather than deleting the loop: what must fail is the refusal, not the compile,
