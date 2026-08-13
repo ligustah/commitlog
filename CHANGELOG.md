@@ -5,6 +5,65 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **Two concurrent seeks into the same cold segment could truncate each other's
+  index cache file.** `RemoteIndexCache.acquire` downloads outside its lock, on
+  purpose, and dealt with a concurrent download of the same key by keeping one
+  and discarding the other. That is the right shape only when the two attempts
+  are independent, and these were not: the cache file is named from the object
+  key alone, so both wrote the *same* path. The second `os.Create` truncated a
+  file the first had already opened and mmapped — a SIGBUS in the first
+  reader's next seek on Linux, and on Windows a discard that deleted the
+  winner's file out from under it.
+
+  Reachable by ordinary use rather than by a pathological caller: `withIndex`
+  runs under the segment *read* lock, so two readers seeking into one offloaded
+  segment race here by design. One download now runs per key, and a second
+  acquire waits for it.
+
+- **The descriptor and the leader epoch checkpoint were written atomically but
+  never made durable.** Both called the atomic-file library directly instead of
+  `AtomicWriteFileWithRetry`, so they got torn-write safety and nothing else. An
+  atomic write ends in a rename, and a rename that has returned is visible to
+  every later reader in this boot while still being undoable by a power cut —
+  the directory holding the new name needs its own fsync.
+
+  It matters most for the descriptor, which is what says a log exists and what
+  it is. Losing it leaves a directory of segments that `readDescriptor` refuses
+  on every subsequent open: the same bricked state the `Delete` ordering fix was
+  made to prevent, reached by a different route. Both writes now go through the
+  wrapper, which also rides out the Windows `ReplaceFile` failure that any open
+  handle on the destination causes — including the one a supervisor's restart
+  meets when the killed process's handles have not been reclaimed yet.
+  `readDescriptor` waits that window out too, where it used to fail the whole of
+  `New()`.
+
+  `hack/atomicwrite.sh` now keeps that rule: only the wrapper's own file may
+  reach the library. The rule had been written down before — as a list of
+  callers in a doc comment — and a hand-written list cannot notice a caller that
+  never joins it.
+
+### Changed
+
+- `readMessage` and `readMessageMetadata` shared a verbatim copy of the frame
+  header read, CRC verification and field extraction, which had already drifted
+  by one error message. Both now call one `readFrameHeader`. No behaviour
+  change.
+
+- `openWithRetry`, `renameWithRetry` and `ReadFileWithRetry` each carried their
+  own copy of the same retry loop, and each stated the same rule in its own
+  prose — absent returns at once, locked is waited out. One implementation now,
+  which also means the guard on that rule covers all three instead of one: the
+  two ends of a single Windows window were among the copies it did not reach.
+  No behaviour change.
+
+- The key digest's varint writer was declared twice, character for character, in
+  `buildKeyDigest` and `encodeKeyDigest`. Both now use one small writer type. No
+  format or behaviour change.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking

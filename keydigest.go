@@ -168,74 +168,93 @@ func buildKeyDigest(seg *segment, sc *blockCache) (*keyDigest, error) {
 		return bytes.Compare(sorted[i].key, sorted[j].key) < 0
 	})
 
-	var buf bytes.Buffer
-	var scratch [binary.MaxVarintLen64]byte
-	putUvarint := func(v uint64) {
-		n := binary.PutUvarint(scratch[:], v)
-		buf.Write(scratch[:n])
-	}
-	putVarint := func(v int64) {
-		n := binary.PutVarint(scratch[:], v)
-		buf.Write(scratch[:n])
-	}
+	var w digestWriter
 	for _, kr := range sorted {
-		putUvarint(uint64(len(kr.key)))
-		buf.Write(kr.key)
-		putUvarint(uint64(len(kr.recs)))
+		w.uvarint(uint64(len(kr.key)))
+		w.buf.Write(kr.key)
+		w.uvarint(uint64(len(kr.recs)))
 		for _, r := range kr.recs {
-			putUvarint(uint64(r.offset - d.base))
-			buf.WriteByte(r.flags)
-			putVarint(r.ts - d.baseTs)
+			w.rec(d, r)
 		}
 	}
-	d.keyed = buf.Bytes()
+	d.keyed = w.buf.Bytes()
 	d.nKeys = len(sorted)
 	return d, nil
 }
 
 // ---- encoding ----
 
-func encodeKeyDigest(d *keyDigest) []byte {
-	var buf bytes.Buffer
-	var scratch [binary.MaxVarintLen64]byte
-	putUvarint := func(v uint64) {
-		n := binary.PutUvarint(scratch[:], v)
-		buf.Write(scratch[:n])
-	}
-	putVarint := func(v int64) {
-		n := binary.PutVarint(scratch[:], v)
-		buf.Write(scratch[:n])
-	}
-	var fixed [8]byte
-	putU32 := func(v uint32) { encoding.PutUint32(fixed[:4], v); buf.Write(fixed[:4]) }
-	putI64 := func(v int64) { encoding.PutUint64(fixed[:], uint64(v)); buf.Write(fixed[:8]) }
+// digestWriter is the digest's encoder: the varint and fixed-width writes, and
+// the scratch array they share.
+//
+// A type rather than the closures that were here because there were two sets of
+// them, in buildKeyDigest and encodeKeyDigest, character for character. Both
+// write the same format — the keyed section one builds is a run of exactly the
+// records the other appends for the unkeyed ones — so an encoding that differed
+// between them would be a digest that decodes wrong, and the only thing keeping
+// them equal was that nobody had edited one.
+type digestWriter struct {
+	buf     bytes.Buffer
+	scratch [binary.MaxVarintLen64]byte
+	fixed   [8]byte
+}
 
-	putU32(digestMagic)
-	buf.WriteByte(digestVersion)
-	putI64(d.base)
-	putI64(d.logSize)
-	putI64(d.baseTs)
-	putI64(d.stripVerifiedBelow)
-	putUvarint(uint64(len(d.stripHdrs)))
+func (w *digestWriter) uvarint(v uint64) {
+	n := binary.PutUvarint(w.scratch[:], v)
+	w.buf.Write(w.scratch[:n])
+}
+
+func (w *digestWriter) varint(v int64) {
+	n := binary.PutVarint(w.scratch[:], v)
+	w.buf.Write(w.scratch[:n])
+}
+
+func (w *digestWriter) u32(v uint32) {
+	encoding.PutUint32(w.fixed[:4], v)
+	w.buf.Write(w.fixed[:4])
+}
+
+func (w *digestWriter) i64(v int64) {
+	encoding.PutUint64(w.fixed[:], uint64(v))
+	w.buf.Write(w.fixed[:8])
+}
+
+// rec writes one record entry: offset and timestamp DELTAS against the digest's
+// bases, with the flag byte between them. Both sections encode a record this
+// way, and the decoder reads them with one routine, so this is the third place
+// that agreement has to hold rather than a convenience.
+func (w *digestWriter) rec(d *keyDigest, r digestRec) {
+	w.uvarint(uint64(r.offset - d.base))
+	w.buf.WriteByte(r.flags)
+	w.varint(r.ts - d.baseTs)
+}
+
+func encodeKeyDigest(d *keyDigest) []byte {
+	var w digestWriter
+	w.u32(digestMagic)
+	w.buf.WriteByte(digestVersion)
+	w.i64(d.base)
+	w.i64(d.logSize)
+	w.i64(d.baseTs)
+	w.i64(d.stripVerifiedBelow)
+	w.uvarint(uint64(len(d.stripHdrs)))
 	for _, h := range d.stripHdrs {
-		putUvarint(uint64(len(h)))
-		buf.WriteString(h)
+		w.uvarint(uint64(len(h)))
+		w.buf.WriteString(h)
 	}
-	putUvarint(uint64(d.nKeys))
-	putUvarint(uint64(len(d.keyed)))
-	buf.Write(d.keyed)
-	putUvarint(uint64(len(d.unkeyed)))
+	w.uvarint(uint64(d.nKeys))
+	w.uvarint(uint64(len(d.keyed)))
+	w.buf.Write(d.keyed)
+	w.uvarint(uint64(len(d.unkeyed)))
 	for _, r := range d.unkeyed {
-		putUvarint(uint64(r.offset - d.base))
-		buf.WriteByte(r.flags)
-		putVarint(r.ts - d.baseTs)
+		w.rec(d, r)
 	}
-	putUvarint(uint64(len(d.control)))
+	w.uvarint(uint64(len(d.control)))
 	for _, off := range d.control {
-		putUvarint(uint64(off - d.base))
+		w.uvarint(uint64(off - d.base))
 	}
-	putU32(crc32.ChecksumIEEE(buf.Bytes()))
-	return buf.Bytes()
+	w.u32(crc32.ChecksumIEEE(w.buf.Bytes()))
+	return w.buf.Bytes()
 }
 
 // writeKeyDigest persists the digest atomically next to the segment files.

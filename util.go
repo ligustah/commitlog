@@ -355,11 +355,30 @@ var (
 // legitimate state a caller distinguishes (ErrObjectNotFound) and locked is a
 // race worth waiting out.
 func openWithRetry(path string) (*os.File, error) {
+	return retryWhileHeld(func() (*os.File, error) { return os.Open(path) })
+}
+
+// retryWhileHeld runs op until it succeeds, reports a MISSING file, or the
+// caller's budget runs out.
+//
+// One implementation because there is one rule, and it is the rule the three
+// callers below each stated in their own prose: absent is a legitimate state
+// the caller distinguishes and must stay instantly distinguishable, while
+// locked is a race worth waiting out. That was written three times and
+// implemented three times, which is three chances for a correction to land on
+// one of them — and the two ends of a single Windows window (a reader's open
+// and a publisher's rename) are among the three, so a rule that held for one
+// and not the other would move the error rather than remove it.
+//
+// It does not serve atomicWriteFileWithin, which differs on both halves: a
+// missing destination is the normal case for a write rather than a reason to
+// stop, and the successful path has to fsync the directory before returning.
+func retryWhileHeld[T any](op func() (T, error)) (T, error) {
 	deadline := time.Now().Add(waitedOnRetryBudget)
 	for {
-		f, err := os.Open(path)
+		v, err := op()
 		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
-			return f, err
+			return v, err
 		}
 		time.Sleep(atomicWriteRetryDelay)
 	}
@@ -385,27 +404,16 @@ func openWithRetry(path string) (*os.File, error) {
 // guardcheck reported the retry as uncovered because nothing can falsify it. An
 // untestable retry on a call that does not fail is complexity, not safety.
 func renameWithRetry(oldpath, newpath string) error {
-	deadline := time.Now().Add(waitedOnRetryBudget)
-	for {
-		err := os.Rename(oldpath, newpath)
-		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
-			return err
-		}
-		time.Sleep(atomicWriteRetryDelay)
-	}
+	_, err := retryWhileHeld(func() (struct{}, error) {
+		return struct{}{}, os.Rename(oldpath, newpath)
+	})
+	return err
 }
 
 // Exported alongside AtomicWriteFileWithRetry for callers that read the same
 // kinds of small files next to a log.
 func ReadFileWithRetry(path string) ([]byte, error) {
-	deadline := time.Now().Add(waitedOnRetryBudget)
-	for {
-		b, err := os.ReadFile(path)
-		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
-			return b, err
-		}
-		time.Sleep(atomicWriteRetryDelay)
-	}
+	return retryWhileHeld(func() ([]byte, error) { return os.ReadFile(path) })
 }
 
 // Exported for callers outside this package that write small config or

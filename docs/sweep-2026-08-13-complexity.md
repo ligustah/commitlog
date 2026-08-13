@@ -267,3 +267,97 @@ accident: its test happens to live in the root package.
 That is the fourth layer of one bug in one tool (build tags, the filter
 argument, the package selection, "did anything match"), each found only after
 the previous was fixed. Hardening one selector says nothing about the others.
+
+---
+
+# 2026-08-14 — the same lens, one file at a time
+
+The sweep is standing, so this continues the file above rather than starting a
+new one. The productive lens was again duplication, but sharpened: instead of
+reading files and noticing repetition, an awk pass over the normalised
+non-comment source reports every run of N identical consecutive lines that
+appears twice. That finds copies a reader's eye slides over — including ones
+whose *comments* differ, which is exactly the state a copy reaches just before
+the code diverges too.
+
+## A contorted guard anchor is evidence of duplication in the code
+
+The single most useful signal of the day, and it was already written down.
+
+`hack/guardcheck.sh` neutralizes a guard by replacing an exact string, and
+refuses an ambiguous match. Two of its anchors carried comments explaining why
+they were shaped oddly:
+
+- the frame-header CRC guard was anchored on the RETURN beneath the condition,
+  "because readMessage and readMessageMetadata now decode out of an identically
+  named local";
+- and v0.61.2's changelog entry says the missing-file and budget guards were
+  "narrowed to `ReadFileWithRetry` with multi-line anchors" after
+  `openWithRetry` and `renameWithRetry` copied its loop.
+
+Both notes describe a duplication, accept it, and work around it. Both
+duplications were still there today. **The workaround outlived the reason to
+tolerate it**, and the anchor stayed contorted long after anyone remembered
+why — so an odd anchor is worth reading as a report about the code rather than
+about the tool.
+
+Both are now single-sourced (`readFrameHeader`, `retryWhileHeld`) and both
+anchors are back to the bare condition. The retry one is the better outcome of
+the two: that guard had been *narrowed to one of three copies*, so it read as
+covering the rule and covered a third of it — and the two ends of a single
+Windows window (a reader's open, a publisher's rename) were among the copies it
+did not reach.
+
+## A hand-written list of callers cannot notice one that never joins
+
+`syncDir`'s doc named the writes that need it: "the high watermark checkpoint, a
+client's sidecar, an object published into a file-backed tier." Two more
+belonged on that list and were absent from it *because they were absent from the
+path*: `writeDescriptor` and `leaderEpochCache.flush` called the atomic-file
+library directly, so they got torn-write safety and no durability.
+
+The descriptor is the worst possible file for that. It is what says the log
+exists and what it is; `removeLogDir` orders the whole of `Delete` around
+exactly that fact, and `readDescriptor` refuses a directory of segments with no
+descriptor, permanently. So an unsynced rename could produce the same bricked
+log the `Delete` ordering was fixed to prevent, by a different route.
+
+The fix is one call each. The interesting part is what replaced the sentence:
+`hack/atomicwrite.sh` requires that only the wrapper's own file imports the
+library. A rule stated in prose is a rule that new code does not have to read.
+
+## A "discard the loser" race needs the two attempts to be independent
+
+`RemoteIndexCache.acquire` downloads outside its lock — correct, it is I/O — and
+handled a concurrent download of the same key by keeping one and discarding the
+other. That shape is right only when the two attempts do not interfere, and
+these did: the cache file is named from the object key alone, so both wrote the
+*same path*. The second `os.Create` truncated a file the first had already
+mmapped.
+
+Ordinary use reaches it. `withIndex` runs under the segment **read** lock, so
+two readers seeking into one cold segment race here by design.
+
+Worth generalising: *"run both and throw one away"* is a claim about
+independence, and a shared destination — a fixed filename, a fixed key, a
+well-known temp path — falsifies it. The comment said "the insert below dedups",
+which is true of the map and says nothing about the file.
+
+## Negatives, recorded so the next sweep does not re-open them
+
+- `read_options.go` mixes `untilSet` with a `-1` sentinel for "unbounded".
+  Checked: `prefixSource.bound()` genuinely uses the `-1`, and `resolve` refuses
+  a negative `Until` before it can be confused with the sentinel. Not a
+  laundered value.
+- `messageSet`'s field accessors and `readFrameHeader`'s extraction both read
+  the frame header, but both index the same named constants, so the constant is
+  the single source. Not a transcription.
+- `keydigest.go`'s `writeKeyDigest` commits with a bare `os.Rename`, which is
+  the publisher's half of the Windows window. Left alone deliberately: all three
+  callers treat it as best-effort with a rebuild behind it, and by `util.go`'s
+  own rule a write with a retry behind it belongs on `tickWriteRetryBudget`,
+  which `renameWithRetry` cannot express. Recorded as work, not done badly now.
+- `uncommittedReader.segmentBounds` and `committedReader.segmentBounds` are
+  identical. The honest fix is a shared embedded base for the two reader
+  structs, which is a real refactor and not a tack-on; nine trivial lines can
+  wait for it.
