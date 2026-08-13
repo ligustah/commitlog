@@ -349,14 +349,16 @@ run_guard "append tail-under-lock" commitlog.go   '	// Reading the tail and writ
 	l.appendMu.Lock()
 	defer l.appendMu.Unlock()'   '	// BREAK: tail read and write no longer one step'   '^TestConcurrentAppends'
 
-# The read path's frame-header CRC. Anchored on the RETURN under it, not on the
-# condition alone: readMessage and readMessageMetadata now decode out of an
-# identically-named local, so the bare condition matches both and apply_edit
-# refuses an ambiguous anchor. The bare form silently expired the moment those
-# two lines became the same text.
-run_guard "frame-header CRC" reader.go   'if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got {
-		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,'   'if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got && false {
-		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,'   '^FuzzCorruptFrameHeaderIsNeverServedAsTruth$'
+# The read path's frame-header CRC. Back to the bare condition, because there is
+# only one of it again: this used to be anchored on the RETURN beneath it, since
+# readMessage and readMessageMetadata each carried a verbatim copy and the bare
+# condition matched both, which apply_edit refuses as ambiguous. Both now call
+# readFrameHeader. The contorted anchor was evidence of the duplication, and it
+# goes when the duplication does.
+run_guard "frame-header CRC" reader.go \
+  'if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got {' \
+  'if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got && false {' \
+  '^FuzzCorruptFrameHeaderIsNeverServedAsTruth$'
 
 # scanForward must report a failed read rather than calling it "entry not found",
 # because both timestamp lookups turn not-found into a plausible offset. The

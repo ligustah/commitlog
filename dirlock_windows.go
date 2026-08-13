@@ -60,8 +60,22 @@ func acquireDirLock(path string) (lockHandle, error) {
 }
 
 // releaseDirLock closes the handle, which is what drops the exclusion.
+//
+// Both a zero handle and InvalidHandle are treated as "nothing to release", and
+// the zero is the one that matters. dirLock's doc promises its ZERO VALUE
+// releases cleanly, and on unix that falls out for free: lockHandle is *os.File
+// there, so an unset handle is nil and the guard catches it. Here lockHandle is
+// syscall.Handle, whose zero value is 0 and not InvalidHandle (^0) — so the
+// guard as written covered only the value acquireDirLock returns when it FAILS,
+// which is the one case that cannot reach here, because dirLock.held is false
+// then. It missed the unset handle it reads as protecting against.
+//
+// Unreachable today for that reason: held gates every call. Stated and fixed
+// anyway, because a guard that covers the impossible value and not the possible
+// one is worse than none — it reads as the protection, so the next person to
+// simplify held away would take the promise with it, on one platform only.
 func releaseDirLock(h lockHandle) error {
-	if h == syscall.InvalidHandle {
+	if h == syscall.InvalidHandle || h == 0 {
 		return nil
 	}
 	return errors.Wrap(syscall.CloseHandle(h), "release log directory lock")
