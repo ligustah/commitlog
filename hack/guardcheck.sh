@@ -210,7 +210,20 @@ guard_finish() {
     git checkout -- "$@"
     return 0
   fi
-  if go test -run "$test_re" -count=1 -timeout 300s ${extra[@]+"${extra[@]}"} . >/dev/null 2>&1; then
+  # ./... rather than `.`, and -v so the run can be asked whether it ran
+  # anything. Both are the same defect: `go test -run` with a pattern that
+  # matches nothing exits 0, and this script reads 0 as "passed without the
+  # guard". So a guard whose test lives in a subpackage — compress/ — reported
+  # NO COVERAGE for a test that was never selected, and a guard whose test_re
+  # went stale after a rename would have reported it too, which is the same
+  # answer for a working guard and a broken one.
+  local out rc
+  out=$(go test -run "$test_re" -count=1 -timeout 300s ${extra[@]+"${extra[@]}"} -v ./... 2>&1)
+  rc=$?
+  if ! printf '%s' "$out" | grep -qE '^=== RUN'; then
+    echo "HARNESS ERROR (no test matched $test_re)"
+    failures=$((failures + 1))
+  elif [ "$rc" -eq 0 ]; then
     echo "NO COVERAGE — $test_re passed without it"
     failures=$((failures + 1))
   else
