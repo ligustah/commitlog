@@ -75,6 +75,17 @@ library from that fork onward.
   rather than a verdict. All 159 guard names were checked against the real test
   functions, so the fix surfaced nothing pre-existing.
 
+  That check then failed a guard *because* its test matched. It was written as
+  `printf '%s' "$out" | grep -qE '^=== RUN'`, under the `set -o pipefail` this
+  script has always carried: `grep -q` exits at the first match, `printf` is
+  still writing a verbose multi-package log into a pipe with no reader, takes
+  EPIPE, and pipefail hands the pipeline printf's failure — non-zero precisely
+  because the match succeeded. It only fires once the output outgrows the pipe
+  buffer, so the windows job stayed green and the linux one went red on the one
+  guard that printed enough, with `printf: write error: Broken pipe` sitting
+  directly above the false `HARNESS ERROR`. Now matched with bash's own pattern
+  operator, which has no second process and so no EPIPE to take.
+
 ### Testing
 
 Three test-only additions, all from one observation: a hand-maintained list that
