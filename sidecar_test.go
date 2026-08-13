@@ -283,21 +283,21 @@ func TestASidecarRoundTrips(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
 
-	_, err = l.GetSidecar(ClientSidecarPrefix+"recovery-floor")
+	_, err = l.GetSidecar(ClientSidecarPrefix + "recovery-floor")
 	require.True(t, os.IsNotExist(err), "an absent sidecar must satisfy os.IsNotExist, got %v", err)
 
-	require.NoError(t, l.PutSidecar(ClientSidecarPrefix+"recovery-floor",[]byte("42")))
-	b, err := l.GetSidecar(ClientSidecarPrefix+"recovery-floor")
+	require.NoError(t, l.PutSidecar(ClientSidecarPrefix+"recovery-floor", []byte("42")))
+	b, err := l.GetSidecar(ClientSidecarPrefix + "recovery-floor")
 	require.NoError(t, err)
 	require.Equal(t, "42", string(b))
 
-	require.NoError(t, l.PutSidecar(ClientSidecarPrefix+"recovery-floor",[]byte("43")), "a sidecar must be overwritable")
-	b, err = l.GetSidecar(ClientSidecarPrefix+"recovery-floor")
+	require.NoError(t, l.PutSidecar(ClientSidecarPrefix+"recovery-floor", []byte("43")), "a sidecar must be overwritable")
+	b, err = l.GetSidecar(ClientSidecarPrefix + "recovery-floor")
 	require.NoError(t, err)
 	require.Equal(t, "43", string(b))
 
 	require.NoError(t, l.RemoveSidecar(ClientSidecarPrefix+"recovery-floor"))
-	_, err = l.GetSidecar(ClientSidecarPrefix+"recovery-floor")
+	_, err = l.GetSidecar(ClientSidecarPrefix + "recovery-floor")
 	require.True(t, os.IsNotExist(err), "the sidecar outlived its removal")
 	require.NoError(t, l.RemoveSidecar(ClientSidecarPrefix+"recovery-floor"), "removing an absent sidecar is a no-op")
 }
