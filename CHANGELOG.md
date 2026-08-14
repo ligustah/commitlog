@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.89.0 — 2026-08-14
 
 ### Changed — on-disk format, no compatibility path
 
@@ -20,10 +20,16 @@ library from that fork onward.
   earlier with `Compression` set cannot be read by this build. Agreed with
   durable_streams, who keep no on-disk data across versions.
 
-  `TierObject` gains a `Records` field for the same reason, which is a manifest
-  change rather than a segment one: an existing manifest decodes with `Records`
-  zero, and a tiered log adopted from one reports zero records until it is
-  republished.
+  `TierObject` gains a `Records` field for the same reason, and `manifestVersion`
+  goes 3 → 4 with it. A JSON field that is absent decodes to zero rather than
+  failing, so an unbumped read would have reported every segment in a v0.88.0
+  manifest as holding no records — and that number is not decoration, it is the
+  one a cold tiered segment answers from and the one `applyTotalLimit` sums
+  against `MaxLogMessages`. A running total that never climbs never reaches the
+  ceiling, which switches the limit off over the tier while everything still
+  looks healthy: the same defect as the over-count below, pointed the quiet way.
+  An older manifest is refused, as versions 1 and 2 are; re-offload rather than
+  convert.
 
 ### Fixed
 

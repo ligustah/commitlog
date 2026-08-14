@@ -36,7 +36,18 @@ const manifestKey = "manifest"
 // carries that behaviour: an entry names the tier its object is actually in, and
 // publishTierManifests files entries by that name. Refused rather than adapted,
 // for the same reason as version 1.
-const manifestVersion = 3
+//
+// Version 4 adds Records, how many messages the object holds. It is refused
+// rather than adapted for a reason the first three bumps did not have: an
+// absent Records decodes to 0, and a cold tiered segment answers
+// messageCountLocked from this entry alone, so an unbumped read would put that
+// 0 into applyTotalLimit's running total against MaxLogMessages. A term that
+// understates never reaches the ceiling, which switches the limit off over the
+// tier without saying so — the same shape as the over-count this field was
+// added to fix, in the other direction. The block header and the block table
+// both took a hard version bump for this same field; the manifest is the third
+// place a segment describes its count from, and it gets the same treatment.
+const manifestVersion = 4
 
 // defaultTierName is the conventional name for the one tier of a single-store
 // log. The library no longer writes it — every object records the name of the

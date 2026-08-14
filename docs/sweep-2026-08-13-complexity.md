@@ -2203,3 +2203,53 @@ Mutation-verified: reinstating the span for the manifest arm alone makes it
 report **95 records for 59 present**. The existing guard could not have caught
 that arm — it neutralizes the resident-table branch, which this path never
 reaches — so the third arm got a guard of its own.
+
+### The third place the count lives, and the version that did not move
+
+The block header got a hard version bump for `records`. The block table got one.
+The manifest — the third place a segment describes its count from, and the only
+one a cold tiered segment can answer from — got the field and kept version 3.
+
+`manifest.go` documents the rule it broke, in the comment above the constant it
+broke it on. Version 2 added `BlocksKey` and version 1 is refused; version 3
+added `Tier` and version 2 is refused; both say *refused rather than adapted*.
+The same comment then explains why the check is `!=` and not `>`:
+
+> A `>` comparison would also accept version 0, which is what an absent field
+> decodes to, so any JSON object that happened to parse would be read as a
+> manifest.
+
+That is the exact defect, one field down. An absent `Records` decodes to 0, and
+nothing rejects it, so a v0.88.0 manifest reads clean and reports every segment
+it names as holding no records.
+
+It is worth being precise about which direction that fails in, because it is not
+the direction the release is about. `applyTotalLimit` walks segments oldest
+first, summing counts until the running total is under `MaxLogMessages`.
+Overstating each term makes the walk reach the ceiling sooner — that is the
+2.76x over-delete this release fixes. **Understating never reaches it at all.**
+The limit stops being enforced over the tier, and nothing goes wrong out loud:
+no error, no missing records, just a log that keeps growing past a cap somebody
+set. The loud failure is the one that got found in a week; this one is the sort
+that gets found in a bill.
+
+**What was NOT done, and why.** The first instinct was to also refuse a
+non-positive `Records` per entry, mirroring the existing `Tier == ""` check and
+the block table's own `records == 0` refusal. That would have been wrong.
+`uploadTo` refuses an *unsealed* segment and nothing else, so an empty sealed
+segment can be offloaded, and for that entry zero is the **true count**. The
+block table can refuse zero because no block holds no records; a manifest entry
+describes a whole segment, and a segment holding nothing is a thing that exists.
+
+Which sharpens what the defect actually was. It was never "zero is an illegal
+value" — it was "a manifest that never stated a count is read as having stated
+zero", which is the same sentinel collision the constant's own comment describes
+about version 0, and the one `defaultTierName` exists to avoid. The fix is the
+version, and only the version: state it or be refused.
+
+The guard anchors on `const manifestVersion = 4` and neutralizes it to `3` —
+what shipping the field without the bump looked like. Everything compiles, every
+round trip through a manifest this build wrote is fine, and only a manifest from
+the release before goes wrong. Deliberately not anchored on the reader's
+comparison: that check was already correct. The number it defends is what failed
+to move.

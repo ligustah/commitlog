@@ -2129,6 +2129,18 @@ run_guard "a tiered log stamps its own directory too" descriptor.go   $'	if err 
 		return writeDescriptor(opts.Path, d)
 	}'   '^TestInspectIdentityReadsATieredLogsLocalCopy$'
 
+# The manifest version moved when Records was added to it. Neutralized by
+# putting it back to 3, which is what shipping the field without the bump
+# looked like: everything compiles, every round trip through a manifest this
+# build wrote is fine, and a manifest from the release before answers zero
+# records for every segment it names.
+#
+# Anchored on the constant rather than on the reader's comparison, because the
+# comparison is already correct -- it refuses anything that is not
+# manifestVersion. The defect was never in the check, it was that the number
+# the check defends did not move when the layout under it did.
+run_guard "the manifest version moved with the record count" manifest.go   'const manifestVersion = 4'   'const manifestVersion = 3'   '^TestTheManifestLayoutBeforeRecordsIsRefused$'
+
 
 echo
 if [ "$failures" -ne 0 ]; then
