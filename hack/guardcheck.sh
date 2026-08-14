@@ -1879,6 +1879,31 @@ run_guard "a v0 descriptor is refused by its version line" descriptor.go   '	if 
 # record count", one format over.
 run_guard "the descriptor version moved with the tiered field" descriptor.go   '	descriptorFileV2 = 2'   '	descriptorFileV2 = 1'   '^TestADescriptorFromBeforeTheTieredFieldIsRefused$'
 
+# The three below close that same pair over the remaining formats, and they are
+# here as a SET because holding them one at a time is how three of six ended up
+# with no guard at all. hack/formatversion.sh is the durable half: it enumerates
+# the version constants that gate a refusal and requires each to be named here,
+# so the next format cannot skip this by being forgotten.
+#
+# Each neutralization is the constant put back to its PREVIOUS value, not to an
+# arbitrary wrong one, because that is the mutation the guard is about — a
+# layout that changed while its version stood still. That also constrains the
+# tests: a fixture written as `theVersion - 1` moves WITH the constant and stays
+# green under this, so all three name the old version literally.
+run_guard "the block format version moved with the record count" block.go   '	BlockFormatVersion byte = 2'   '	BlockFormatVersion byte = 1'   '^TestAV1BlockHeaderIsRefusedRatherThanMisread$'
+
+# v2 grew the header from 11 bytes to 15, so this is the widest-blast-radius
+# version in the repo: a v1 segment read as v2 puts every block boundary after
+# the first four bytes off, and the reader does not find that out until a CRC
+# somewhere downstream disagrees.
+run_guard "the block table version moved with the record count" block_table.go   '	blockTableVersion = 2'   '	blockTableVersion = 1'   '^TestAV1BlockTableIsRefusedByItsVersion$'
+
+# The digest is a CACHE, so its version mismatch is a soft failure by design —
+# loadKeyDigest returns nil and the caller rebuilds. That is why it went longest
+# without a test: nothing goes red when a soft path stops working. It gets
+# slower, or it starts succeeding on bytes it should not have understood.
+run_guard "the digest version moved with the record count" keydigest.go   '	digestVersion byte = 2'   '	digestVersion byte = 1'   '^TestADigestFromAnOlderVersionIsIgnored$'
+
 # noRetentionLimits() decides whether the retention pass runs; the three gates in
 # cleanLocal decide whether each limit applies. With `== 0` here they disagreed
 # about a negative -- "configured" to the first, "skip" to the others -- so the

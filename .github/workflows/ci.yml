@@ -210,7 +210,28 @@ jobs:
       # because a hand-copied rule is invisible to the copy nobody makes.
       - name: storesize
         run: bash hack/storesize.sh
-      # The five scripts above and guardcheck decide whether this repo is
+      # Every on-disk format carries a version and every reader refuses one it
+      # does not recognise, and that refusal needs TWO things held, which are
+      # different claims: that the version line is checked, and that the
+      # constant moved when the layout did. A check that runs against the wrong
+      # number is still a check that runs — #300 had the first and not the
+      # second, so every v0.88.0 manifest decoded with TierObject.Records absent
+      # (which JSON gives as zero) and a retention budget summing record counts
+      # stopped reaching its ceiling at all.
+      #
+      # guardcheck holds both, one guard each. What did not work was REMEMBERING
+      # to add them: six formats carry a version and three had neither guard.
+      # This makes the next one mechanical — a version constant compared in a
+      # refusal must be named by a guard, or the build is red.
+      #
+      # It also refuses to report at all when a version is compared whose
+      # DECLARATION its scan did not find, because the first draft of it did
+      # exactly that: manifestVersion is declared outside a const block, so the
+      # scan skipped it and the script reported five of five held while silently
+      # omitting the one format it was written about.
+      - name: formatversion
+        run: bash hack/formatversion.sh
+      # The six scripts above and guardcheck decide whether this repo is
       # correct, and until now nothing checked THEM. Every bug they have had was
       # shell semantics rather than logic: a `| while` setting its flag in a
       # subshell so layercheck printed every violation and exited 0; a substring
