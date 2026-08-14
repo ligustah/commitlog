@@ -505,3 +505,73 @@ decision that had been spelled out in a place where nothing could check it —
 a buffer that stood in for one integer, a second name for one directory, a
 boolean at a call site. Repetition is the easy defect to scan for; a fact
 recorded in a place that cannot verify it is the one that needs reading.
+
+## 2026-08-14, second pass — down the rest of the size list
+
+The size lens was worked to the bottom of the top-32. Most of what it reached
+was fine: `compact`, `cleanSegment`, `mergeDigests`, `cleanPass`, `clean`,
+`Sync`, `collectRun`, `scanBlocks`, `reconcileIndexTailRaw`,
+`earliestOffsetAfterTimestampLocked` and `UnreferencedObjects` are long because
+the decisions in them are, and every one of them is carrying its reasons.
+
+That is worth recording as a result. A size ranking is a way to find the
+functions where something can hide, not a list of defects, and a pass that
+reports nothing on ten of them and something on four is behaving correctly.
+
+What it did find, in one shape:
+
+- **A counter beside the thing that knew.** `newMessageSetFromProto` advanced a
+  running `int32` with six `+=` lines transcribing the frame header's field
+  widths, to compute one thing: where each record starts in the buffer.
+  `buf.Len()` answers that, and the header checksum three lines below already
+  asked it that way. Change a width in the encoder and not in the counter and
+  every index entry's `Position` moves while every byte on disk stays right.
+
+- **One read in both branches.** `setupIndex` ended its block-mode and raw arms
+  with the same five lines. Only the *last* offset is layout-dependent — entry
+  0 is the first message under both, since a sparse index anchors each block AT
+  its first message.
+
+- **One predicate, three spellings.** `digestHits` wrote its `[from, bound]`
+  test at three sites, the third about a differently named variable.
+
+- **Deduplication written as a lookup.** `publishTierManifests` walked its
+  pending list twice, the second walk asking a map whether each entry had
+  survived the first. Whatever the first walk leaves in the map *is* the set of
+  additions. The second walk's `delete` was the only thing stopping two pending
+  entries with one base offset from being appended twice, and nothing said so.
+
+## The find that was not a refactor
+
+Reading `uncommittedReader.Read` for structure turned up `err != io.EOF`, and
+grepping that shape across the package found `index_cache.go:210` — a third
+place that reads a **caller's** `SegmentStore` with `==`.
+
+The `SegmentStore.ReadAt` doc already forbade it. It says the sentinels may be
+wrapped and that commitlog compares with `errors.Is`, and it says so *because*
+two sites in `storeBacking` had got it wrong. The doc names two places. There
+were three.
+
+This is the fifth-copy shape again, and the tell is specific enough to reuse: a
+doc comment that says "the N places that do X" is a claim about the call graph
+written in prose. Nothing checks it, and the copy that is not next to the fix is
+the one that keeps the bug. Grep the shape, not the doc.
+
+Two further holes fell out of reading that loop once the first was clear: an
+object ending before the size the store itself had just reported was accepted
+(leaving a short cache file that `newIndex` maps and reads as a whole index, so
+seeks answer "not found" for offsets the segment holds), and a `(0, nil)`
+return — which `io.ReaderAt` forbids — was retried at the same offset forever.
+
+## Deferred, with reasons
+
+- **`uncommittedReader.Read`.** Two arms advance to the next segment with
+  near-identical code, a `waiting` flag threads through both, and one arm sets
+  `r.pos = 0` where the other relies on the next iteration to resync it. It is
+  genuinely harder to read than anything else in the package. Not taken: it is
+  live-tailing code with recent fixes under it, the duplication is four lines,
+  and a restructure buys legibility at the cost of a class of bug this package
+  has already paid for once. Worth doing behind a test that drives a roll
+  during a parked read, not before one.
+- **A shared embedded base for `uncommittedReader`/`committedReader`,** so
+  `segmentBounds` exists once.
