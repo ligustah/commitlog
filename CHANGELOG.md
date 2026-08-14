@@ -18,6 +18,12 @@ library from that fork onward.
   `segmentSwapped` also stated its predicate twice, `Cause(err) == X` OR
   `errors.Is(err, X)`, where the second subsumes the first. No behaviour change.
 
+- The three operations that only mean anything for a segment backed by a store
+  — replacing its objects, swapping the replacement in, and repointing it at a
+  different store — refused a local segment with three separate `errors.New`
+  carrying the same sentence. One unexported `errSegmentNotOffloaded` now, so
+  one condition has one wording. No behaviour change.
+
 - The readers no longer move `seg`, `pos` and `br` by hand. `segmentCursor` grew
   two operations and every site calls one of them: `seekTo(seg, pos)` for a move
   — which is the rule "all three fields change together", now enforced by there

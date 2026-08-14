@@ -12,11 +12,11 @@ import (
 // Which of closeIndex's steps actually costs the 8ms per segment that
 // BenchmarkCloseCleanLog measures?
 //
-// closeIndex(durable) does three things to an index this process opened and
-// never wrote to — syncMmap (FlushViewOfFile over the mapping, then
-// FlushFileBuffers on the handle), unmap, and shrink (SetEndOfFile) — and they
-// have very different implications, so the total is not a number worth acting
-// on:
+// Close() — closeIndex(flush: true, trim: true) — does three things to an index
+// this process opened and never wrote to: syncMmap (FlushViewOfFile over the
+// mapping, then FlushFileBuffers on the handle), unmap, and shrink
+// (SetEndOfFile). They have very different implications, so the total is not a
+// number worth acting on:
 //
 //   - If the cost is the SHRINK, it is free to remove. A sealed index on disk is
 //     already shrunk, so InitializePosition sets position to the content end and

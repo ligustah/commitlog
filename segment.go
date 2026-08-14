@@ -55,6 +55,20 @@ var (
 	// log that has been closed.
 	ErrCommitLogClosed = errors.New("commit log was closed")
 
+	// errSegmentNotOffloaded refuses the three operations that only mean
+	// anything for a segment whose bytes live in a store: replacing its objects
+	// with compacted ones, swapping in the replacement, and repointing it at a
+	// different store. All three ask the same question of the same field —
+	// s.store == nil — and each used to answer it with its own errors.New
+	// carrying the same sentence, which is three chances for one of them to
+	// start saying something slightly different about one condition.
+	//
+	// Unexported because nothing matches on it: every caller is inside the
+	// package and reaches this only by asking a local segment to do something
+	// its own state forbids, which is a bug in the caller, not a condition to
+	// branch on.
+	errSegmentNotOffloaded = errors.New("commitlog: segment is not offloaded")
+
 	// ErrMessageSetRefused is returned by AppendMessageSet when the caller's
 	// framing does not fit the log's tail. It is a sentinel because the caller
 	// has to be able to tell it apart from an IO failure: an IO failure is
@@ -2285,7 +2299,7 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 	s.Lock()
 	defer s.Unlock()
 	if s.store == nil {
-		return offloadMeta{}, nil, errors.New("commitlog: segment is not offloaded")
+		return offloadMeta{}, nil, errSegmentNotOffloaded
 	}
 
 	// The backing this segment is serving reads from right now. It becomes the
@@ -2351,7 +2365,7 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.store == nil {
-		return errors.New("commitlog: segment is not offloaded")
+		return errSegmentNotOffloaded
 	}
 	newKey := meta.LogKey
 	newIndexKey := meta.IndexKey

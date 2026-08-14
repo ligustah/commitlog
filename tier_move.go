@@ -138,7 +138,7 @@ func (s *segment) swapTier(store SegmentStore, tier string, meta offloadMeta) ([
 		return nil, ErrSegmentClosed
 	}
 	if s.store == nil {
-		return nil, errors.New("commitlog: segment is not offloaded")
+		return nil, errSegmentNotOffloaded
 	}
 
 	oldBacking, _ := s.backing.(*storeBacking)
