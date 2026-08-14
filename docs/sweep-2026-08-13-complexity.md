@@ -474,3 +474,34 @@ code matches — it is that the *job* does.
   called as **method expressions**, `l.forEachSegment((*segment).SyncData)`. A
   call-site scan looking for `.Name(` cannot see those. Any future dead-code
   pass has to count `(*T).Name` too, or it will propose deleting live code.
+
+## The same lens, two more finds
+
+Reading the top of the size list in pairs also reached `New`/`open`, and `New`
+turned up a variant of the divergence above that is not about performance:
+
+- **Two spellings of one directory.** `New` resolved the absolute path and used
+  it for the dir lock, the epoch cache and the descriptor, while `l.Path` and
+  both cleaners kept the caller's string. They agree until the process chdirs,
+  and then the half on the relative path opens files somewhere else while the
+  half holding the lock does not notice. One resolve at the top now; the
+  `descOpts` copy that existed only to carry the absolute form to two calls is
+  gone with it. `commitLog.init()` went too — a `MkdirAll` on a directory `New`
+  had created forty lines earlier, no other caller.
+
+- **A flag argument at 25 call sites.** `newSegment(..., isNew bool, suffix
+  string, codec)`, called as `true, ""` twenty-two times and `false, ""` three.
+  The bool is the whole decision — refuse an existing log file, or adopt it —
+  and it was the least legible thing at every call site. `newSegment` and
+  `openSegment` now, over a shared `newSegmentWith` that keeps both parameters
+  for the working copies. Worth noting what the split bought beyond reading:
+  *which* production site creates and which adopts became checkable, and it is
+  three creates (roll, empty log, local head after a tier adoption — all of
+  which mean "nothing may be here") against one adopt (`open`, which found the
+  file in a listing).
+
+The pattern across all three: none of them were duplication. Each was a
+decision that had been spelled out in a place where nothing could check it —
+a buffer that stood in for one integer, a second name for one directory, a
+boolean at a call site. Repetition is the easy defect to scan for; a fact
+recorded in a place that cannot verify it is the one that needs reading.
