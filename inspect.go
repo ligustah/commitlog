@@ -358,3 +358,89 @@ func (s *SegmentFile) String() string {
 	}
 	return fmt.Sprintf("%s: %d bytes, %s", s.path, len(s.raw), kind)
 }
+
+// Reading a log's IDENTITY without opening the log that wrote it.
+//
+// The same argument as the segment reader above, one file over: durable_streams'
+// reclaimer runs a periodic pass over stream directories this broker holds and
+// asks, for each, "do these bytes belong to the current incarnation of this
+// name?" Most of those logs are not open in that process — that is the point of
+// the pass, it is looking for orphans — and New is the wrong way to find out. It
+// takes the directory lock, which fights the daemon's own opens; it runs
+// recovery and may adopt a descriptor on a copy the pass is about to delete,
+// mutating the evidence it exists to judge; and it costs an open per stream per
+// tick.
+//
+// Their alternative was a durable_streams-side parser for this file, which is
+// exactly the mirror the header above is about.
+
+// ErrNoLog reports that a path holds no commitlog to read the identity of.
+//
+// Returned both for a path that does not exist and for a directory holding no
+// descriptor, which are one answer rather than two on purpose: every log that
+// has been through New has a descriptor, so a directory without one is not a log
+// whatever else it contains. Collapsing them keeps the OTHER answer sharp —
+// LogIdentity.Stored false then means "a real log, created before its owner used
+// identity" and never "nothing usable here", and those two demand opposite
+// treatment from a reclaimer. An unstamped log must not be deleted, because
+// unstamped and stale look alike and only one of them should be destroyed.
+var ErrNoLog = errors.New("commitlog: no log at this path")
+
+// LogIdentity is what a log's descriptor records about WHICH log it is.
+//
+// A struct rather than the bare bytes so descriptor facts can be added without
+// breaking the signature; today it carries the identity and whether there is
+// one.
+type LogIdentity struct {
+	// Identity is the opaque stamp the log was created with — the
+	// Options.Identity of whichever open first wrote the descriptor. Nil when
+	// the log stores none.
+	Identity []byte
+	// Stored reports whether the log carries an identity AT ALL, which is not
+	// the same question as whether Identity is empty and is the one a caller
+	// acts on. A log predating the feature stores nothing, and deleting it for
+	// failing to match would destroy exactly the copies that never had a chance
+	// to match. It mirrors IdentityConflict.Stored, which draws the same line
+	// for the open path.
+	Stored bool
+}
+
+// InspectIdentity reads the identity stored beside the log at path.
+//
+// Four answers, because a caller judging a directory it did not open acts
+// differently on each:
+//
+//   - identity present — LogIdentity{Identity: bytes, Stored: true}, nil error.
+//   - a log with no identity — LogIdentity{Stored: false}, nil error.
+//   - no log there — ErrNoLog, matched with errors.Is.
+//   - anything else — that error, which means "cannot judge" rather than "no".
+//
+// It takes NO directory lock, runs no recovery, opens no segment and writes
+// nothing, so it is safe against a log another process has open and against a
+// copy the caller is about to delete. What it can report is a snapshot: an open
+// log elsewhere may be rewriting its descriptor, and the answer is whichever
+// version was published when this read ran.
+//
+// LOCAL ONLY, by definition rather than by omission. A store-backed log keeps
+// its descriptor in the store (see descriptorKey), and a path is not enough to
+// reach one — so this answers for THIS directory's copy, which is the question a
+// reclaimer judging this broker's disk is asking. A tiered log whose local
+// directory holds no descriptor is ErrNoLog here, not an identity-less log.
+func InspectIdentity(path string) (LogIdentity, error) {
+	d, err := readDescriptor(path)
+	if os.IsNotExist(err) {
+		// Wrapped rather than returned bare so the path is in the message, and
+		// with %w rather than pkg/errors so errors.Is reaches the sentinel
+		// through it — the distinction this whole function is built to preserve
+		// is worthless if the caller cannot test for it.
+		return LogIdentity{}, fmt.Errorf("%w: %s", ErrNoLog, path)
+	}
+	if err != nil {
+		return LogIdentity{}, errors.Wrap(err, "read log descriptor")
+	}
+	// len, not != nil: renderDescriptor omits the line entirely for an empty
+	// identity, so "empty" and "absent" are the same state on disk and must be
+	// the same state here. Asking `!= nil` would make a hand-edited `identity=`
+	// line report a stamp that no writer can produce and no comparison can match.
+	return LogIdentity{Identity: d.Identity, Stored: len(d.Identity) > 0}, nil
+}

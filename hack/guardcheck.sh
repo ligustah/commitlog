@@ -1249,6 +1249,41 @@ run_guard "LocalBytes counts the bytes on disk" commitlog.go \
   '		n += seg.Position()' \
   '^TestACompressedLogsLocalBytesAreTheBytesOnDisk$'
 
+# InspectIdentity's three answers, guarded separately because the caller acts
+# oppositely on each and every collapse between them is silent. A reclaimer
+# deletes on "stale", refuses on "unstamped", skips on "no log" and leaves alone
+# on "cannot judge" -- so a missing distinction is not a worse answer, it is the
+# wrong ACTION on real bytes.
+#
+# Absence must reach the caller as ErrNoLog. Neutralized to `false`, which sends a
+# missing descriptor down the generic wrap and leaves the pass unable to tell
+# "skip this, nothing here" from "an I/O error I cannot judge".
+run_guard "no log is asserted, not wrapped" inspect.go \
+  '	if os.IsNotExist(err) {' \
+  '	if false {' \
+  '^TestInspectIdentityRefusesAPathWithNoLog$'
+
+# An unstamped log must not report a stamp. Neutralized to `true`, which is the
+# collapse that matters most: Stored=true with empty Identity compares unequal to
+# every live incarnation, so a reclaimer would delete every log created before its
+# owner used identity.
+run_guard "an unstamped log stores nothing" inspect.go \
+  '	return LogIdentity{Identity: d.Identity, Stored: len(d.Identity) > 0}, nil' \
+  '	return LogIdentity{Identity: d.Identity, Stored: true}, nil' \
+  '^TestInspectIdentityReportsALogThatStoresNoStamp$'
+
+# A damaged descriptor is "cannot judge". Neutralized by swallowing the parse
+# failure, which returns the zero LogIdentity with a nil error -- indistinguishable
+# from an unstamped log, so every torn byte becomes a permanent leak.
+run_guard "an unreadable descriptor is not an unstamped one" inspect.go \
+  '	if err != nil {
+		return LogIdentity{}, errors.Wrap(err, "read log descriptor")
+	}' \
+  '	if false {
+		return LogIdentity{}, errors.Wrap(err, "read log descriptor")
+	}' \
+  '^TestInspectIdentityReportsADamagedDescriptorAsAnError$'
+
 # Removing this returns the walk to adding cLen to pos unchecked, which is what
 # let a block overrunning the file be listed as healthy while Records refused the
 # same bytes.

@@ -7,6 +7,45 @@ library from that fork onward.
 
 ## Unreleased
 
+### Added
+
+- **`InspectIdentity(path)`** reads the identity stored beside a log without
+  opening it — the descriptor twin of `InspectSegment`. No directory lock, no
+  recovery, no segment opened, nothing written.
+
+  ```go
+  type LogIdentity struct {
+      Identity []byte // the stamp, nil when the log stores none
+      Stored   bool   // whether the log carries one AT ALL
+  }
+  func InspectIdentity(path string) (LogIdentity, error)
+  ```
+
+  Four answers, because the caller acts differently on each: an identity;
+  a log with **no** identity (`Stored` false, nil error); **`ErrNoLog`**; and
+  anything else, which means *cannot judge*.
+
+  Requested by durable_streams (#625) for their reclaimer's periodic orphan pass,
+  which judges logs it must **not** open — `New` would take the directory lock,
+  run recovery and possibly adopt a descriptor on a copy the pass is about to
+  delete, mutating the evidence it exists to judge. Their alternative was a
+  descriptor parser on their side, which is exactly the stale mirror `inspect.go`
+  was written to eliminate.
+
+  `ErrNoLog` covers a missing directory **and** a directory holding no
+  descriptor, deliberately. Every log that has been through `New` has one, so a
+  directory without one is not a log — and collapsing those two keeps the other
+  answer sharp: `Stored` false then means *a real log, created before its owner
+  used identity*, which is the one a reclaimer must never delete, since unstamped
+  and stale are indistinguishable by identity and only one of them should be
+  destroyed.
+
+  **Local only, by definition.** A store-backed log keeps its descriptor in the
+  store, and a path cannot reach one, so this answers for *this directory's*
+  copy — which is the question a reclaimer judging this broker's disk is asking.
+  A tiered log with no local descriptor is `ErrNoLog` here, not an
+  identity-less log.
+
 ### Fixed
 
 - **Every byte budget that bounds a RESOURCE now counts the bytes that are
