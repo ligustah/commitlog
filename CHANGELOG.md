@@ -137,6 +137,12 @@ library from that fork onward.
   the directory listing found) now, over a shared `newSegmentWith` that keeps
   both parameters for `newWorkingSegment`. No behaviour change.
 
+- A tier move mints a store key for each object that exists, rather than minting
+  all three and blanking two back. `moveSegment` assigned `LogKey`, `IndexKey`
+  and `BlocksKey` unconditionally and then cleared the latter two when the
+  source had none — stating the rule as its own exception, twice, with only the
+  first retraction carrying the reason. No behaviour change.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking

@@ -63,16 +63,24 @@ func (l *commitLog) moveSegment(s *segment, dst Tier) ([]pendingReclaim, error) 
 		return nil, errors.Wrapf(errTierReadOnly, "tier %s is the move destination", dst.Name)
 	}
 
+	// A key is minted for an object that EXISTS, and the three are decided the
+	// same way. This used to mint all three unconditionally and then blank two of
+	// them back when the source had none — which states the rule as its own
+	// exception, twice, and left the second retraction bare while the first
+	// carried the reason. A sidecar the source does not have is not copied below,
+	// so a key minted for it would name an object nothing ever wrote.
+	//
+	// The index is the case worth naming: when it is absent from the store it is
+	// on local disk and stays there, and it describes positions in bytes the copy
+	// reproduces exactly — so it is still true of the destination object.
+	logKey, indexKey, blocksKey := newStoreKeys(s.BaseOffset)
 	moved := meta
-	moved.LogKey, moved.IndexKey, moved.BlocksKey = newStoreKeys(s.BaseOffset)
-	if meta.IndexKey == "" {
-		// Option 1: the index is on local disk and stays there. It describes
-		// positions in bytes the copy reproduces exactly, so it is still true of
-		// the destination object.
-		moved.IndexKey = ""
+	moved.LogKey = logKey
+	if meta.IndexKey != "" {
+		moved.IndexKey = indexKey
 	}
-	if meta.BlocksKey == "" {
-		moved.BlocksKey = ""
+	if meta.BlocksKey != "" {
+		moved.BlocksKey = blocksKey
 	}
 
 	if err := copyObjectAs(srcStore, dst.Store, meta.LogKey, moved.LogKey); err != nil {
