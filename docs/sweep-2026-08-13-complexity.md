@@ -1921,3 +1921,50 @@ to fetch. So the fixture has to build a log, offload it, close it, and reopen it
 through a cache; there is no shorter path to the only arrangement in which the bug
 is reachable, and the first draft of the test failed on its own precondition
 (`no offloaded segment with a table still to fetch`) rather than on the code.
+
+### #289: an allocation sized by the ceiling instead of the contents
+
+The `store.Size` thread ends at #288, but the question underneath it does not:
+*what else is allocated from a number that is not a measure of what is there?*
+Grepping `make([]byte, 0, ` answers it in one screen. Every site in the package
+sizes by `len(x)` — the thing itself — except one:
+
+```go
+out = make([]byte, 0, maxBytes)   // ReadMessageSet
+```
+
+`maxBytes` is a **ceiling on what the caller is willing to receive**. It carries
+no information about how much there is to send, and on the path this function
+exists for the two are as far apart as they get: a follower that has caught up to
+the head asks for its whole fetch size on every poll and is answered with the one
+frame that just landed. Megabytes reserved, hundreds of bytes returned, once per
+poll per stream.
+
+Not a correctness defect — nothing observable changes — which is exactly why it
+survived a package that has otherwise been swept twice. It is a *steady-state*
+cost on the replication path, and the fix is the bound that was already sitting
+there: `seg.Position() - start` is the most the loop could possibly append.
+
+Two details worth keeping.
+
+**Which measure.** `Position`, not `PhysicalSize` — the distinction #285 put in
+place. This bounds the RECORD STREAM the loop accumulates (logical framing bytes,
+which is what the scanner yields), not a resource; on a block-compressed segment
+`PhysicalSize` is the compressed object and would under-size the buffer by the
+compression ratio. Getting a *hint* wrong low is only a growth, so this would
+never have failed — which is precisely the kind of wrong that stays wrong.
+
+**How the tests see it.** The assertion is `cap()` of the returned slice, because
+`out` IS the allocation — `ReadMessageSet` returns it — so the number under test
+is observable exactly, with no sampling and no flake. That matters more for the
+second half than the first. The fix is a `min()` of two bounds and each side is
+separately droppable, but the *budget* side is invisible to `len()`: the
+truncation is performed by the loop's own `maxBytes` break, so a version that
+dropped the clamp entirely would still return the right bytes — after allocating
+the whole segment to do it. `len()` cannot tell those apart; `cap()` can.
+
+The counter-example, in this same repo, is `loadKeyDigest`: it verifies a CRC over
+the whole file first, then bounds *every* count it reads — `nHdrs > 64`,
+`keyedLen > len(body)`, `nUnkeyed > len(body)`, `nControl > len(body)` — before
+allocating from any of them. That is the discipline #288 was missing and #289 is
+the last place in the package that departs from.

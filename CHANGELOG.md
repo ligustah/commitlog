@@ -48,6 +48,17 @@ library from that fork onward.
 
 ### Fixed
 
+- **A replication read no longer allocates the caller's whole fetch budget.**
+  `ReadMessageSet` sized its buffer `make([]byte, 0, maxBytes)`. `maxBytes` is a
+  ceiling on what the caller will accept, not a measure of what there is to send,
+  and on the path this exists for — a follower caught up to the head — the two are
+  as far apart as they get: the fetch size is megabytes and the answer is the one
+  frame that just landed. It now takes the smaller of the budget and the segment's
+  remaining extent, so the reservation matches what the loop could actually
+  append. Nothing observable changes; this is a steady-state cost on the follower
+  path. `Position`, not `PhysicalSize` — this bounds the record stream, not a
+  resource.
+
 - **A block table's size is checked before it is allocated.**
   `(*segment).fetchBlockTable` read `store.Size(blocksKey)` and passed it
   straight to `make([]byte, size)`. Every length check in `decodeBlockTable`

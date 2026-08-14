@@ -1249,8 +1249,29 @@ func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
 	// replication fetch of a cold segment into one store request per frame.
 	// prefix_read.go carries this warning in full; this was the one site in the
 	// package that did not follow it.
+	// Sized by what is THERE, not by what was asked for. maxBytes is a ceiling
+	// the caller is willing to receive, and on the path this exists for — a
+	// follower tailing near the head — the two are nowhere near each other: the
+	// fetch size is megabytes and the answer is the one frame that just landed.
+	// Pre-allocating the ceiling allocates the whole fetch size on every call,
+	// including all the ones that return almost nothing.
+	//
+	// seg.Position(), not PhysicalSize: this bounds the RECORD STREAM this loop
+	// appends — logical framing bytes, which is what the scanner yields — and not
+	// a resource. On a block-compressed segment the physical figure is the
+	// compressed object and would under-size the buffer by the compression ratio.
+	//
+	// A hint, so being wrong low is only a growth: the loop appends the first
+	// frame whatever its size, so a frame past both bounds still fits by append.
+	hint := seg.Position() - start
+	if hint > int64(maxBytes) {
+		hint = int64(maxBytes)
+	}
+	if hint < 0 {
+		hint = 0 // make() panics on a negative capacity; a caller cannot reach this
+	}
 	var (
-		out = make([]byte, 0, maxBytes)
+		out = make([]byte, 0, hint)
 		ss  = newSegmentScannerCache(seg, newBlockCache())
 	)
 	defer ss.Close() // nolint: errcheck — read-only

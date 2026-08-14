@@ -1272,6 +1272,24 @@ run_guard "a block table size past the segment is refused" segment.go \
   '	if max := maxBlockTableBytes(s.physPosition); size > max+(1<<40) {' \
   '^TestABlockTablePastWhatTheSegmentCouldNeedIsNotAllocated$'
 
+# ReadMessageSet sizes its buffer by the segment's extent, not by the caller's
+# budget. Neutralized by handing make() the budget again, which is exactly the
+# code this replaced; `hint` stays read by the clamps above it, so it still
+# compiles. The test asserts cap() on the returned slice, which IS the allocation.
+run_guard "a replication read is sized by the segment, not the budget" commitlog.go \
+  '		out = make([]byte, 0, hint)' \
+  '		out = make([]byte, 0, maxBytes)' \
+  '^TestReadMessageSetSizesItsBufferToTheSegmentNotTheBudget$'
+
+# And the other side of the same min(): the budget must still bind when it is the
+# smaller bound. Neutralized by dropping the clamp, so the hint becomes the whole
+# segment -- harmless for the allocation, but it is the half that a fix written
+# only for the alloc test would lose.
+run_guard "a budget below the segment still binds" commitlog.go \
+  '	if hint > int64(maxBytes) {' \
+  '	if false {' \
+  '^TestReadMessageSetStillHonoursABudgetBelowTheSegment$'
+
 # An index object the store reports as EMPTY is refused. Neutralized to `< 0`,
 # which is the exact hole this closed: negative was already unreachable (the
 # ended-early check below catches it), so the mutation restores the state where
