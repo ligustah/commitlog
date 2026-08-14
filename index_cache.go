@@ -196,28 +196,62 @@ func (c *RemoteIndexCache) fetch(store SegmentStore, objectKey string, baseOffse
 	if err != nil {
 		return nil, errors.Wrap(err, "create cached index file")
 	}
+	// Every exit below leaves nothing behind: a partial download is not a smaller
+	// index, it is bytes newIndex would map and read as a whole one.
+	fail := func(err error, msg string) (*cachedIndex, error) {
+		f.Close()       // nolint: errcheck — the file is removed next
+		os.Remove(path) // nolint: errcheck — best effort on a failure path
+		return nil, errors.Wrap(err, msg)
+	}
 	buf := make([]byte, 64<<10)
-	for off := int64(0); off < size; {
+	off := int64(0)
+	for off < size {
 		n, rerr := store.ReadAt(objectKey, buf, off)
 		if n > 0 {
 			if _, werr := f.Write(buf[:n]); werr != nil {
-				f.Close()
-				os.Remove(path)
-				return nil, errors.Wrap(werr, "write cached index")
+				return fail(werr, "write cached index")
 			}
 			off += int64(n)
 		}
-		if rerr == io.EOF {
-			break
-		}
 		if rerr != nil {
-			f.Close()
-			os.Remove(path)
-			return nil, errors.Wrap(rerr, "read remote index")
+			// errors.Is, not ==: store is the CALLER's implementation, and the
+			// ReadAt contract on SegmentStore says its sentinels may be wrapped.
+			// That contract was written when the two sites in storeBacking were
+			// fixed; this is a third site that reads a caller's store and it kept
+			// the `==`. Wrapped, a store's ordinary end-of-object arrived here as
+			// an outage — so every cold seek into an offloaded segment failed with
+			// "read remote index", having already written and then deleted a cache
+			// file holding the whole index.
+			if errors.Is(rerr, io.EOF) {
+				break
+			}
+			return fail(rerr, "read remote index")
+		}
+		if n == 0 {
+			// (0, nil) violates io.ReaderAt, and the loop's only other response to
+			// it is to ask again forever — a seek that never returns and never
+			// says why. Named as the contract breach it is.
+			return fail(
+				errors.Errorf("store returned 0 bytes and no error at offset %d of %d",
+					off, size),
+				"read remote index")
 		}
 	}
+	// Short of what the store ITSELF reported one call earlier. Not the stale
+	// recorded size storeBacking tolerates — that size comes from a manifest
+	// written long before, while this one was just asked of the store — so the
+	// object is not the object Size described. Refused, because the alternative
+	// is a cache file shorter than the index it claims to be: newIndex maps
+	// whatever landed, every seek resolves against a truncated table, and the
+	// answers are wrong rather than missing.
+	if off != size {
+		return fail(
+			errors.Errorf("object ended after %d of the %d bytes the store reported",
+				off, size),
+			"read remote index")
+	}
 	if err := f.Close(); err != nil {
-		os.Remove(path)
+		os.Remove(path) // nolint: errcheck — best effort on a failure path
 		return nil, errors.Wrap(err, "close cached index")
 	}
 	idx, err := newIndex(options{path: path, baseOffset: baseOffset})

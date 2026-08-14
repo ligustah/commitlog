@@ -354,6 +354,31 @@ run_guard "index cache singleflight" index_cache.go \
   '		_ = done // BREAK: nothing to wait on, so both fetch' \
   '^TestRemoteIndexCache_ConcurrentAcquiresDownloadOnce$'
 
+# The download reads a CALLER's store, so its io.EOF may be wrapped -- which is
+# what the ReadAt contract on SegmentStore says, and what storeBacking's two sites
+# already honour. Neutralized back to the `==` this had: a store that wraps its
+# errors then fails every cold index fetch.
+run_guard "a cached index fetch accepts a wrapped end of object" index_cache.go \
+  '			if errors.Is(rerr, io.EOF) {' \
+  '			if rerr == io.EOF {' \
+  '^TestACachedIndexFetchAcceptsAWrappedEndOfObject$'
+
+# An object shorter than the size the store ITSELF just reported is refused, not
+# cached: newIndex maps whatever landed and reads it as a whole index, so a
+# truncated download answers seeks for offsets the segment holds with "not found".
+run_guard "a short remote index object is refused" index_cache.go \
+  '	if off != size {' \
+  '	if false {' \
+  '^TestACachedIndexShorterThanItsReportedSizeIsRefused$'
+
+# (0, nil) violates io.ReaderAt, and the loop's only other answer to it is to ask
+# again at the same offset forever. The test bounds the store so the
+# neutralization goes red instead of hanging.
+run_guard "a store returning nothing is not retried forever" index_cache.go \
+  '		if n == 0 {' \
+  '		if false {' \
+  '^TestAStoreReturningNothingIsRefusedRatherThanRetriedForever$'
+
 run_guard "reclamation pin" tier_state.go \
   'if e.pin != nil && e.pin.referenced() {' \
   'if e.pin != nil && e.pin.referenced() && false {' \

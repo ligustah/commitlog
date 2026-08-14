@@ -9,6 +9,21 @@ library from that fork onward.
 
 ### Fixed
 
+- **A store that wraps its errors could not have a cold index downloaded at
+  all.** `SegmentStore.ReadAt` documents that its sentinels may be wrapped and
+  that commitlog compares with `errors.Is` — a sentence added when the two sites
+  in `storeBacking` were fixed. `RemoteIndexCache.fetch` is a third site that
+  reads a caller's store and kept the `==`, so an ordinary end-of-object arrived
+  as an outage: every cold seek into an offloaded segment failed with "read
+  remote index", after writing the entire index to disk and then deleting it.
+
+  Two more holes in the same loop. An object that ends before the size the store
+  *itself* reported one call earlier now fails instead of leaving a short cache
+  file that `newIndex` maps and reads as a whole index — that produced "not
+  found" for offsets the segment holds, silently, from a fetch that reported
+  success. And a `(0, nil)` return, which `io.ReaderAt` forbids, is named as the
+  contract breach it is rather than retried at the same offset forever.
+
 - **Two concurrent seeks into the same cold segment could truncate each other's
   index cache file.** `RemoteIndexCache.acquire` downloads outside its lock, on
   purpose, and dealt with a concurrent download of the same key by keeping one
