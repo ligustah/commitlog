@@ -1968,3 +1968,51 @@ the whole file first, then bounds *every* count it reads — `nHdrs > 64`,
 `keyedLen > len(body)`, `nUnkeyed > len(body)`, `nControl > len(body)` — before
 allocating from any of them. That is the discipline #288 was missing and #289 is
 the last place in the package that departs from.
+
+### #288b: the rule that had been written four times and checked none
+
+The thing worth fixing after #288 is not the missing bound. It is that the bound
+was missing *and nothing could have said so*.
+
+Three readers had it. `readStoreDescriptor` refused a non-positive size and
+bounded the rest by `maxDescriptorBytes`; `readTierManifest` refused a
+non-positive one; `RemoteIndexCache.fetch` grew its own in #287. Each was written
+separately, for the same reason, by someone who had just been bitten by it —
+which is the definition of a rule that lives in people rather than in the repo.
+`fetchBlockTable` arrived later and simply did not get a copy. There was no
+decision to skip it and no place where the omission was visible.
+
+This is a shape the repo has already met twice, and both times the answer was the
+same. `atomicwrite.sh` exists because the rule "finish through the retrying
+wrapper, not the library" lived in a doc comment *listing the callers it covered*
+— and, as that script's header puts it, "a list written out by hand cannot see a
+caller that never arrives." `cowsegments.sh` exists for the same reason one layer
+over. So `hack/storesize.sh`:
+
+> per function, in non-test files: if a variable is assigned from a `.Size(` call
+> and later reaches `make(`, at least one comparison of that variable must stand
+> between the two.
+
+Three deliberate limits, each of which is the interesting part.
+
+**It checks the allocation, not the call.** `copyObjectAs` is the fifth reader of
+a store's `Size` and is entirely correct without a bound, because it never
+allocates from it — the size is handed to a streaming `Put`. A checker that
+policed the *call* would have to carry an exception list, and an exception list is
+the hand-written list this exists to replace.
+
+**It requires that a bound exists, not which one.** The right ceiling differs per
+reader: `maxDescriptorBytes` for one, a value derived from the segment's physical
+extent for another. A linter that tried to pick the ceiling would be wrong more
+often than the code it checks. Requiring the *shape* is the part that generalizes;
+guardcheck is what holds each specific bound in place.
+
+**It refuses to pass on an empty selection.** Finding zero size-to-allocation
+flows exits 1 as a HARNESS ERROR rather than 0 as a clean run — the lesson from
+the `go test -run` guard that selected nothing and read as a pass, and from
+`layercheck.sh`'s `| while` that set its flag in a subshell and reported every
+violation with exit 0. This script reads its findings from a file for exactly
+that second reason.
+
+It currently sees three flows and passes. The value is entirely in the fourth,
+which does not exist yet.

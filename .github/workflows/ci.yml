@@ -199,7 +199,18 @@ jobs:
       # the race, so it was safe by the schedule and not by the code.
       - name: cowsegments
         run: bash hack/cowsegments.sh
-      # The four scripts above and guardcheck decide whether this repo is
+      # A size a caller's store reported must be bounded before it becomes a
+      # length. Both ends are damage and only one is an error: a negative size is
+      # `makeslice: len out of range` — a panic, in the caller's process, out of a
+      # library — and a large one is allocated in full before a byte is parsed.
+      # The parser's own checks all run on the buffer AFTER it exists, so none of
+      # them can protect the number that made it. Three of the four readers had
+      # the check, each written separately by someone who had just been bitten;
+      # fetchBlockTable arrived later and had none, and nothing could notice,
+      # because a hand-copied rule is invisible to the copy nobody makes.
+      - name: storesize
+        run: bash hack/storesize.sh
+      # The five scripts above and guardcheck decide whether this repo is
       # correct, and until now nothing checked THEM. Every bug they have had was
       # shell semantics rather than logic: a `| while` setting its flag in a
       # subshell so layercheck printed every violation and exited 0; a substring

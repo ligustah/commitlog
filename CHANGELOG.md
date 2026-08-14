@@ -46,6 +46,16 @@ library from that fork onward.
   A tiered log with no local descriptor is `ErrNoLog` here, not an
   identity-less log.
 
+- **`hack/storesize.sh`** — CI now refuses a size a caller's store reported that
+  reaches an allocation without a bound standing between the two. The rule had
+  been followed by three of the four readers and written down nowhere, so the
+  fourth simply never got a copy and nothing could say so. It checks the
+  allocation rather than the `Size()` call, because `copyObjectAs` reads a size
+  and correctly allocates nothing from it — and an exception list would be the
+  hand-written list this replaces. It requires that *a* bound exists, not which
+  one; the right ceiling differs per reader, and guardcheck holds each specific
+  bound in place. Finding nothing to check exits non-zero.
+
 ### Fixed
 
 - **A replication read no longer allocates the caller's whole fetch budget.**
