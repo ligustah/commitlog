@@ -843,6 +843,38 @@ downloads — deleting a cost is not the same as deleting the work, and a test t
 only checks for zeros would certify a version that skipped the rebuild
 everywhere and opened every segment with an empty index.
 
+## Negatives from the configuration-coverage lens, recorded
+
+Having found one cost assertion scoped to a configuration its branch cannot
+reach, the obvious next question is how many more there are. Four checks, all
+negative — worth writing down so the next sweep starts somewhere else:
+
+- **Every `Options` field is set by some test.** A mechanical pass over the 25
+  fields found two apparent gaps, `PrefixReadConcurrency` and
+  `PrefixReadTierConcurrency`; both are set as `l.Options.X = …` rather than in a
+  struct literal, which is what the scan matched. No field is untouched.
+- **The cache-less tier is not otherwise under-covered.** 36 test files configure
+  a tier and only nine involve a `RemoteIndexCache`, so option 1 is the *default*
+  in the suite as well as in deployment. The open-cost assertion was the outlier,
+  not the pattern.
+- **`open_block_table_test.go` is the model for this kind of test.** Its zero
+  ("reopening walks no block headers") is paired with a segment-count floor, and
+  three sibling tests assert the walk is `Positive` when the sidecar is absent,
+  truncated, corrupt, or describes a different file. It even asserts *while the
+  log is still open*, because closing seals every segment and writes the sidecar
+  anyway — so a check afterwards would pass against code that persists nothing.
+  Both directions, every time.
+- **No pre-v1 compatibility code is left.** A scan for migration/legacy/backcompat
+  language across non-test Go returns nine hits, all of them the word "backwards"
+  used about offsets or loop direction, plus two comments stating outright that
+  there is nothing to migrate. Nothing to clean up here.
+
+The complexity ranking was also re-run (branch count rather than line count, so a
+different ordering): `compact`, `mergeDigests`, `open`, `cleanSegment`,
+`TruncateBefore` head the list, and all five were read in the 2026-08-14 size
+pass and found to be carrying their reasons. Two independent rankings reaching
+the same functions and the same verdict is the signal that this lens is spent.
+
 ## Follow-ups this pass opened
 
 - ~~**`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that
