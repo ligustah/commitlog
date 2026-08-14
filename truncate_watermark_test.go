@@ -22,7 +22,7 @@ import (
 // reader fails to build; and the log stays that way until it is reopened, where
 // a checkpoint above the log is clamped. So the log recovered from this on
 // restart and never in flight, and nothing was raised at the call that caused it.
-func TestTruncatingBelowTheWatermarkClampsIt(t *testing.T) {
+func TestTruncateBelowTheWatermarkClampsIt(t *testing.T) {
 	dir := tempDir(t)
 	l, cleanup := setupWithOptions(t, Options{
 		Path:            dir,
@@ -69,7 +69,7 @@ func TestTruncatingBelowTheWatermarkClampsIt(t *testing.T) {
 // truncation. Cutting above the watermark removes only uncommitted records —
 // the ordinary case, and the one durable_streams' open path uses as
 // Truncate(HW+1) — so the watermark is still true and must be left alone.
-func TestTruncatingAboveTheWatermarkLeavesItAlone(t *testing.T) {
+func TestTruncateAboveTheWatermarkLeavesItAlone(t *testing.T) {
 	dir := tempDir(t)
 	l, cleanup := setupWithOptions(t, Options{
 		Path:            dir,

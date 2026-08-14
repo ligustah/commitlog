@@ -136,7 +136,7 @@ func TestTruncateRacingAppendsLosesNoAcknowledgedRecord(t *testing.T) {
 			"with an append, not routinely", failures, writers*each)
 }
 
-// The same convoy TestReadsAreServedWhileATruncationRuns covers for
+// The same convoy TestReadsAreServedWhileATruncateBeforeRuns covers for
 // TruncateBefore, on the other truncation.
 //
 // Truncate held l.mu — the lock every reader takes through segmentsSnapshot() — across

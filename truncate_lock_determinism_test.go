@@ -163,7 +163,7 @@ func TestATruncateUnlinksWithTheSegmentLockAvailable(t *testing.T) {
 // same observation as the Truncate case above. Its unlinks run AFTER the publish
 // step, which is why the neutralization can hold the lock to the end of the call
 // without deadlocking on it.
-func TestATruncationUnlinksWithTheSegmentLockAvailable(t *testing.T) {
+func TestATruncateBeforeUnlinksWithTheSegmentLockAvailable(t *testing.T) {
 	hook := &storeHook{}
 	l, last := hookedTieredLog(t, hook)
 
@@ -206,7 +206,7 @@ func TestATruncationUnlinksWithTheSegmentLockAvailable(t *testing.T) {
 // Here the append happens FROM INSIDE the rewrite. The boundary is offloaded, so
 // scanning it reads through the hook, and the hook appends enough to roll. That
 // is the window, entered deterministically rather than raced for.
-func TestATruncationCarriesASegmentRolledDuringItsRewrite(t *testing.T) {
+func TestATruncateBeforeCarriesASegmentRolledDuringItsRewrite(t *testing.T) {
 	hook := &storeHook{}
 	l, last := hookedTieredLog(t, hook)
 

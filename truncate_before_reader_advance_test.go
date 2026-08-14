@@ -35,7 +35,7 @@ import (
 // all-under-l.mu ordering the source was always closed before the trim became
 // reachable, and the reader took the ErrSegmentReplaced path instead, which
 // re-resolves by OFFSET and lands correctly.
-func TestAReadAcrossATruncationIsMonotonic(t *testing.T) {
+func TestAReadAcrossATruncateBeforeIsMonotonic(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             tempDir(t),
 		MaxSegmentBytes:  160, // a handful of records per segment; roll constantly

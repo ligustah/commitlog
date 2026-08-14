@@ -24,7 +24,7 @@ import (
 // that starts during the truncation cannot finish until it ends, so essentially
 // none complete. It does not matter how long the truncation takes, which is what
 // keeps this from being a timing test.
-func TestReadsAreServedWhileATruncationRuns(t *testing.T) {
+func TestReadsAreServedWhileATruncateBeforeRuns(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             tempDir(t),
 		MaxSegmentBytes:  128, // many small segments, so there is real work to do
@@ -136,7 +136,7 @@ func TestReadsAreServedWhileATruncationRuns(t *testing.T) {
 // the live list, and the truncation must publish a list that still has it. It
 // used to be impossible to lose — the whole call held the write lock — and is
 // the first thing releasing the lock puts at risk.
-func TestATruncationDoesNotLoseASegmentRolledUnderIt(t *testing.T) {
+func TestATruncateBeforeDoesNotLoseASegmentRolledUnderIt(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:             tempDir(t),
 		MaxSegmentBytes:  128,

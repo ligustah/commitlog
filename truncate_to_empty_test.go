@@ -12,7 +12,7 @@ import (
 
 // Truncating a fully committed log all the way to EMPTY, and using it after.
 //
-// TestTruncatingBelowTheWatermarkClampsIt covers a cut that leaves records
+// TestTruncateBelowTheWatermarkClampsIt covers a cut that leaves records
 // behind: the watermark lands on a real offset, in a segment that still exists,
 // and everything resolves. This is the same path taken to its limit, where the
 // clamp has no offset to land on and the watermark becomes -1.
@@ -31,7 +31,7 @@ import (
 // Reaching it by TRUNCATION rather than by starting fresh is what is new, and
 // the difference that could matter is that the segment files, the epoch cache
 // and the checkpoint have all been through a life before arriving there.
-func TestTruncatingToEmptyLeavesTheLogUsable(t *testing.T) {
+func TestTruncateToEmptyLeavesTheLogUsable(t *testing.T) {
 	dir := tempDir(t)
 	l, cleanup := setupWithOptions(t, Options{
 		Path:            dir,

@@ -1010,3 +1010,70 @@ place where nothing mechanical is looking yet.
   is the state a *third* party (`Reader.readOne`) asks them about. A base that
   had absorbed the union of their fields would have made the two types look
   interchangeable at exactly the boundary where they are not.
+
+## The duplicate scan again, this time whole functions and including the tests
+
+The earlier scan hashed *line windows* over non-test files. Two things it could
+not see: a duplicate whose two copies drifted by a token per line, and anything
+in the tests — which is where transcription actually lives, because a new test is
+usually a copy of its neighbour.
+
+So: every function body in the tree, normalized (string literals to `S`, numbers
+to `N`, comments dropped), reduced to a set of 3-line shingles, every pair scored
+by Jaccard overlap. 901 functions, 229 files.
+
+**The production half came back empty**, and that is the finding worth recording.
+One pair over the 0.45 floor — `digestDecoder.uvarint` and `.varint`, twelve
+lines each, differing in the one `binary.` call that is their entire reason to
+exist. Merging those behind a bool parameter would cost a branch on every varint
+in a digest parse to save six lines. Left alone. After the twenty-odd transcription
+findings taken this sweep, the non-test tree no longer has a mechanical one in
+it.
+
+**The test half returned 42 pairs, and 40 of them are correct.** A positive and a
+negative case of one rule *should* be near-identical — that similarity is what
+makes the one differing line legible. `TestDeleteCleanerBytes` /
+`TestDeleteCleanerBytesMessages`, the two leader-epoch checkpoint refusals, the
+committed/uncommitted reader pairs: all of them read better as twins than they
+would factored into a table.
+
+### What it did catch: three word-forms of one verb, two different operations
+
+`Truncate` drops the log's SUFFIX. `TruncateBefore` drops its PREFIX. They are
+different code paths with different lock disciplines — `Truncate` holds
+`appendMu` throughout on purpose, `TruncateBefore` deliberately does not. Their
+tests were named:
+
+| name form | operation |
+|---|---|
+| `TestATruncate…`, `TestTruncateBefore…` | as written |
+| `TestTruncating…` (3 tests) | `Truncate` |
+| `TestATruncation…` (5 tests) | `TruncateBefore` |
+
+Nothing states that mapping, and it is not guessable — "a truncation" reads more
+naturally as `Truncate` than as `TruncateBefore`, which is the wrong way round.
+The sharpest instance: `TestATruncateUnlinksWithTheSegmentLockAvailable` and
+`TestATruncationUnlinksWithTheSegmentLockAvailable` sit 37 lines apart in
+`truncate_lock_determinism_test.go`, drive different methods, and differ by two
+letters. Both are correct today. The hazard is the next edit — this repo has
+already shipped three tests named for a fix that asserted the wrong half of it,
+and two adjacent near-homographs are how a copy-paste gets there.
+
+Fixed by one rule, applied to all eight: **the test's name states the method it
+calls.** `TestATruncationUnlinksWithTheSegmentLockAvailable` becomes
+`TestATruncateBeforeUnlinks…`, `TestTruncatingBelowTheWatermarkClampsIt` becomes
+`TestTruncateBelow…`.
+
+Two guardcheck anchors move with them, and this is the part that had to be
+checked rather than assumed: the anchors are `^Test…$` regexes, so a rename that
+missed one leaves the guard selecting *nothing*. That direction is safe here —
+an empty selection means the mutated build "passes", which `run_guard` reports as
+NOT COVERED and goes red — but only because `run_guard` requires a failure. The
+same mistake in a check that requires a *pass* is the silent one already recorded
+under "an empty test selection is a pass". Verified by `go test -list` against
+each renamed anchor, not by reading the diff.
+
+No script was added to hold the rule. "A test name must name the method it
+drives" is not mechanically checkable in general, and a check that special-cased
+the word "truncation" would be a guard against one instance of a class — the
+thing this sweep keeps deleting.

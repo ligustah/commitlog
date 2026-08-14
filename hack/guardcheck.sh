@@ -500,7 +500,7 @@ run_guard "truncate clamps the watermark" commitlog.go \
 		slog.Warn("commitlog: truncation cut below the high watermark; clamping",' \
   '	if newest := activeSegment.NextOffset() - 1; l.hw > newest && false {
 		slog.Warn("commitlog: truncation cut below the high watermark; clamping",' \
-  '^TestTruncatingBelowTheWatermarkClampsIt$'
+  '^TestTruncateBelowTheWatermarkClampsIt$'
 
 # A clean raises the epoch cache's floor, and that is the whole of what it does
 # to it. Note which test this is registered against: removing the call leaves
@@ -543,17 +543,17 @@ run_guard "reopen resolves segment overlaps" commitlog.go   '	if err := l.resolv
 # store's Delete. It used to assert a read RATE against a baseline, which made
 # coverage depend on how loaded the machine was -- see the header comment in
 # truncate_lock_determinism_test.go.
-run_guard "truncation unlinks outside the lock" commitlog.go   '	for i := 0; i < boundaryIdx; i++ {
+run_guard "TruncateBefore unlinks outside the lock" commitlog.go   '	for i := 0; i < boundaryIdx; i++ {
 		if err := oldSegments[i].Delete(); err != nil {'   '	l.mu.Lock()
 	defer l.mu.Unlock()
 	for i := 0; i < boundaryIdx; i++ {
-		if err := oldSegments[i].Delete(); err != nil {'   '^TestATruncationUnlinksWithTheSegmentLockAvailable$'
+		if err := oldSegments[i].Delete(); err != nil {'   '^TestATruncateBeforeUnlinksWithTheSegmentLockAvailable$'
 
 # An append can roll while the truncation has the lock down, and the surviving
 # list it publishes has to carry what split() appended. Losing it drops records
 # that were acknowledged, silently. The test enters that window from INSIDE the
 # boundary rewrite rather than racing for it.
-run_guard "truncation carries segments rolled under it" commitlog.go   '	if len(newSegments) > len(oldSegments) {'   '	if false {'   '^TestATruncationCarriesASegmentRolledDuringItsRewrite$'
+run_guard "TruncateBefore carries segments rolled under it" commitlog.go   '	if len(newSegments) > len(oldSegments) {'   '	if false {'   '^TestATruncateBeforeCarriesASegmentRolledDuringItsRewrite$'
 
 # Truncate unlinks with l.mu released, and on a follower reconciling after an
 # unclean election the unlinks are most of the call. The neutralization takes the
