@@ -25,6 +25,23 @@ const (
 	// batch does not compress smaller than raw).
 	None Codec = 0
 	// Snappy is fast with a modest, batch-size-insensitive ratio.
+	//
+	// Backed by github.com/golang/snappy, which is the only reason this module
+	// depends on it — klauspost/compress (already here for S2 and Zstd) ships a
+	// drop-in snappy package, so this reads like a duplicate implementation of
+	// one format waiting to be collapsed. It was measured rather than assumed,
+	// and the swap loses on both axes: over sampleMessageSet batches of 10 to
+	// 5000 the drop-in compresses 1.4%-16.2% LARGER and encodes about 2x
+	// slower (decode is a wash). That is the wrong trade for the codec whose
+	// entire job is a cheap ratio, in exchange for dropping one frozen
+	// zero-dependency module.
+	//
+	// The strictness difference is NOT a reason either way, though it looks
+	// like one: golang/snappy refuses an S2 block where both klauspost
+	// decoders accept it, but nothing rests on that refusal. A block header
+	// carries no checksum, so a flipped codec byte reaches the decoder
+	// unverified — and is then caught by decodeBlock's length check against
+	// the header's uncompressedLen, with the per-record frame CRCs under it.
 	Snappy Codec = 1
 	// S2 is a faster, higher-ratio Snappy successor.
 	S2 Codec = 2

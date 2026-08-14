@@ -7,6 +7,25 @@ library from that fork onward.
 
 ## Unreleased
 
+### Changed
+
+- Dropped the `github.com/dustin/go-humanize` dependency. It was in `go.mod`
+  for exactly one call — `english.Plural` in a leader-epoch parse error, so
+  that a count could say "entries" instead of "entrys". The count there is
+  always plural-or-zero, so the message reads identically without it.
+
+  Found by a dependency-necessity pass over `go.mod`. The same pass looked hard
+  at the two snappy implementations this module links (`golang/snappy` behind
+  the Snappy codec, and the drop-in inside `klauspost/compress`, which is
+  already here for S2 and Zstd) and **kept both**, which is worth recording
+  because the tidy-up looks obviously right: measured over `sampleMessageSet`
+  batches, the drop-in compresses 1.4%–16.2% larger and encodes ~2x slower.
+  Its stricter sibling refuses an S2 block where the drop-in accepts one, but
+  that is *not* the reason — a block header has no checksum, yet `decodeBlock`
+  already refuses a length that disagrees with the header and the frame CRCs
+  sit under that, so the refusal is redundant. The measurement now lives on the
+  `Snappy` constant, where the tidy-up would start.
+
 ### Fixed
 
 - Four error messages named no subject. `"stat file failed"` appeared three

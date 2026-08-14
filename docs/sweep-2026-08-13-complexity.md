@@ -1182,3 +1182,72 @@ it falsifies** — earlier conditions in an ordered check will mask it otherwise
 The isolations that worked: cut at the boundary segment's own base (deletion
 proceeds, rewrites go to 0 → fails on the rewrite floor at 120s), and stop
 announcing the trim window (everything proceeds, overlaps go to 0).
+
+## A lens not yet run: is every module in go.mod carrying its weight?
+
+The near-duplicate scans had gone dry on the production tree, so this pass
+turned the same question on the dependency list instead of the source: not "is
+this code duplicated" but "is this *module* here for enough".
+
+### One module for one call
+
+`github.com/dustin/go-humanize` was in `go.mod` for exactly one call site —
+`english.Plural(numEntries, "entry", "")` in a leader-epoch parse error. A whole
+module, its `go.sum` block, and a supply-chain surface, so that one error string
+could say "entries" instead of "entrys". Replaced with
+
+```go
+return nil, fmt.Errorf("expected %d entries, got %d", numEntries, len(epochOffsets))
+```
+
+which is not a workaround for losing pluralisation: the count is *always*
+plural-or-zero here, and the message reads the same for every value it can
+take. Dropped from `go.mod` and `go.sum`.
+
+### Two implementations of one format — measured, and kept
+
+The louder finding was that this module links **two snappy implementations**:
+`github.com/golang/snappy` behind the `Snappy` codec, and
+`klauspost/compress` (already present for S2 and Zstd), which ships a drop-in
+`snappy` package. One format, two implementations, one of them removable
+without touching the on-disk layout. That is the shape this sweep exists to
+delete.
+
+It survives, because the argument for removing it is the one this sweep keeps
+being wrong about — a plausible cost rather than a measured one. Three
+questions, in the order they had to be asked:
+
+**Does the swap cost a corruption cross-check?** `golang/snappy` *refuses* an
+S2 block; `s2.Decode` and `klauspost/compress/snappy` both accept it. So the
+drop-in is strictly the more permissive decoder, and the strictness looks
+load-bearing — a block header carries **no checksum**, so a flipped codec byte
+reaches the decoder entirely unverified.
+
+It is not load-bearing. `decodeBlock` compares the decompressed length against
+the header's `uncompressedLen` and refuses a mismatch, and the per-record frame
+CRCs sit under that. A lenient decoder that reads an S2 block labelled Snappy
+produces the *correct* bytes at the correct length — a silent repair, not a
+silent corruption — and one that produces different bytes is caught twice over.
+**The cross-check is redundant, and is not a reason to keep the dependency.**
+
+**Then what does the swap actually cost?** Ratio and encode time, which is the
+reverse of the usual klauspost result and the reason this needed measuring at
+all. Over `sampleMessageSet` batches:
+
+| batch | raw | golang/snappy | klauspost | size delta | encode g → k |
+|---|---|---|---|---|---|
+| 10 | 5430 | 633 | 642 | +1.4% | ~0 → 5.1µs |
+| 100 | 54480 | 3732 | 4130 | +10.7% | 8.4µs → 22.5µs |
+| 1000 | 546880 | 37421 | 39114 | +4.5% | 85µs → 175µs |
+| 5000 | 2746880 | 186414 | 216543 | **+16.2%** | 401µs → 776µs |
+
+Decode is a wash (slightly faster at the large sizes). So the swap pays up to
+16% more bytes on disk and roughly 2x the encode time, on the codec whose
+entire purpose is a cheap ratio, to remove one frozen zero-dependency module.
+
+**Verdict: keep it, and say so where the tidy-up would start.** The measurement
+now lives in a comment on the `Snappy` codec constant, not only here — a future
+reader meets "two snappy implementations" at the import and needs the answer
+there. Recorded as a negative so the next sweep does not re-open it.
+
+`natefinch/atomic` was checked in the same pass and is legitimately used.

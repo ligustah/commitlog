@@ -14,8 +14,6 @@ import (
 	"sync"
 
 	pkgErrors "github.com/pkg/errors"
-
-	"github.com/dustin/go-humanize/english"
 )
 
 const (
@@ -415,8 +413,8 @@ func readLeaderEpochOffsets(file io.Reader) ([]*epochOffset, error) {
 	}
 
 	if numEntries != len(epochOffsets) {
-		return nil, fmt.Errorf("expected %s, got %d",
-			english.Plural(numEntries, "entry", ""), len(epochOffsets))
+		return nil, fmt.Errorf("expected %d entries, got %d",
+			numEntries, len(epochOffsets))
 	}
 
 	return epochOffsets, nil
