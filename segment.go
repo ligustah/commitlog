@@ -926,21 +926,23 @@ func (s *segment) setupIndex() (err error) {
 	if lastEntry == nil {
 		return nil
 	}
+	// The FIRST entry is the segment's first message under both layouts: a raw
+	// index has one entry per record, and a sparse one anchors each block at its
+	// first message, so entry 0 anchors the first block AT that message. Read
+	// once, above the split, because only the LAST offset is layout-dependent —
+	// each branch used to end with its own copy of these five lines.
+	var firstEntry entry
+	if err := s.Index.ReadEntryAtFileOffset(&firstEntry, 0); err != nil {
+		return err
+	}
+	s.firstOffset = firstEntry.Offset
+	s.firstWriteTime = firstEntry.Timestamp
 	if s.blockMode {
-		// The sparse index anchors each block at its first message, so the
-		// index's first/last entries are block anchors, not the segment's
-		// first/last messages. firstOffset/firstWriteTime come from the first
-		// block's anchor directly, but lastOffset/lastWriteTime require
-		// scanning the final block's frames to its last message. The log
-		// (blocks, rebuilt by scanBlocks) is the source of truth for the
-		// physical extent; the last anchor's position marks the final block's
-		// logical start.
-		var firstEntry entry
-		if err := s.Index.ReadEntryAtFileOffset(&firstEntry, 0); err != nil {
-			return err
-		}
-		s.firstOffset = firstEntry.Offset
-		s.firstWriteTime = firstEntry.Timestamp
+		// The last anchor is a block's FIRST message, not the segment's last, so
+		// lastOffset/lastWriteTime require scanning the final block's frames
+		// through to its last message. The log (blocks, rebuilt by scanBlocks) is
+		// the source of truth for the physical extent; the last anchor's position
+		// marks the final block's logical start.
 		last, err := s.lastFrameInBlock(lastEntry.Position)
 		if err != nil {
 			return errors.Wrap(err, "recover last offset failed")
@@ -951,13 +953,6 @@ func (s *segment) setupIndex() (err error) {
 	}
 	s.lastOffset = lastEntry.Offset
 	s.lastWriteTime = lastEntry.Timestamp
-	// Read the first entry to get firstOffset and firstWriteTime.
-	var firstEntry entry
-	if err := s.Index.ReadEntryAtFileOffset(&firstEntry, 0); err != nil {
-		return err
-	}
-	s.firstOffset = firstEntry.Offset
-	s.firstWriteTime = firstEntry.Timestamp
 	return nil
 }
 

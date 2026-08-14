@@ -73,6 +73,24 @@ library from that fork onward.
 
 ### Changed
 
+- `newMessageSetFromProto` maintained a running byte counter, advanced by six
+  hand-written `+=` lines that transcribed the frame header's field widths a
+  second time, in order to compute one thing: where in the buffer each record
+  starts. The buffer already knows, and the header checksum three lines below
+  already asked it. The counter is gone; `buf.Len()` answers directly. A width
+  changed in the encoder and not in the counter would have moved every index
+  entry's `Position` without changing a byte on disk. No behaviour change.
+
+- `setupIndex` ended its block-mode and raw branches with the same five lines —
+  read index entry 0, assign `firstOffset` and `firstWriteTime` — when only the
+  *last* offset is layout-dependent. Entry 0 is the segment's first message
+  under both layouts, so that read now happens once, above the split. No
+  behaviour change.
+
+- `digestHits` spelled its `[from, bound]` window test at three sites, the third
+  of them about a differently named variable, with nothing comparing the copies.
+  One `inWindow` closure now. No behaviour change.
+
 - `readMessage` and `readMessageMetadata` shared a verbatim copy of the frame
   header read, CRC verification and field extraction, which had already drifted
   by one error message. Both now call one `readFrameHeader`. No behaviour

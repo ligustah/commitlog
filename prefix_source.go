@@ -153,6 +153,13 @@ func digestHits(d *keyDigest, spec readSpec, from, bound int64) ([]int64, error)
 		end  = prefixUpperBound(spec.keyPrefix)
 		hits []int64
 	)
+	// The read's window, written once. It was spelled out at all three sites
+	// below — twice over keyed records and once over control offsets, where the
+	// third copy says the same thing about a differently named variable and
+	// nothing compares it to the other two. A bound of -1 means unbounded.
+	inWindow := func(off int64) bool {
+		return off >= from && (bound < 0 || off <= bound)
+	}
 	for it.next() {
 		// Sorted by key, so once past the prefix range nothing later re-enters
 		// it. The section streams, so keys BELOW the prefix are still decoded
@@ -169,10 +176,7 @@ func digestHits(d *keyDigest, spec readSpec, from, bound int64) ([]int64, error)
 			// lookahead, which is why this streams and can follow.
 			best := int64(-1)
 			for _, r := range it.recs {
-				if r.offset < from || (bound >= 0 && r.offset > bound) {
-					continue
-				}
-				if r.offset > best {
+				if inWindow(r.offset) && r.offset > best {
 					best = r.offset
 				}
 			}
@@ -182,10 +186,9 @@ func digestHits(d *keyDigest, spec readSpec, from, bound int64) ([]int64, error)
 			continue
 		}
 		for _, r := range it.recs {
-			if r.offset < from || (bound >= 0 && r.offset > bound) {
-				continue
+			if inWindow(r.offset) {
+				hits = append(hits, r.offset)
 			}
-			hits = append(hits, r.offset)
 		}
 	}
 	if err := it.err(); err != nil {
@@ -193,10 +196,9 @@ func digestHits(d *keyDigest, spec readSpec, from, bound int64) ([]int64, error)
 	}
 	if spec.includeControl {
 		for _, off := range d.control {
-			if off < from || (bound >= 0 && off > bound) {
-				continue
+			if inWindow(off) {
+				hits = append(hits, off)
 			}
-			hits = append(hits, off)
 		}
 	}
 	sort.Slice(hits, func(i, j int) bool { return hits[i] < hits[j] })

@@ -88,7 +88,6 @@ func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message) (
 	var (
 		buf     = new(bytes.Buffer)
 		entries = make([]*entry, len(msgs))
-		n       int32
 	)
 	for i, m := range msgs {
 		data, err := encode(m)
@@ -96,27 +95,31 @@ func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message) (
 			return nil, nil, errors.Wrapf(err, "encode message at index %d", i)
 		}
 		var (
-			len    = int32(len(data))
-			relPos = int64(n)
+			size = int32(len(data))
+			// Where this record starts, asked of the buffer rather than tracked
+			// beside it. This used to be a running int32 advanced by a `+= 8`,
+			// `+= 8`, `+= 8`, `+= 4`, `+= 4`, `+= size` after each write below —
+			// six lines transcribing the frame header's field widths a second
+			// time, whose only reader was this one expression. A width that
+			// changed in the encoder and not in the counter would have moved
+			// every entry's Position without changing a byte on disk. The header
+			// checksum a few lines down already asks buf.Len() the same way.
+			relPos = int64(buf.Len())
 			offset = int64(i) + baseOffset
 		)
 
 		if err := binary.Write(buf, encoding, uint64(offset)); err != nil {
 			return nil, nil, err
 		}
-		n += 8
 		if err := binary.Write(buf, encoding, uint64(m.Timestamp)); err != nil {
 			return nil, nil, err
 		}
-		n += 8
 		if err := binary.Write(buf, encoding, m.LeaderEpoch); err != nil {
 			return nil, nil, err
 		}
-		n += 8
-		if err := binary.Write(buf, encoding, uint32(len)); err != nil {
+		if err := binary.Write(buf, encoding, uint32(size)); err != nil {
 			return nil, nil, err
 		}
-		n += 4
 		// The header's own checksum, over the 28 bytes just written. Taken from
 		// the buffer rather than recomputed from the locals, so it is a checksum
 		// of what will actually be on disk.
@@ -125,17 +128,15 @@ func newMessageSetFromProto(baseOffset, basePos int64, msgs []*Message) (
 		if err := binary.Write(buf, encoding, headerCrc(framed[hdrStart:])); err != nil {
 			return nil, nil, err
 		}
-		n += 4
 		if _, err := buf.Write(data); err != nil {
 			return nil, nil, err
 		}
-		n += len
 		entries[i] = &entry{
 			Offset:      offset,
 			Timestamp:   m.Timestamp,
 			LeaderEpoch: m.LeaderEpoch,
 			Position:    basePos + relPos,
-			Size:        len + msgSetHeaderLen,
+			Size:        size + msgSetHeaderLen,
 		}
 	}
 	return buf.Bytes(), entries, nil
