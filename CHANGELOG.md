@@ -73,6 +73,15 @@ library from that fork onward.
 
 ### Changed
 
+- Two comments still described the frame header as unchecksummed, one of them
+  contradicting a paragraph four lines above it in the same block. The header
+  has carried its own CRC since it grew one, verified before any field is read,
+  so `readOne`'s segment-range cross-check is no longer the damage check its
+  comment claimed — it survives because a header that passes its own checksum
+  still says nothing about *where* it was found (a stale index position, a
+  half-installed `Replace`, a seek into the neighbouring file). Documentation
+  only.
+
 - `newMessageSetFromProto` maintained a running byte counter, advanced by six
   hand-written `+=` lines that transcribed the frame header's field widths a
   second time, in order to compute one thing: where in the buffer each record

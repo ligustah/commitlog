@@ -47,9 +47,12 @@ import (
 // segment it was found in.
 //
 // What that check can and cannot do: it catches an offset outside the segment's
-// range, not one swapped with another record INSIDE it. The header carries no
-// checksum to make that detectable and adding one would change the format, so
-// the remaining exposure is stated rather than implied.
+// range, not one swapped with another record INSIDE it. That second case is the
+// one the header CRC closed — the paragraph above is the newer half of this same
+// comment, and this sentence used to end by stating the in-range swap as a
+// remaining exposure, which it stopped being when the format grew the checksum.
+// Both halves are kept because the SPLIT is the point: the CRC answers damage,
+// the bounds check answers a frame read from the wrong place.
 func FuzzCorruptFrameHeaderIsNeverServedAsTruth(f *testing.F) {
 
 	// Seeds: (which frame, which byte of its 28-byte header, xor mask).

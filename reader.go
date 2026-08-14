@@ -237,18 +237,21 @@ RETRY:
 			return nil, 0, 0, 0, err
 		}
 	}
-	// The frame header is not covered by any checksum — the CRC spans the
-	// message payload only — so a damaged offset field is served as truth unless
-	// something cross-checks it. A record must carry an offset belonging to the
-	// segment it was found in; anything else is a fabricated identity, and a
-	// caller that resumes from a reported offset resumes from nowhere.
+	// A record must carry an offset belonging to the segment it was found in;
+	// anything else is a fabricated identity, and a caller that resumes from a
+	// reported offset resumes from nowhere.
+	//
+	// This is NOT the damage check any more — the header carries its own CRC now
+	// (headerCrcPos), verified in readFrameHeader before a single field is used,
+	// so a corrupted offset fails there and never reaches here. It was written
+	// when that CRC did not exist, and the reason it survived the CRC is the
+	// residue: a header that is self-consistent still says nothing about WHERE it
+	// was found. A stale index position, a partially installed Replace, a seek
+	// into the neighbouring file — each hands back a frame that passes its own
+	// checksum and belongs to another segment. The CRC cannot see that, because
+	// nothing is damaged.
 	//
 	// Bounds are taken AFTER the read, deliberately: see segmentBounds.
-	//
-	// This cannot replace the CRC and does not try to. It catches an offset
-	// outside the segment's range, not one swapped with another record inside it
-	// — the header has no checksum to make that detectable, and adding one would
-	// change the format.
 	if base, next, ok := r.ctxReader.segmentBounds(); ok && (offset < base || offset >= next) {
 		return nil, 0, 0, 0, pkgErrors.Wrapf(ErrCorruptRecord,
 			"record claims offset %d, outside its segment's range [%d, %d)",
