@@ -16,11 +16,10 @@ is `v1.9.0`, and `v1.9.0`'s `go.mod` names a different module — so the resolut
 fails outright rather than falling back to the next candidate. Nobody could add
 this module without knowing to pin an explicit `v0.x`.
 
-Deleting them was chosen on 2026-08-14, and at the time of writing the deletion
-itself is still outstanding — the record below was written first, on purpose, so
-that the destructive step is the reversible one. None of the fifteen has a GitHub
-release attached and all fifteen are lightweight tags, so each is exactly a name
-pointing at a commit. The names and the commits they point at:
+They were deleted on 2026-08-14. The record below was written *first*, on
+purpose, so that the destructive step was the reversible one. None of the fifteen
+had a GitHub release attached and all fifteen were lightweight tags, so each was
+exactly a name pointing at a commit. The names and the commits they pointed at:
 
 | tag | commit |
 | --- | --- |
@@ -46,27 +45,43 @@ The commits themselves are upstream's and are not affected — they are still in
 `liftbridge-io/liftbridge`, and the ones on this fork's own history are still
 reachable from `master`.
 
-## What deleting them does and does not fix
+## What it fixed, measured rather than reasoned
 
-It fixes the repository, which is the part this project controls: `git ls-remote`
-stops offering a `v1.x`, and a resolver reading tags directly — `GOPROXY=direct`,
-or a `replace` against a checkout — sees `v0.88.0` as the highest.
+The expectation going in was that the deletion would fix the repository and
+**not** `proxy.golang.org` — the public proxy is append-only by design, so a
+version it has served stays served, and a `retract` directive published at a
+`v1.10.0` looked like the only thing that could reach proxy users.
 
-It does **not** retroactively fix `proxy.golang.org`. The public proxy is
-append-only by design: a version it has already served stays served, so that a
-build that once resolved keeps resolving. The fifteen `v1.x` versions are in its
-cache, and deleting the tags upstream does not evict them.
+That expectation was wrong, and the measurement is the reason this section
+exists. With a clean module cache and the default `GOPROXY`:
 
-So the deletion is necessary and not sufficient, and the remaining half is the
-one thing the module system offers for exactly this: a `retract` directive. It
-has to be published at a version the proxy will find, which for a `v1.x` range
-means a `v1.10.0` — a tag in a major version this project does not use and does
-not intend to. That trade is recorded in the CHANGELOG entry for whichever
-release makes it, if one ever does.
+```
+$ go get github.com/ligustah/commitlog@latest
+go: downloading github.com/ligustah/commitlog v0.87.0
+```
 
-Until then the supported instruction is an explicit version, which is what every
-consumer of this module already does:
+Before the deletion, the same command against the same proxy hard-failed on
+`v1.9.0`. No `retract` was published and no `v1.10.0` was cut.
+
+The proxy's raw endpoints have *not* changed, which is the part worth writing
+down because it looks like a contradiction: `@v/list` still returns all fifteen
+`v1.x` versions, `@latest` still reports `v1.9.0`, and `@v/v1.9.0.info` still
+answers 200. Those versions remain individually fetchable forever, exactly as the
+append-only guarantee promises — a build that pinned one keeps working. What
+changed is what `@latest` *resolves to* for a client, and that now follows the
+tags. So: the cached artifacts are permanent, the resolution is not, and only the
+second one was ever the problem.
+
+The supported instruction is still an explicit version, as for any dependency:
 
 ```
 go get github.com/ligustah/commitlog@v0.88.0
 ```
+
+## The one that was never a problem
+
+`v26.01.1` is also inherited, also outranks every `v0.x` by major number, and was
+deliberately left alone. It is not valid semver — `01` has a leading zero — so
+the module system does not see it as a version at all. It has never appeared in
+the proxy's `@v/list`, and it cannot be selected by `@latest`. Deleting it would
+change nothing, so it stays as history.
