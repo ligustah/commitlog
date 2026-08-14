@@ -350,6 +350,19 @@ run_guard "stripping stops at StripBelow" compact_cleaner.go \
 	return dispRetain' \
   '^TestCleanDigestMergeEquivalence$'
 
+# Dropping a method from the public interface COMPILES. New returns CommitLog
+# and commitLog is unexported, so the interface is the whole reachable API — but
+# the concrete type keeps the method, and every test helper in the repo (setup,
+# setupWithOptions) hands out *commitLog, so the entire suite goes on calling it
+# through the concrete type while no caller outside the package can. The mutation
+# below is the real thing that could happen during a refactor, and until this
+# guard's test existed the package built and the suite passed straight through it.
+run_guard "the interface is the reachable API" interface.go \
+  '	UnreferencedObjects() ([]StoreObject, error)
+' \
+  '' \
+  '^TestCommitLogInterfaceNamesEveryExportedMethod$'
+
 run_guard "readMessage CRC" reader.go \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c {' \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c && false {' \
