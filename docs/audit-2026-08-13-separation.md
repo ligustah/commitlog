@@ -108,7 +108,16 @@ That requirement shaped the design more than the storage did:
 - **Not adopted**, because a signal consumed at open time is lost to a crash
   immediately after. Leaving the stored bytes alone is what makes the
   disagreement survive restarts. `AdoptOptions` already meant "I know what this
-  log is, record it" and is the deliberate resolution, so no new knob.
+  log is, record it" and was made the deliberate resolution, so no new knob.
+
+  *That last clause was the mistake, corrected in v0.86.0.* Reusing the flag
+  read as economy and was really two statements sharing one switch, and the cost
+  fell on the caller identity exists for: durable_streams sources its settings
+  from a catalog, so it passes `AdoptOptions` on **every** open, and adoption
+  answered every identity question with "no conflict" before anything compared.
+  The signal was suppressed by the one thing all of its opens did. `AdoptIdentity`
+  is the new knob, and "no new knob" is what should have been argued against
+  here rather than counted as a virtue.
 - The republish that keeps non-gating descriptor fields current carries the
   *caller's* identity, so it had to be suppressed while a conflict stands —
   otherwise a plain codec change re-stamps the log and destroys the
@@ -136,6 +145,25 @@ cannot reclaim one — unstamped and stale look identical and only one should be
 destroyed. An erase manufactures exactly that, from a correctly stamped log, on
 an open that did nothing wrong. The feature shipped with a path that produced
 the condition it was built to eliminate.
+
+**And a third time, through the adopting branch, in v0.85.0.** That branch
+skipped the comparison entirely, so `fresh := got` never ran on it and the fix
+above did not apply. It was patched by reading the stored descriptor and copying
+the identity across when the caller supplied none — which covers the erase and
+not the overwrite, because a caller adopting *with* a different identity still
+re-stamped silently.
+
+Three corrections to one function, each fixing the door in front of it. What
+they had in common was never the door: it was that the published record was
+built from the caller's options on some path. v0.86.0 makes every path start
+from the stored record and take, field group by field group, only what the
+caller is entitled to replace — with identity behind its own flag, so "adopting"
+cannot reach it by construction rather than by a condition. The carry-over is
+deleted rather than moved; there is nothing left to carry.
+
+The lens, since it took three goes: **a fix that names a branch is a fix aimed
+at a door.** Ask instead what the wrong states have in common, and whether the
+correct one can be made unreachable rather than guarded.
 
 ### 3b. Two reserved-name lists guard one directory, from two repos — FIXED in v0.83.0
 
