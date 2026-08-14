@@ -563,6 +563,56 @@ object ending before the size the store itself had just reported was accepted
 seeks answer "not found" for offsets the segment holds), and a `(0, nil)`
 return — which `io.ReaderAt` forbids — was retried at the same offset forever.
 
+## What a red run was actually saying: two constants racing a goroutine
+
+Not a complexity finding, but this pass produced it and the lens generalises, so
+it is recorded here.
+
+Verifying the reader work, `-race` came back red on
+`TestChaosAFollowerNeverSeesTheSequenceGoBackwards/codec=0` at 122.31s with *the
+run never became dangerous enough to assert on: retention never got past the
+follower*. The invariant held — `violation` was nil. `overtaken` is the last case
+in `unmet`, so every other condition was met and the run spent its entire
+deadline waiting for that one. Nothing to do with the reader.
+
+Two constants, found one after the other:
+
+- **The stall between reader lifetimes, a fixed `800 * time.Millisecond`.**
+  `overtaken` only increments if retention collected past the follower during it.
+  The interval was chosen by measurement — 250ms had come back ten offsets short,
+  run after run — but what it must outpace is the *writer*, which slows under
+  `-race` and under load exactly as everything else does. So the number describes
+  one machine at one moment, and on a box also running two peers' suites it
+  stopped buying enough records. Replaced with `l.OldestOffset() > lastOffset`,
+  which is not an approximation of being overtaken but the exact test the resume
+  four lines later makes. `codec=0`: 122.31s failing → 3.29s passing.
+
+- **The stall within a scan, a fixed `100 * time.Millisecond`.** Found by asking
+  the rest of the test the question the first one taught: *what does this number
+  have to outpace, and does that thing slow down with the machine?* This one must
+  outlast retention reaching a position an open reader is sitting on — and its
+  failure was silent rather than red. `rebuilds` was zero on every run, and the
+  test's own doc read that zero as a fact about the log. It could equally have
+  meant the stall never provoked a departure. Same zero, two readings, nothing to
+  tell them apart. Waiting on the condition tells them apart: the wait now returns
+  only once the record the follower last read has been collected *while it still
+  holds the reader that read it*, so the next read is issued from a position that
+  no longer exists. It is still zero — which is now the fact the doc claimed.
+  Whole test under `-race`: 92.21s → 7.20s, `overtaken=2` on each codec,
+  `crossed` 142-145 against 132-142, the same 528 reads.
+
+The generalisable part is not "don't sleep in tests". It is that **removing the
+binding constant does not make a run condition-paced — it promotes the next
+constant to binding.** The rewrite recorded above `unmet` deleted a fixed write
+count of 3000 and wrote that the run was now "self-pacing on any machine at any
+speed"; that sentence is what kept the two survivors invisible. After deleting
+one, grep for every other literal duration and count on the same path.
+
+It is also the answer to why issues here seem to need high-intensity soak runs to
+surface: a run whose danger arrives on a timer is soak-shaped by construction.
+Neither of these needed a longer run. Both needed the dangerous thing to happen
+on purpose.
+
 ## Follow-ups this pass opened
 
 - **`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that
