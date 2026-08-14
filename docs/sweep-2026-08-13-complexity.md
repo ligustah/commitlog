@@ -573,5 +573,20 @@ return — which `io.ReaderAt` forbids — was retried at the same offset foreve
   and a restructure buys legibility at the cost of a class of bug this package
   has already paid for once. Worth doing behind a test that drives a roll
   during a parked read, not before one.
-- **A shared embedded base for `uncommittedReader`/`committedReader`,** so
-  `segmentBounds` exists once.
+- ~~**A shared embedded base for `uncommittedReader`/`committedReader`,** so
+  `segmentBounds` exists once.~~ **Taken, 2026-08-14.** The base is
+  `segmentCursor` — `mu`, `seg`, `pos`, `br` — and it stops there on purpose.
+  `cl` and `noWait` are in both readers as well, and pulling them in was the
+  tempting move that would have been wrong: `noWait` names a *different* thing
+  in each (do not park for appends / do not park for the watermark), so a shared
+  field means one doc comment stretched over two behaviours, which is how a
+  reader ends up believing the wrong one. The mutex does come along, because it
+  is what `segmentBounds` locks — and it stays a *named* field rather than an
+  embedded `sync.Mutex`, or `Lock`/`Unlock` would be promoted onto both readers
+  and advertise a lock no caller should take.
+
+  Worth naming what "shared base" is not licence to do. The readers still have
+  their own `Read`, their own parking, and their own end conditions; what moved
+  is the state a *third* party (`Reader.readOne`) asks them about. A base that
+  had absorbed the union of their fields would have made the two types look
+  interchangeable at exactly the boundary where they are not.

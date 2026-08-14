@@ -18,6 +18,13 @@ library from that fork onward.
   `segmentSwapped` also stated its predicate twice, `Cause(err) == X` OR
   `errors.Is(err, X)`, where the second subsumes the first. No behaviour change.
 
+- `uncommittedReader` and `committedReader` now embed a `segmentCursor` — the
+  segment they are positioned in, the byte offset into it, the buffered reader
+  over it, and the mutex guarding all three — so `contextReader.segmentBounds`
+  is written once instead of twice, byte for byte. The base stops short of the
+  readers' other shared fields on purpose: `noWait` names a different condition
+  in each of them. No behaviour change.
+
 - `SegmentStore.ReadAt`'s contract said "the two places that read a caller's
   store" compared `io.EOF` with `==`. There were three. The sentence — written
   by the fix to two of them — now says so, and says that a call-site count in a

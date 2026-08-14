@@ -29,6 +29,44 @@ type contextReader interface {
 	segmentBounds() (base, next int64, ok bool)
 }
 
+// segmentCursor is where a reader is: the segment it is positioned in, how far
+// into it, and the buffer over it.
+//
+// Embedded by both readers, which is how segmentBounds comes to exist once. It
+// was written out twice — byte for byte, over exactly these fields — and a pair
+// of identical copies is the shape this package keeps paying for: reading either
+// one confirms the other, so nothing looks wrong until a fix lands in one of
+// them and the reader that needed it is the other.
+//
+// The mutex lives here rather than on the readers because this is the state it
+// exists to protect: segmentBounds is the only method reachable while Read is
+// in flight. It guards each embedder's own mutable fields too — committedReader
+// takes it over hw, hwSeg and hwPos — which is why it is a named field and not
+// an embedded sync.Mutex: promoting Lock/Unlock onto the readers would advertise
+// a lock callers have no business taking.
+//
+// Deliberately not the readers' whole shared state. `cl` and `noWait` are in
+// both as well, and noWait is the reason to stop here: it names a different
+// thing in each (do not park for appends / do not park for the watermark), so
+// one shared field would carry one doc comment for two behaviours.
+type segmentCursor struct {
+	mu  sync.Mutex
+	seg *segment
+	pos int64
+	br  bufReader
+}
+
+// segmentBounds implements contextReader.
+func (c *segmentCursor) segmentBounds() (int64, int64, bool) {
+	c.mu.Lock()
+	seg := c.seg
+	c.mu.Unlock()
+	if seg == nil {
+		return 0, 0, false
+	}
+	return seg.BaseOffset, seg.NextOffset(), true
+}
+
 // Reader reads messages atomically from a CommitLog. Readers should not be
 // used concurrently.
 type Reader struct {
@@ -329,11 +367,8 @@ RETRY:
 }
 
 type uncommittedReader struct {
-	cl  *commitLog
-	seg *segment
-	mu  sync.Mutex
-	pos int64
-	br  bufReader
+	segmentCursor
+	cl *commitLog
 	// noWait makes the reader return io.EOF the moment it drains the readable
 	// bytes instead of parking for future appends. RecoverTail uses it to scan
 	// a static tail so recovery can never hang if the reconstructed LEO
@@ -465,23 +500,22 @@ func (l *commitLog) newReaderUncommitted(offset int64, noWait bool) (contextRead
 		position = e.Position
 	}
 	return &uncommittedReader{
+		segmentCursor: segmentCursor{
+			seg: seg,
+			pos: position,
+			br:  bufReader{seg: seg, pos: position, bufStart: position},
+		},
 		cl:     l,
-		seg:    seg,
-		pos:    position,
-		br:     bufReader{seg: seg, pos: position, bufStart: position},
 		noWait: noWait,
 	}, nil
 }
 
 type committedReader struct {
+	segmentCursor
 	cl    *commitLog
-	seg   *segment
 	hwSeg *segment
-	mu    sync.Mutex
-	pos   int64
 	hwPos int64
 	hw    int64
-	br    bufReader
 	// noWait ends the read at the high watermark instead of parking for it to
 	// advance. This is what a non-Follow committed reader needs: "committed
 	// data ran out" is an end condition for a bounded pass, not something to
@@ -704,9 +738,11 @@ func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader
 		// zero values: no segment, no located watermark, and a byte position that
 		// cannot be mistaken for one. Read resolves all three on first use.
 		return &committedReader{
+			segmentCursor: segmentCursor{
+				seg: nil,
+				pos: -1,
+			},
 			cl:     l,
-			seg:    nil,
-			pos:    -1,
 			hwSeg:  nil,
 			hwPos:  -1,
 			hw:     hw,
@@ -733,13 +769,15 @@ func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader
 		position = entry.Position
 	}
 	return &committedReader{
+		segmentCursor: segmentCursor{
+			seg: seg,
+			pos: position,
+			br:  bufReader{seg: seg, pos: position, bufStart: position},
+		},
 		cl:     l,
-		seg:    seg,
-		pos:    position,
 		hwSeg:  hwSeg,
 		hwPos:  hwPos,
 		hw:     hw,
-		br:     bufReader{seg: seg, pos: position, bufStart: position},
 		noWait: noWait,
 	}, nil
 }
@@ -977,26 +1015,4 @@ func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byt
 		Headers:     headers,
 		Raw:         SerializedMessage(buf),
 	}, payloadBuf, nil
-}
-
-// segmentBounds implements contextReader.
-func (r *uncommittedReader) segmentBounds() (int64, int64, bool) {
-	r.mu.Lock()
-	seg := r.seg
-	r.mu.Unlock()
-	if seg == nil {
-		return 0, 0, false
-	}
-	return seg.BaseOffset, seg.NextOffset(), true
-}
-
-// segmentBounds implements contextReader.
-func (r *committedReader) segmentBounds() (int64, int64, bool) {
-	r.mu.Lock()
-	seg := r.seg
-	r.mu.Unlock()
-	if seg == nil {
-		return 0, 0, false
-	}
-	return seg.BaseOffset, seg.NextOffset(), true
 }
