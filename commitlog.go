@@ -2499,7 +2499,7 @@ func (l *commitLog) checkAndPerformSplit() (bool, error) {
 			// ErrSegmentExists indicates another thread has already performed
 			// the segment split, so reload the new active segment and check
 			// again.
-			if err == ErrSegmentExists {
+			if errors.Is(err, ErrSegmentExists) {
 				continue
 			}
 			return false, err

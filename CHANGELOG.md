@@ -7,6 +7,22 @@ library from that fork onward.
 
 ## Unreleased
 
+### Changed
+
+- Sentinel matching in the read and roll paths moved from
+  `pkgErrors.Cause(err) == X` (and one bare `==`) to `errors.Is`. `Cause` walks
+  a `causer` chain and stops at a `%w` one, and this package writes
+  `fmt.Errorf("%w: ...")` in a dozen places — so `readOne` and
+  `ReadMessageMetadata` retried a compaction swap on a comparison that worked
+  only because nothing between the segment and the reader wraps that way *yet*.
+  `segmentSwapped` also stated its predicate twice, `Cause(err) == X` OR
+  `errors.Is(err, X)`, where the second subsumes the first. No behaviour change.
+
+- `SegmentStore.ReadAt`'s contract said "the two places that read a caller's
+  store" compared `io.EOF` with `==`. There were three. The sentence — written
+  by the fix to two of them — now says so, and says that a call-site count in a
+  comment is a claim nothing verifies.
+
 ## v0.85.0 — 2026-08-14
 
 ### Fixed

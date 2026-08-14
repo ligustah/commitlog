@@ -179,13 +179,19 @@ type SegmentStore interface {
 	//
 	// Every one of those may be WRAPPED, as ErrObjectNotFound's own doc already
 	// says of itself — commitlog compares with errors.Is. Stated here because it
-	// was not, and the omission was load-bearing: the two places that read a
-	// caller's store compared io.EOF with `==`, so an implementation that
-	// wrapped its errors (which is simply what Go code does) had one sentinel on
-	// this method survive and the sibling beside it not. What that cost was the
-	// short-read arm — the object smaller than the size commitlog recorded —
-	// where a buffer holding valid bytes was discarded and a hard error returned
-	// in its place.
+	// was not, and the omission was load-bearing: the places that read a caller's
+	// store compared io.EOF with `==`, so an implementation that wrapped its
+	// errors (which is simply what Go code does) had one sentinel on this method
+	// survive and the sibling beside it not. What that cost was the short-read
+	// arm — the object smaller than the size commitlog recorded — where a buffer
+	// holding valid bytes was discarded and a hard error returned in its place,
+	// and the cold index download, which failed outright.
+	//
+	// This sentence said "the two places" for one release, having been written by
+	// the fix to two of them. There were three: RemoteIndexCache.fetch was not
+	// among the sites that pass was reading, and it kept the `==` until v0.85.0.
+	// A count of call sites in a comment is a claim nothing verifies — the next
+	// reader should grep the shape rather than trust this paragraph.
 	ReadAt(key string, p []byte, off int64) (int, error)
 	// Stream returns a reader over the object under key from off to its end,
 	// for a caller that knows it is going to read all of it. The caller must

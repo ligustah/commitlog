@@ -129,10 +129,13 @@ func (l *commitLog) newSourceReader(spec readSpec) (contextReader, error) {
 // replaced one with ErrSegmentReplaced, and Replace produces BOTH states on the
 // same segment — which one surfaces depends only on where the caller happened to
 // touch it.
+// errors.Is alone. This used to say the same thing twice — `pkgErrors.Cause(err)
+// == X` OR `errors.Is(err, X)` — and the first half reaches nothing the second
+// does not: pkg/errors' wrappers implement Unwrap, so errors.Is walks a `causer`
+// chain as well as a `%w` one. Stating a predicate twice invites the two halves
+// to be maintained apart, which is how a sentinel gets added to one of them.
 func segmentSwapped(err error) bool {
-	cause := pkgErrors.Cause(err)
-	return cause == ErrSegmentClosed || cause == ErrSegmentReplaced ||
-		errors.Is(err, ErrSegmentClosed) || errors.Is(err, ErrSegmentReplaced)
+	return errors.Is(err, ErrSegmentClosed) || errors.Is(err, ErrSegmentReplaced)
 }
 
 // newRecoveryReader returns an uncommitted reader that does NOT block waiting
@@ -222,13 +225,21 @@ RETRY:
 		} else if r.log.IsClosed() {
 			// The log was closed while we were trying to read.
 			return nil, 0, 0, 0, ErrCommitLogClosed
-		} else if pkgErrors.Cause(err) == ErrCommitLogReadonly && r.log.IsReadonly() {
+		} else if errors.Is(err, ErrCommitLogReadonly) && r.log.IsReadonly() {
 			// The log was set to readonly while we were trying to read.
 			return nil, 0, 0, 0, ErrCommitLogReadonly
-		} else if pkgErrors.Cause(err) == ErrSegmentReplaced {
+		} else if errors.Is(err, ErrSegmentReplaced) {
 			// ErrSegmentReplaced indicates we attempted to read from a log
 			// segment that was replaced due to compaction, so reinitialize the
 			// contextReader and try again to read from the new segment.
+			//
+			// errors.Is, not pkgErrors.Cause(err) ==. Cause walks a `causer`
+			// chain and stops at a `%w` one, and this package writes
+			// `fmt.Errorf("%w: ...")` in a dozen places. Nothing between the
+			// segment and here does today — which is exactly what makes the
+			// comparison work and makes it fragile: one %w added anywhere on this
+			// path turns an ordinary compaction swap into a hard read failure for
+			// a record sitting on disk in the replacement.
 			if r.ctxReader, err = r.log.newSourceReader(r.specAt(r.offset)); err != nil {
 				return nil, 0, 0, 0, pkgErrors.Wrap(err, "failed to reinitialize reader")
 			}
@@ -300,9 +311,10 @@ RETRY:
 			return MessageMetadata{}, newBuf, ErrCommitLogDeleted
 		} else if r.log.IsClosed() {
 			return MessageMetadata{}, newBuf, ErrCommitLogClosed
-		} else if pkgErrors.Cause(err) == ErrCommitLogReadonly && r.log.IsReadonly() {
+		} else if errors.Is(err, ErrCommitLogReadonly) && r.log.IsReadonly() {
 			return MessageMetadata{}, newBuf, ErrCommitLogReadonly
-		} else if pkgErrors.Cause(err) == ErrSegmentReplaced {
+			// errors.Is for the reason readOne's copy of this arm gives.
+		} else if errors.Is(err, ErrSegmentReplaced) {
 			if r.ctxReader, err = r.log.newSourceReader(r.specAt(r.offset)); err != nil {
 				return MessageMetadata{}, newBuf, pkgErrors.Wrap(err, "failed to reinitialize reader")
 			}
