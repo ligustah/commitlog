@@ -7,6 +7,8 @@ library from that fork onward.
 
 ## Unreleased
 
+## v0.85.0 — 2026-08-14
+
 ### Fixed
 
 - **A store that wraps its errors could not have a cold index downloaded at
