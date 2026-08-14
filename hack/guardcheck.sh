@@ -295,6 +295,15 @@ run_guard_windows() {
   guard_want=""
 }
 
+# HOW MANY GUARDS ARE THERE: run the script and read the count it prints. Do not
+# count `run_guard` lines. There are three registration spellings — run_guard,
+# run_guard_windows and run_guard_pair — so `grep -c '^run_guard '` undercounts
+# by every windows guard and every pair, which at the time of writing is 164
+# against a real 176. That number has been published in the CHANGELOG before
+# (v0.83.0 cited a count the release then grew past), and the failure mode now is
+# the opposite and worse: the obvious grep makes a CORRECT published count look
+# wrong, and invites "fixing" it to the undercount.
+#
 # Some guards are ONE defence implemented at two sites, where each site masks
 # the other and neither is observable alone. Registering either half separately
 # would report NO COVERAGE and be right to: the honest unit is the pair, so

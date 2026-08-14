@@ -1423,3 +1423,29 @@ you can reconstruct is the trade #236 already rejected.
 So the asymmetry this lens hunts exists downstream and not here. Recorded as a
 negative — and the lens itself is worth keeping, because it is mechanical and it
 found a real defect the first time it was pointed anywhere new.
+
+### A published number that the obvious check would "correct" to a wrong one
+
+The lens behind #220 (a CHANGELOG citing a guard count the release grew past)
+and #262 (a doc naming a signature that no longer exists), re-run over numbers
+this repo publishes about itself.
+
+Comments in the Go tree are clean: every comment that names a duration or size
+constant — `waitedOnRetryBudget`, `tickWriteRetryBudget`, `maxSyncWindow`,
+`maxDescriptorBytes`, the two prefix-read coalesce sizes — states a value
+consistent with the constant it describes.
+
+The guard count is where it got interesting, in the opposite direction from
+#220. `grep -c '^run_guard ' hack/guardcheck.sh` answers **164**, and the
+CHANGELOG says 176. The CHANGELOG is right: there are three registration
+spellings — `run_guard`, `run_guard_windows` (11 calls) and `run_guard_pair`
+(1) — and the obvious grep misses two of them.
+
+So the hazard here is not a stale number, it is a **checking method that makes a
+correct number look stale** and invites replacing it with an undercount. Noted
+where the counting happens, in `guardcheck.sh` beside the helpers, rather than in
+this document: the script prints its own count, and that is the answer.
+
+Same shape as [[a transcribed rule grows a dissimilar copy]] seen from the
+measuring end — a second and third spelling of one registration, and a count
+that only knows about the first.
