@@ -115,6 +115,19 @@ library from that fork onward.
   retention pass over large segments allocated a segment's worth of records to
   learn one offset. No behaviour change.
 
+- A log now settles on one spelling of its directory. `New` resolved the
+  absolute path and used it for the directory lock, the leader epoch cache and
+  the descriptor, while `l.Path` and both cleaners kept whatever string the
+  caller passed — two names for one directory inside one log's reach. They
+  agree exactly as long as the process never changes working directory, and if
+  it does, the half on the relative path opens files somewhere else while the
+  half holding the lock does not notice. The resolve also discarded its error,
+  so a failed `Getwd` would have built the log at the filesystem root instead of
+  reporting that the working directory was gone; it is returned now.
+
+  `commitLog.init()` went with it: a `MkdirAll` on a directory `New` had
+  created forty lines earlier, with no other caller.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking

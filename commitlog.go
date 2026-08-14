@@ -601,6 +601,23 @@ func New(opts Options) (_ CommitLog, err error) {
 		opts.CleanRewriteBudget = opts.CleanerInterval
 	}
 
+	// One spelling of the directory, settled before anything stores it. This used
+	// to resolve the absolute path further down and use it for the dir lock, the
+	// epoch cache and the descriptor only, leaving l.Path and both cleaners on
+	// whatever string the caller passed. Two names for one directory inside one
+	// log's reach is a latent split: they agree exactly as long as the process
+	// never chdirs, and if it does, the half on the relative path opens files
+	// somewhere else while the half holding the lock does not notice.
+	//
+	// The error is returned rather than dropped. Abs fails only when Getwd does,
+	// and the discarded version left path empty — which builds a log at the
+	// filesystem root rather than saying the cwd is gone.
+	path, err := filepath.Abs(opts.Path)
+	if err != nil {
+		return nil, errors.Wrap(err, "resolve log path failed")
+	}
+	opts.Path = path
+
 	cleanerOpts := deleteCleanerOptions{
 		Path: opts.Path,
 	}
@@ -618,12 +635,9 @@ func New(opts Options) (_ CommitLog, err error) {
 	compactCleaner := newCompactCleaner(compactCleanerOpts)
 	compactCleaner.cache = opts.RemoteIndexCache
 
-	path, _ := filepath.Abs(opts.Path)
-
 	// The directory has to exist before it can be claimed, and it has to be
 	// claimed before anything else in this function reads or writes a file in
-	// it. newLeaderEpochCache on the next line is already one of those, which is
-	// why the MkdirAll happens here and not only in init() below.
+	// it. newLeaderEpochCache on the next line is already one of those.
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return nil, errors.Wrap(err, "mkdir failed")
 	}
@@ -667,21 +681,15 @@ func New(opts Options) (_ CommitLog, err error) {
 		return l.writeTierManifest(meta.tierObject(baseOffset, tier))
 	}
 
-	if err := l.init(); err != nil {
-		return nil, err
-	}
-
 	// Settle what this log IS before opening anything. It has to happen here:
 	// once open() runs, the cleaner loop can start applying a retention policy,
 	// and the whole point is that a policy the log was not created with never
 	// gets applied at all.
-	descOpts := opts
-	descOpts.Path = path
-	isNew, err := logIsNew(descOpts)
+	isNew, err := logIsNew(opts)
 	if err != nil {
 		return nil, err
 	}
-	identityConflict, err := reconcileDescriptor(descOpts, isNew)
+	identityConflict, err := reconcileDescriptor(opts, isNew)
 	if err != nil {
 		return nil, err
 	}
@@ -715,14 +723,6 @@ func New(opts Options) (_ CommitLog, err error) {
 	go func() { defer l.bgWG.Done(); l.cleanerLoop() }()
 
 	return l, nil
-}
-
-func (l *commitLog) init() error {
-	err := os.MkdirAll(l.Path, 0755)
-	if err != nil {
-		return errors.Wrap(err, "mkdir failed")
-	}
-	return nil
 }
 
 // openOrRelease opens the log and reconciles the leader epoch checkpoint
