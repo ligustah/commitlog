@@ -18,6 +18,14 @@ library from that fork onward.
   `segmentSwapped` also stated its predicate twice, `Cause(err) == X` OR
   `errors.Is(err, X)`, where the second subsumes the first. No behaviour change.
 
+- The readers no longer move `seg`, `pos` and `br` by hand. `segmentCursor` grew
+  two operations and every site calls one of them: `seekTo(seg, pos)` for a move
+  — which is the rule "all three fields change together", now enforced by there
+  being one place that changes them — and `refill()` for re-anchoring the buffer
+  where the cursor already is, which is a different thing that had been spelled
+  the same way. The two boundary advances, one per reader, were the pair the
+  extraction was for; they had been written in different statement orders.
+
 - `uncommittedReader.Read` advanced to the next segment in two places, chosen by
   a `waiting` flag: one for a roll it walked into, one for a roll that woke it
   out of `waitForData`. They are one rule — drained, so take the next segment if

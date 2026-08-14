@@ -56,6 +56,34 @@ type segmentCursor struct {
 	br  bufReader
 }
 
+// seekTo positions the cursor at pos in seg. All three fields move together —
+// that is the entire rule, and it was spelled out inline at each of the places
+// that seek, in more than one statement order. Two of them were the boundary
+// advance, `seekTo(next, 0)`, one in each reader, and they were textually
+// identical enough that a guard anchored on one matched the other and reported
+// SKIP.
+//
+// No count of call sites here on purpose: a comment that says "the N places
+// that do X" is a claim about the call graph with nothing checking it, and this
+// package shipped a wrong one for a release. Ask the compiler — every seek goes
+// through this function now, which is the property worth stating.
+//
+// Callers hold the cursor's mutex; this does not take it. Both readers seek from
+// inside Read, which already holds it.
+func (c *segmentCursor) seekTo(seg *segment, pos int64) {
+	c.seg = seg
+	c.pos = pos
+	c.br.reset(seg, pos)
+}
+
+// refill re-anchors the buffered reader where the cursor already is, without
+// moving it. Used on first use, and after a wait that may have put more bytes
+// behind the current position — the read that follows is what decides whether
+// there are any.
+func (c *segmentCursor) refill() {
+	c.br.reset(c.seg, c.pos)
+}
+
 // segmentBounds implements contextReader.
 func (c *segmentCursor) segmentBounds() (int64, int64, bool) {
 	c.mu.Lock()
@@ -384,7 +412,7 @@ func (r *uncommittedReader) Read(ctx context.Context, p []byte) (n int, err erro
 
 	// Initialise buffered reader on first use.
 	if r.br.seg == nil {
-		r.br.reset(r.seg, r.pos)
+		r.refill()
 	}
 
 	for {
@@ -420,9 +448,7 @@ func (r *uncommittedReader) Read(ctx context.Context, p []byte) (n int, err erro
 		// parked at the tail can hold its snapshot for as long as the writer is
 		// idle, and a roll is precisely the event it must not miss.
 		if nextSeg := findSegmentAfter(r.cl.segmentsSnapshot(), r.seg); nextSeg != nil {
-			r.seg = nextSeg
-			r.pos = 0
-			r.br.reset(nextSeg, 0)
+			r.seekTo(nextSeg, 0)
 			continue
 		}
 		if werr := r.waitForData(ctx, r.seg); werr != nil {
@@ -434,7 +460,7 @@ func (r *uncommittedReader) Read(ctx context.Context, p []byte) (n int, err erro
 		// answers that, because a sealed segment reads EOF a second time and takes
 		// the advance above on the next pass. Deciding here is what needed the
 		// flag.
-		r.br.reset(r.seg, r.pos)
+		r.refill()
 	}
 
 	return n, err
@@ -533,8 +559,7 @@ func (r *committedReader) Read(ctx context.Context, p []byte) (n int, err error)
 		if err != nil {
 			return 0, err
 		}
-		r.pos = entry.Position
-		r.br.reset(r.seg, r.pos)
+		r.seekTo(r.seg, entry.Position)
 	}
 
 	return r.readLoop(ctx, p, segments)
@@ -610,9 +635,7 @@ func (r *committedReader) readLoop(
 					len(segments))
 				break
 			}
-			r.seg = nextSeg
-			r.pos = 0
-			r.br.reset(nextSeg, 0)
+			r.seekTo(nextSeg, 0)
 			continue
 		}
 

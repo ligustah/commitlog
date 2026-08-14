@@ -1525,19 +1525,16 @@ run_guard "a committed read reports a watermark it cannot find" reader.go   '	hw
 # landed, so naming a single test here would leave the other one asserting
 # nothing about this line. They are one guard now because the code is one site;
 # they were registered as two while it was two.
-# The anchor carries its `if` line because the three lines under it are NOT
-# unique: committedReader.readLoop advances across a boundary with the same
-# three statements at the same indentation. guardcheck said so — SKIP, "matches
-# more than one place" — which is the check earning its keep twice over, since
-# the ambiguity only appeared when the two uncommitted arms merged into one that
-# happens to read like the committed one.
+# The anchor carries its `if` line because the advance under it is NOT unique:
+# committedReader.readLoop crosses a boundary with the same statement at the
+# same indentation. guardcheck said so — SKIP, "matches more than one place" —
+# which is the check earning its keep twice over, since the ambiguity only
+# appeared when the two uncommitted arms merged into one that happens to read
+# like the committed one. Extracting seekTo made the two MORE alike, not less,
+# so the `if` line is now the whole of what distinguishes them.
 run_guard "a reader crossing a roll starts the new segment at 0" reader.go   '		if nextSeg := findSegmentAfter(r.cl.segmentsSnapshot(), r.seg); nextSeg != nil {
-			r.seg = nextSeg
-			r.pos = 0
-			r.br.reset(nextSeg, 0)' '		if nextSeg := findSegmentAfter(r.cl.segmentsSnapshot(), r.seg); nextSeg != nil {
-			r.pos = r.br.pos
-			r.seg = nextSeg
-			r.br.reset(nextSeg, r.pos)'   '^TestAnUncommittedReader(CrossesARollItNeverParkedFor|ParkedAtTheTailIsCarriedAcrossARoll)$'
+			r.seekTo(nextSeg, 0)' '		if nextSeg := findSegmentAfter(r.cl.segmentsSnapshot(), r.seg); nextSeg != nil {
+			r.seekTo(nextSeg, r.br.pos)'   '^TestAnUncommittedReader(CrossesARollItNeverParkedFor|ParkedAtTheTailIsCarriedAcrossARoll)$'
 
 # A header read takes the header, not the whole buffer it was handed. Neutralized
 # back to reading headersBuf entire, which is what turns a buffer bigger than a

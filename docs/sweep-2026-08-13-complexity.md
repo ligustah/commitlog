@@ -563,6 +563,18 @@ object ending before the size the store itself had just reported was accepted
 seeks answer "not found" for offsets the segment holds), and a `(0, nil)`
 return — which `io.ReaderAt` forbids — was retried at the same offset forever.
 
+## Follow-ups this pass opened
+
+- **`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that
+  moves part of the cursor by poking a field. It is deliberate and it is not a
+  `refill()`: keeping `bufStart` and `data` means a subsequent small read can
+  still be served from the buffer the direct `ReadAt` bypassed, and that is safe
+  only because a written byte never changes. `reset` would be correct and would
+  throw the buffer away. Worth a named `bufReader` method carrying that
+  sentence, so the next reader does not "tidy" it into a reset and quietly lose
+  the buffer, or into nothing and read from a stale position. Not taken in the
+  same change as the cursor operations — one verified thing at a time.
+
 ## Deferred, with reasons
 
 - ~~**`uncommittedReader.Read`.** Two arms advance to the next segment with
