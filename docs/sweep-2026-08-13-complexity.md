@@ -613,6 +613,33 @@ surface: a run whose danger arrives on a timer is soak-shaped by construction.
 Neither of these needed a longer run. Both needed the dangerous thing to happen
 on purpose.
 
+### A third, found by the same lens turning up in CI hours later
+
+`guard coverage (windows)` went red with **"a barrier waits longer than a tick"
+NO COVERAGE** — under the guard's mutation, which hands `SyncAll` the tick's
+500 ms budget instead of the caller-waited 5 s, the test passed anyway. Nobody
+had touched it, and every other job was green.
+
+The fixture held the checkpoint file for `tickWriteRetryBudget + 250ms`. The
+sleep starts when the goroutine is scheduled; the retry's **deadline** starts
+when `checkpointHW` is reached, and `SyncAll` fsyncs every segment first.
+Everything in between is spent out of that 250 ms. The runner spent all of it,
+so by the shortened deadline the handle had already been released and the
+mutated call succeeded.
+
+Same shape as both stalls above, in a place none of the greps for durations in
+the chaos tests would have reached: **a margin is a constant racing real work.**
+Fixed by deriving the hold as the midpoint of the two budgets — the largest
+margin they allow, and it tracks if either moves.
+
+The addition worth copying is the assertion, not the number. `SyncAll` returning
+`nil` is *equally* what a `SyncAll` that never met the held handle returns; only
+`returned.After(closedAt)` separates waiting it out from missing it. Without it
+the failure mode is silence — the test passes, and the only thing that notices
+is guardcheck calling its own guard uncovered, on one platform. That is the
+silent-zero shape again: one observation, two readings, and no way to tell them
+apart until the distinguishing condition is asserted.
+
 ## A mechanical duplicate scan, and the one thing it caught
 
 After the hand-picked duplications ran out, a mechanical pass: every non-comment
