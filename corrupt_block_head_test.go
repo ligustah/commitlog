@@ -34,26 +34,42 @@ import (
 // header that is entirely present and wrong is corruption, and dropping bytes we
 // merely failed to understand is not recovery.
 //
-// The corruption is one byte on purpose: magic and version stay valid, so the
-// segment is still classified as block-compressed and scanBlocks still runs. It
-// is parseBlockHeader that refuses, on the codec field.
+// The corruption is one byte on purpose: magic stays valid, so the segment is
+// still classified as block-compressed and scanBlocks still runs. It is
+// parseBlockHeader that refuses.
+//
+// The last case pokes the VERSION byte rather than the codec, and it is not a
+// fourth flavour of the same thing. scanBlocks used to special-case
+// ErrBlockFormat and return it bare, skipping the wrap that names the byte —
+// so the one refusal that DOES carry a caller-facing sentinel was also the one
+// that arrived without saying where. errors.Is sees through errors.Wrapf, so
+// the arm protected nothing; it only deleted the offset. Every case here now
+// asserts the position, which is what makes its removal falsifiable.
 func TestACorruptBlockHeaderIsNotATornTail(t *testing.T) {
-	// atByte picks which header to corrupt, given the segment's block table.
+	// atByte picks which header to corrupt, given the segment's block table;
+	// field and to say what to write into it.
 	for _, tc := range []struct {
-		name   string
-		atByte func(blocks []blockRef) int64
+		name       string
+		atByte     func(blocks []blockRef) int64
+		field      int64 // offset within the header
+		val        byte
+		wantFormat bool // refused as ErrBlockFormat rather than as damage
 	}{
-		{"first", func([]blockRef) int64 { return 0 }},
-		{"midSegment", func(b []blockRef) int64 { return b[len(b)/2].physStart }},
-		{"lastBlock", func(b []blockRef) int64 { return b[len(b)-1].physStart }},
+		// Byte 2 of the header is the codec; 0xFE is not one, and Valid()
+		// rejects it. Damage in one header, so no sentinel.
+		{"first", func([]blockRef) int64 { return 0 }, 2, 0xFE, false},
+		{"midSegment", func(b []blockRef) int64 { return b[len(b)/2].physStart }, 2, 0xFE, false},
+		{"lastBlock", func(b []blockRef) int64 { return b[len(b)-1].physStart }, 2, 0xFE, false},
+		// Byte 1 is the version. This is the arm that used to return early.
+		{"versionMidSegment", func(b []blockRef) int64 { return b[len(b)/2].physStart }, 1, 0xFE, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			corruptBlockHeaderIsNotATornTail(t, tc.atByte)
+			corruptBlockHeaderIsNotATornTail(t, tc.atByte, tc.field, tc.val, tc.wantFormat)
 		})
 	}
 }
 
-func corruptBlockHeaderIsNotATornTail(t *testing.T, atByte func([]blockRef) int64) {
+func corruptBlockHeaderIsNotATornTail(t *testing.T, atByte func([]blockRef) int64, field int64, val byte, wantFormat bool) {
 	dir := tempDir(t)
 	opts := Options{
 		Path:            dir,
@@ -103,8 +119,7 @@ func corruptBlockHeaderIsNotATornTail(t *testing.T, atByte func([]blockRef) int6
 	_, err = f.ReadAt(magic[:], target)
 	require.NoError(t, err)
 	require.EqualValues(t, blockMagic, magic[0], "byte %d is not a block header", target)
-	// Byte 2 of the header is the codec; 0xFE is not one, and Valid() rejects it.
-	_, err = f.WriteAt([]byte{0xFE}, target+2)
+	_, err = f.WriteAt([]byte{val}, target+field)
 	require.NoError(t, err)
 	require.NoError(t, f.Sync())
 	require.NoError(t, f.Close())
@@ -118,6 +133,29 @@ func corruptBlockHeaderIsNotATornTail(t *testing.T, atByte func([]blockRef) int6
 	require.Error(t, err,
 		"a segment with an unparseable block header opened anyway, having "+
 			"discarded every record from that byte onward")
+
+	// WHICH refusal, not merely that one happened. The fixture removes a
+	// sidecar and rewrites a byte, so plenty of unrelated failures would
+	// satisfy a bare require.Error while scanBlocks was never reached — and
+	// the byte offset is the one fact that distinguishes "parseBlockHeader
+	// refused the header we corrupted" from all of them.
+	require.Contains(t, err.Error(), fmt.Sprintf("block header at byte %d", target),
+		"the open was refused by something other than the header at byte %d, "+
+			"or the refusal arrived without saying where — which is what a "+
+			"corrupt header at an unknown offset leaves an operator holding",
+		target)
+
+	// A version this build does not write is a whole-store fact a caller acts
+	// on before touching anything; the other four refusals are damage in one
+	// header. Both directions, because widening the sentinel is the silent
+	// half — see ErrBlockFormat's doc.
+	if wantFormat {
+		require.ErrorIs(t, err, ErrBlockFormat,
+			"a version byte this build does not write must reach the caller as "+
+				"ErrBlockFormat even though it is now wrapped with its position")
+	} else {
+		require.NotErrorIs(t, err, ErrBlockFormat)
+	}
 
 	fi, err = os.Stat(logPath)
 	require.NoError(t, err)

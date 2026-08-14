@@ -402,28 +402,72 @@ func TestBlockHeaderRoundtrip(t *testing.T) {
 	}
 }
 
+// parseBlockHeader refuses in five ORDERED steps, and every case here asserts
+// which one fired.
+//
+// `require.Error` cannot, and the gap is not theoretical. This test once
+// labelled a case "unknown codec" while poking byte 1, which is the version —
+// so the version check answered both cases, `require.Error` was satisfied
+// twice, and `compress.Codec.Valid()`, whose only production call site is the
+// line below it, had no test reaching it at all. The label was the only thing
+// that said otherwise and labels do not run.
+//
+// The failure mode belongs to ordered checks generally: a fixture aimed at the
+// wrong byte still produces AN error, because an earlier step catches it. What
+// distinguishes them is the message, so the message is what is asserted — and
+// `wrongByte` below states the consequence, since a case that stops testing its
+// own step reports success in exactly the same way as one that works.
 func TestBlockHeaderErrors(t *testing.T) {
-	_, _, _, _, err := parseBlockHeader(make([]byte, blockHeaderLen-1))
-	require.Error(t, err, "short header")
+	const wrongByte = "this case no longer reaches the check it is named for: an " +
+		"earlier one answered it, and an ordered refusal that stops testing its " +
+		"own step still returns an error"
 
-	bad := encodeBlockHeader(compress.Zstd, 1, 1, 1)
-	bad[0] = 0x00
-	_, _, _, _, err = parseBlockHeader(bad)
-	require.Error(t, err, "bad magic")
-
-	// The VERSION byte, which is what index 1 is. It had been labelled
-	// "unknown codec" while poking the same byte the version case above pokes,
-	// so the codec check — the only place compress.Codec.Valid() is called from
-	// production code — had no test reaching it at all.
-	badVersion := encodeBlockHeader(compress.Zstd, 1, 1, 1)
-	badVersion[1] = 0xFF
-	_, _, _, _, err = parseBlockHeader(badVersion)
-	require.Error(t, err, "unknown version")
-
-	unknown := encodeBlockHeader(compress.Zstd, 1, 1, 1)
-	unknown[2] = 0xFF
-	_, _, _, _, err = parseBlockHeader(unknown)
-	require.Error(t, err, "unknown codec")
+	poke := func(i int, v byte) []byte {
+		h := encodeBlockHeader(compress.Zstd, 1, 1, 1)
+		h[i] = v
+		return h
+	}
+	for _, tc := range []struct {
+		name   string
+		hdr    []byte
+		want   string
+		format bool // refused as ErrBlockFormat — see that sentinel's doc
+	}{
+		{"a header shorter than one header", make([]byte, blockHeaderLen-1),
+			"short block header (14 bytes)", false},
+		{"a byte that is not the magic", poke(0, 0x00),
+			"bad block magic 0x00", false},
+		{"a version this build does not write", poke(1, 0xFF),
+			"block format version 255, this build writes 2", true},
+		{"a codec outside the set", poke(2, 0xFF),
+			"unknown block codec 255", false},
+		// Not poked: encodeBlockHeader is asked for it. A zero record count is
+		// reachable only with the magic, version and codec all correct, which
+		// is the whole reason it is damage rather than a format problem.
+		{"a header claiming no records", encodeBlockHeader(compress.Zstd, 1, 1, 0),
+			"block header claims no records", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, _, err := parseBlockHeader(tc.hdr)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.want, wrongByte)
+			// Which refusals carry the sentinel is a decision a caller acts on
+			// at startup, not a detail: ErrBlockFormat says "another build
+			// wrote this store, stop", and the other four say "one header of
+			// one segment is damaged". Asserted in both directions, because
+			// widening it is the silent half — a damage case that starts
+			// claiming a version mismatch sends an operator hunting a build
+			// that was never involved.
+			if tc.format {
+				require.ErrorIs(t, err, ErrBlockFormat)
+			} else {
+				require.NotErrorIs(t, err, ErrBlockFormat,
+					"this is damage in one header, and ErrBlockFormat is a "+
+						"whole-store claim about the version byte — which "+
+						"reaching this check has already proven correct")
+			}
+		})
+	}
 }
 
 // TestCompressionCompaction exercises the compaction rewrite path (Cleaned +

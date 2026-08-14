@@ -870,9 +870,16 @@ func (s *segment) scanBlocks(size int64) error {
 		}
 		codec, uLen, cLen, records, err := parseBlockHeader(hdr[:])
 		if err != nil {
-			if errors.Is(err, ErrBlockFormat) {
-				return err
-			}
+			// Every refusal is wrapped with its position, including the version
+			// one. There used to be an `errors.Is(err, ErrBlockFormat)` arm
+			// here returning the error bare, and it bought nothing: errors.Is
+			// sees through errors.Wrapf, so a caller matching the sentinel
+			// matches either way. Its only effect was to DELETE the byte offset
+			// from exactly the errors that had been given a sentinel — so the
+			// next refusal to be filed under one silently lost its position
+			// too, which is how the zero-record check came to report damage
+			// with no idea where.
+			//
 			// A header that is ENTIRELY PRESENT and does not parse is
 			// corruption, not tearing, and the two need opposite answers.
 			//

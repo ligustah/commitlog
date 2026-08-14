@@ -1562,6 +1562,19 @@ run_guard "a torn tail stops at the watermark" segment.go   '	if committedThroug
 # the open succeeded and the watermark was clamped down to match.
 run_guard "a corrupt block header refuses the open" segment.go   '			return errors.Wrapf(err, "block header at byte %d of %d", phys, size)' '			break'   '^TestACorruptBlockHeaderIsNotATornTail$'
 
+# Same line, opposite claim: the wrap is UNCONDITIONAL. scanBlocks used to run
+# `if errors.Is(err, ErrBlockFormat) { return err }` first, and it protected
+# nothing — errors.Is sees through errors.Wrapf, so a caller matched the
+# sentinel either way. Its only effect was to delete the byte offset from
+# exactly the refusals that had been given a sentinel, which meant the next one
+# filed under one silently lost its position too. Neutralized by putting the arm
+# back; the versionMidSegment case is the one that goes red, because it is the
+# only case that reaches it.
+run_guard "the block header offset is reported for every refusal" segment.go   '			// Every refusal is wrapped with its position, including the version'   '			if errors.Is(err, ErrBlockFormat) {
+				return err
+			}
+			// Every refusal is wrapped with its position, including the version'   '^TestACorruptBlockHeaderIsNotATornTail$'
+
 # A timestamp lookup searches the segment that currently HOLDS the records, not
 # the one the published list names. Neutralized by taking the slice entry as-is,
 # which is what the offset path stopped doing when the same symptom was fixed for
@@ -2129,6 +2142,15 @@ run_guard "a block table entry carries its block's record count" block_table.go 
 # direction is the opposite failure to the offset span's and just as silent: a
 # count that reads LOW makes a segment nothing can trim.
 run_guard "a block header claiming no records is refused" block.go   '	if r := encoding.Uint32(hdr[11:]); r == 0 {'   '	if r := encoding.Uint32(hdr[11:]); r == 1<<31 {'   '^TestABlockHeaderClaimingNoRecordsIsRefused$'
+
+# The refusal above is one claim; which ERROR it is, is another, and it is the
+# one a caller acts on. ErrBlockFormat means "another build wrote this store,
+# stop" and is probed before anything is touched — so filing damage under it
+# sends an operator hunting a build mismatch that was never involved. This
+# refusal shipped wrapping it, and the message said so: "unsupported block
+# format version: block header claims no records", which reaching the check had
+# already disproved. Neutralizing puts that back.
+run_guard "a zero record count is damage, not a format version" block.go   '		return 0, 0, 0, 0, fmt.Errorf("commitlog: block header claims no records")'   '		return 0, 0, 0, 0, fmt.Errorf("%w: block header claims no records", ErrBlockFormat)'   '^TestABlockHeaderClaimingNoRecordsIsRefused$'
 
 run_guard "a block table entry claiming no records is refused" block_table.go   '		if records == 0 {'   '		if records < 0 {'   '^TestADamagedBlockTableIsRefused$'
 

@@ -2,6 +2,7 @@ package commitlog
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ligustah/commitlog/compress"
@@ -80,9 +81,24 @@ func TestAV1BlockHeaderIsRefusedRatherThanMisread(t *testing.T) {
 // asked to drop; a count that reads low on EVERY block makes MessageCount
 // answer 0 for the segment, and a log that reports no records is one nothing
 // can trim at all.
+// It is refused as DAMAGE, not as a format problem. This asserted
+// errors.Is(err, ErrBlockFormat) when the field was added, and that was wrong
+// in a way the error text spelled out: "unsupported block format version:
+// block header claims no records". The version byte is correct — that is the
+// only reason the record count was read at all. See ErrBlockFormat's doc for
+// why the boundary is one a caller acts on rather than a tidy-up.
 func TestABlockHeaderClaimingNoRecordsIsRefused(t *testing.T) {
 	hdr := encodeBlockHeader(compress.Snappy, 100, 80, 0)
-	if _, _, _, _, err := parseBlockHeader(hdr); !errors.Is(err, ErrBlockFormat) {
-		t.Fatalf("a block header claiming zero records was accepted (err=%v)", err)
+	_, _, _, _, err := parseBlockHeader(hdr)
+	if err == nil {
+		t.Fatal("a block header claiming zero records was accepted")
+	}
+	if !strings.Contains(err.Error(), "claims no records") {
+		t.Fatalf("refused by a different check than the record count: %v", err)
+	}
+	if errors.Is(err, ErrBlockFormat) {
+		t.Fatalf("filed under ErrBlockFormat, which tells a caller another "+
+			"build wrote this store; the version byte here is this build's own "+
+			"(err=%v)", err)
 	}
 }

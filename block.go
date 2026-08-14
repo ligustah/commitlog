@@ -100,14 +100,22 @@ func parseBlockHeader(hdr []byte) (codec compress.Codec, uncompressedLen, compre
 		return 0, 0, 0, 0, fmt.Errorf("commitlog: unknown block codec %d", hdr[2])
 	}
 	// A block with no records cannot exist — write() refuses an empty message
-	// set before a byte is appended — so a zero here is a v1 header read
-	// through a v2 parse or a field that never got written, and both are the
-	// case this field exists to make impossible. It is refused rather than
-	// treated as "unknown" for the reason MessageCount gives: a count that
-	// silently reads low is a retention walk that deletes what it was asked to
-	// keep, and there is no value of this field that means "ask someone else".
+	// set before a byte is appended — so a zero here is a field nobody wrote.
+	// It is refused rather than treated as "unknown" for the reason
+	// MessageCount gives: a count that silently reads low is a retention walk
+	// that deletes what it was asked to keep, and there is no value of this
+	// field that means "ask someone else".
+	//
+	// NOT ErrBlockFormat, though it was. That sentinel says "this build cannot
+	// read this FORMAT", which is a whole-store fact a caller acts on at
+	// startup — and reaching this line means the version byte was one this
+	// build DOES write, which is the only reason the record count was read at
+	// all. The message said so out loud: "unsupported block format version:
+	// block header claims no records". A zero here is damage in one header, and
+	// filing damage under the version sentinel tells an operator to go looking
+	// for a build mismatch that does not exist.
 	if r := encoding.Uint32(hdr[11:]); r == 0 {
-		return 0, 0, 0, 0, fmt.Errorf("%w: block header claims no records", ErrBlockFormat)
+		return 0, 0, 0, 0, fmt.Errorf("commitlog: block header claims no records")
 	}
 	return codec, encoding.Uint32(hdr[3:]), encoding.Uint32(hdr[7:]), encoding.Uint32(hdr[11:]), nil
 }

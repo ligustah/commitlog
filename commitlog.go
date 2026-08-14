@@ -97,6 +97,24 @@ var ErrSegmentUnreadable = errors.New("commitlog: segment could not be read to i
 // anything) so an incompatible store is refused rather than half-read:
 // discovering the mismatch mid-replay means state has already been
 // mutated under a layout we were guessing at.
+//
+// It means the VERSION BYTE ONLY, and the boundary is load-bearing rather
+// than tidy. A caller acts on this differently from every other read failure:
+// it is a whole-store fact ("this data was written by another build, stop"),
+// and the answer is to run the right build, not to repair anything. The other
+// four ways parseBlockHeader refuses — a header the file is too short to hold,
+// a bad magic, a codec outside the set, a zero record count — are damage in
+// one header of one segment, and they return plain errors carrying their byte
+// offset. Filing any of those here would send an operator hunting a build
+// mismatch that does not exist.
+//
+// That is the opposite of ErrBlockTableFormat, which every one of its sites
+// wraps. The difference is in the sentinels' own words: "not a block table" is
+// true of a bad magic and a bad CRC alike, where "unsupported block format
+// version" is a claim about one byte. A sentinel whose text is specific cannot
+// be applied generally without lying, and the zero-record refusal did exactly
+// that — it read "unsupported block format version: block header claims no
+// records", which reaching it had already disproved.
 var ErrBlockFormat = errors.New("unsupported block format version")
 
 const (
