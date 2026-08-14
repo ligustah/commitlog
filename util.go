@@ -374,7 +374,14 @@ func openWithRetry(path string) (*os.File, error) {
 // missing destination is the normal case for a write rather than a reason to
 // stop, and the successful path has to fsync the directory before returning.
 func retryWhileHeld[T any](op func() (T, error)) (T, error) {
-	deadline := time.Now().Add(waitedOnRetryBudget)
+	return retryWhileHeldWithin(op, waitedOnRetryBudget)
+}
+
+// retryWhileHeldWithin is retryWhileHeld with the budget named by the caller,
+// the same split atomicWriteFileWithin makes and for the same reason: see
+// tickWriteRetryBudget.
+func retryWhileHeldWithin[T any](op func() (T, error), budget time.Duration) (T, error) {
+	deadline := time.Now().Add(budget)
 	for {
 		v, err := op()
 		if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
@@ -404,9 +411,22 @@ func retryWhileHeld[T any](op func() (T, error)) (T, error) {
 // guardcheck reported the retry as uncovered because nothing can falsify it. An
 // untestable retry on a call that does not fail is complexity, not safety.
 func renameWithRetry(oldpath, newpath string) error {
-	_, err := retryWhileHeld(func() (struct{}, error) {
+	return renameWithin(oldpath, newpath, waitedOnRetryBudget)
+}
+
+// renameWithin is renameWithRetry with the budget named by the caller.
+//
+// It exists for the key digest, which is the one publish on this path whose
+// failure is free: all three of its callers treat the digest as best-effort and
+// rebuild it from the segment when it is missing. By the rule the budgets are
+// split on, a write with a retry behind it takes the short one — so before this
+// the digest had the choice between waitedOnRetryBudget, which is five seconds
+// of a compaction pass spent on a file it can regenerate, and no retry at all,
+// which is what it had.
+func renameWithin(oldpath, newpath string, budget time.Duration) error {
+	_, err := retryWhileHeldWithin(func() (struct{}, error) {
 		return struct{}{}, os.Rename(oldpath, newpath)
-	})
+	}, budget)
 	return err
 }
 

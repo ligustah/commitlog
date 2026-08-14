@@ -46,6 +46,15 @@ library from that fork onward.
   callers in a doc comment — and a hand-written list cannot notice a caller that
   never joins it.
 
+- **A key digest could not be published while anything held the previous one
+  open.** The rename that installs it was bare, so on Windows a scanner's handle
+  — or a reader of the previous digest that had not been reaped — failed the
+  publish outright, and the pass then rebuilt the digest by walking the whole
+  segment on its next tick, having just walked it to produce the one it could
+  not install. It retries now, on `tickWriteRetryBudget` rather than the five
+  seconds a waiting caller gets, because a lost digest is free: every caller
+  rebuilds it from the segment when it is absent.
+
 ### Changed
 
 - `readMessage` and `readMessageMetadata` shared a verbatim copy of the frame

@@ -4,6 +4,7 @@ package commitlog
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -163,6 +164,60 @@ func TestReopeningALogRidesOutAHeldDescriptor(t *testing.T) {
 	<-released
 	require.NoError(t, l2.Close())
 	remove(t, dir)
+}
+
+// Publishing a key digest rides out a transient handle on the DESTINATION.
+//
+// This is the publisher's end of the window openWithRetry covers from the
+// reader's end, and the digest is the one publish on that path with a budget of
+// its own: a lost digest is free, because every caller rebuilds it from the
+// segment when it is absent, so it takes the tick's 500ms rather than the five
+// seconds a waiting caller gets. The hold therefore has to fit inside 500ms and
+// still outlast the encode-and-write that precedes the rename, which is why it
+// is measured from an unheld publish rather than picked.
+//
+// Before this the rename was bare. A scanner holding the previous digest open —
+// or a reader of it that has not been reaped — failed the publish outright, and
+// the pass then rebuilt the digest by walking the whole segment on its next
+// tick, having just walked it to produce the one it could not install.
+func TestPublishingADigestRidesOutAHeldDestination(t *testing.T) {
+	l, app := specLog(t)
+	for i := 0; i < 6; i++ {
+		app(&Message{Key: []byte(fmt.Sprintf("k%d", i)), Value: []byte("v")})
+	}
+	l.mu.RLock()
+	seg := l.segments[0]
+	l.mu.RUnlock()
+
+	d, err := buildKeyDigest(seg, newBlockCache())
+	require.NoError(t, err)
+
+	priced := time.Now()
+	require.NoError(t, writeKeyDigest(seg, d), "the digest must exist before it can be held")
+	hold := 2*time.Since(priced) + 100*time.Millisecond
+	require.Less(t, hold, tickWriteRetryBudget,
+		"the hold must sit inside the digest's own budget, or a correct retry gives up first")
+
+	h := openDenyAll(t, digestPath(seg))
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(hold)
+		syscall.CloseHandle(h) // nolint: errcheck
+		close(released)
+	}()
+
+	start := time.Now()
+	err = writeKeyDigest(seg, d)
+	elapsed := time.Since(start)
+	require.NoError(t, err,
+		"a transient handle on the digest must be retried through, not fail the publish")
+	// See TestReopeningALogRidesOutAHeldDescriptor: a publish that returned
+	// before the handle cleared never met it, and a fixture that missed its own
+	// window passes exactly like a working retry.
+	require.GreaterOrEqual(t, elapsed, hold-50*time.Millisecond,
+		"writeKeyDigest returned in %s while the destination was held for %s — it "+
+			"reached the rename after the window closed", elapsed, hold)
+	<-released
 }
 
 // SyncAll rides out a handle that outlives the TICK's budget.

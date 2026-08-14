@@ -847,9 +847,20 @@ run_guard "a ceiling of zero is not unset" clean.go   '	if !b.set {
 # not on how many times it is asked. The neutralization shortens the budget
 # without changing its shape, which is the bug it had: a 500ms ceiling nothing
 # named, that lost 2 of 86 daemon restarts on a loaded box.
+#
+# Anchored on the budget the CALLER-waited entry point passes, not on the loop:
+# the loop takes whichever budget it is handed, and the guarded claim is that
+# this entry point hands it the generous one.
 run_guard "the read retry spends its whole budget" util.go   $'func retryWhileHeld[T any](op func() (T, error)) (T, error) {
-	deadline := time.Now().Add(waitedOnRetryBudget)'   $'func retryWhileHeld[T any](op func() (T, error)) (T, error) {
-	deadline := time.Now().Add(waitedOnRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
+	return retryWhileHeldWithin(op, waitedOnRetryBudget)'   $'func retryWhileHeld[T any](op func() (T, error)) (T, error) {
+	return retryWhileHeldWithin(op, waitedOnRetryBudget / 10)'   '^TestTheReadRetryBoundIsATimeBudgetNotAnAttemptCount$'
+
+# The digest publish is the third end of the same Windows window: a handle on
+# the DESTINATION fails the rename, and this one is the only publish on that
+# path with a budget of its own, because a lost digest is rebuilt from the
+# segment for free. Neutralized back to the bare rename it had, which is what
+# made a scanner's handle cost the pass the walk it had just paid for.
+run_guard_windows "the digest publish retries a held destination" keydigest.go   '	if err := renameWithin(tmp, path, tickWriteRetryBudget); err != nil {' '	if err := os.Rename(tmp, path); err != nil {'   '^TestPublishingADigestRidesOutAHeldDestination$'
 
 # Delete takes the descriptor LAST. Neutralized back to the plain RemoveAll,
 # which records one error and carries on -- so one held file never stopped it

@@ -361,3 +361,75 @@ which is true of the map and says nothing about the file.
   identical. The honest fix is a shared embedded base for the two reader
   structs, which is a real refactor and not a tack-on; nine trivial lines can
   wait for it.
+
+# 2026-08-14 — counting runs instead of reading them
+
+The lens that produced everything below is mechanical: normalise every non-test
+`.go` file (strip blanks and comments), then report every run of N identical
+consecutive lines that appears more than once. At W=8 it found two things; at
+W=6, seven. Reading had walked past all of them, which is the point — a
+transcription is invisible exactly where the two copies read naturally in their
+own context.
+
+## What it found
+
+- `keyOffsets` / `valueOffsets` — one length-prefixed field read twice. The rule
+  both spelled out is that `-1` means ABSENT rather than a length to skip, so a
+  copy that added it anyway moves `end` back four bytes and returns a slice into
+  the previous field.
+- Both `Stream` implementations ended in the same seek-or-close tail. The close
+  is the whole of it: on Windows a leaked handle is not merely a leak, it is
+  what fails the next publish's rename over that path.
+- `readAtLocked` / `scanReadAt` — the same five-line comment and the same
+  closed-then-left discrimination. Collapsing it forced the ordering to be
+  stated: `left` is consulted only once `closed` is true, because a segment
+  marked as left but still open still has its bytes. `findEntryBy` asks a
+  neighbouring question and gets a different answer, which is now written down
+  rather than inferred from the two not matching.
+- Both segment constructors opened with the same seven-field literal. The
+  interesting fields are `firstOffset`/`lastOffset`, whose default is `-1`:
+  a default that is the OPPOSITE of the empty value is exactly the one that
+  survives nine copies and not the tenth, and offset 0 is a real record.
+- `cleanerLoop` / `checkpointHWLoop` — the same ticker-and-select. The ordering
+  inside it is the rule: the closed arm returns before the body runs.
+- `findEntry` / `findEntryByTimestamp` — identical but for three predicates, and
+  the five-line `ErrSegmentReplaced` comment appeared in both.
+
+## A guard can be covered here and uncovered on the runner
+
+`descriptor read retries a held file` was green in the local unfiltered run and
+NO COVERAGE on `guard coverage (windows)`, twice.
+
+The fixture held an exclusive handle on the descriptor for a fixed 120ms and
+required `New()` to succeed. That is a test only while the handle is still held
+when the descriptor is READ, and `New()` reaches that read after claiming the
+directory, building the epoch cache and running `init()`. Here that prologue is
+a few milliseconds; on the runner the window closed first. Nothing went red: the
+mutated build passed, and the ordinary Windows job was green throughout, because
+an unobstructed open succeeds too.
+
+Worth generalising: **a fixture whose window is a `time.Sleep` proves nothing
+unless the test asserts the wait HAPPENED.** Time the call and require
+`elapsed >= hold`. Without it, "the fixture missed its own window" and "the code
+is correct" are the same green — and the only thing that noticed here was a tool
+whose whole job is noticing, on the one platform it runs.
+
+The second half of that story is that `guardcheck` captured the run that would
+have explained it and printed only the verdict. It prints the result lines now;
+the durations are the answer.
+
+## Negatives, recorded so the next sweep does not re-open them
+
+- The eight `ss.Scan()` sites each re-state "io.EOF ends the scan, anything else
+  is damage" in their own words, and a helper looked like the obvious collapse.
+  Declined, on what the recorded failures actually were: both times this rule
+  was got wrong, the loop had **no discrimination at all** — `for ms, _, err :=
+  ss.Scan(); err == nil;` simply ended on either — and a helper is reachable
+  only from code that already knows to call it. It would not have prevented
+  either bug. It also saves no lines (four at each site becomes four), the
+  message at each site is different and worth being different, one site adds
+  `len(out) == 0`, another has to `ss.Close()` first, and `prefix_read` needs
+  the rule INVERTED. Centralising here buys the appearance of a single source
+  over a rule whose every use is a judgement about what that caller loses.
+- `uncommittedReader.segmentBounds` / `committedReader.segmentBounds` — still
+  identical, still waiting on the shared embedded base that is the honest fix.

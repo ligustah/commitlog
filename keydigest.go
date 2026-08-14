@@ -258,6 +258,18 @@ func encodeKeyDigest(d *keyDigest) []byte {
 }
 
 // writeKeyDigest persists the digest atomically next to the segment files.
+//
+// The rename is the publisher's end of the Windows window openWithRetry covers
+// from the reader's end: anything holding the destination open — the scanner,
+// the indexer, a reader of the previous digest that has not been reaped — makes
+// the rename itself fail with "Access is denied", and retrying only the readers
+// moves the error to the writer rather than removing it.
+//
+// tickWriteRetryBudget, not the caller-waited one, because a lost digest is
+// free: every caller treats it as best-effort and buildKeyDigest regenerates it
+// from the segment when it is absent. Five seconds of a compaction pass spent
+// on a file it can rebuild would be paying the caller's price for the tick's
+// failure.
 func writeKeyDigest(seg *segment, d *keyDigest) error {
 	data := encodeKeyDigest(d)
 	path := digestPath(seg)
@@ -265,7 +277,7 @@ func writeKeyDigest(seg *segment, d *keyDigest) error {
 	if err := os.WriteFile(tmp, data, 0666); err != nil {
 		return errors.Wrap(err, "write key digest")
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameWithin(tmp, path, tickWriteRetryBudget); err != nil {
 		os.Remove(tmp) // nolint: errcheck
 		return errors.Wrap(err, "install key digest")
 	}
