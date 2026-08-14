@@ -254,17 +254,22 @@ func (p *prefixSource) scanSegmentFiltered(seg *segment, bound int64) ([]prefixQ
 				"record at offset %d: expected CRC 0x%08x, got 0x%08x", off, want, got)
 		}
 		rec := prefixQueued{msg: cp, offset: off, ts: ms.Timestamp(), epoch: ms.LeaderEpoch()}
-		if latest != nil && !control {
-			if i, ok := latest[string(key)]; ok {
-				// Retire the earlier copy in place rather than overwriting it
-				// with this one: out is built in offset order, and reusing the
-				// old slot would put this record back at the old one's position.
-				dead[i] = true
+		if latest != nil {
+			if !control {
+				if i, ok := latest[string(key)]; ok {
+					// Retire the earlier copy in place rather than overwriting it
+					// with this one: out is built in offset order, and reusing the
+					// old slot would put this record back at the old one's position.
+					dead[i] = true
+				}
+				latest[string(key)] = len(out)
 			}
-			latest[string(key)] = len(out)
+			// Only tracked when there is supersession to resolve. Without
+			// SkipSuperseded nothing ever reads this, and every record here is
+			// one the caller asked for.
+			dead = append(dead, false)
 		}
 		out = append(out, rec)
-		dead = append(dead, false)
 	}
 	if latest == nil {
 		return out, nil
