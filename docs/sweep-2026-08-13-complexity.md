@@ -613,9 +613,60 @@ surface: a run whose danger arrives on a timer is soak-shaped by construction.
 Neither of these needed a longer run. Both needed the dangerous thing to happen
 on purpose.
 
+## A mechanical duplicate scan, and the one thing it caught
+
+After the hand-picked duplications ran out, a mechanical pass: every non-comment
+line of every non-test `.go` file, hashed in windows, looking for repeats. At six
+lines the only hits in the package were two import blocks — worth recording as a
+negative, because it says the transcription findings above are genuinely done and
+the next sweep should not go looking for more of them.
+
+At four lines there were thirteen, nearly all of them legitimate: the same struct
+literal built from the same fields, the same `wg.Wait()` + error-drain tail.
+Reading them was still worth it, because one was not duplication at all.
+
+**Three sites open-coded `segmentsSnapshot()` and then copied the result** —
+`ReadMessageSet`, `forEachSegment`, `movePlaced`, each with its own `RLock` and a
+`make`+`copy`. The function they were reproducing hands out the live slice
+header on purpose, and its doc explains at length why that is safe: the set is
+copy-on-write, so the array no one may write to needs no defending. The copy was
+buying an allocation and nothing else.
+
+That is the harmless half. Following the doc's *obligation* — "whoever changes
+the set publishes a NEW array" — to its callers turned up one that broke it:
+
+**`adoptTierManifestLocked` appended to `l.segments` and then called
+`sort.Slice` on it.** A sort swaps elements in place, which is the exact thing
+the doc forbids and the exact thing v0.44.2 was spent on, in `TruncateBefore`.
+
+Two lessons, and they are the reusable part:
+
+- **A write that does not look like a write.** Both breaks of this rule were
+  that. An element assignment at least reads as a write; a sort does not read as
+  one at all. Write invariants as the OPERATIONS that violate them — `x[i] =`,
+  any sort, `copy` into it — not as the concept, because the next violation
+  will be spelled a way the concept did not suggest.
+- **Safe by the schedule is not safe, and it is where a comment is weakest.**
+  The adopt was harmless only because it runs inside `open()`, before there is a
+  log for anyone to hold a reader on. So no test could go red — there is no
+  reader to lose the race — and a guardcheck guard was impossible in principle
+  rather than merely expensive. Nothing would ever have contradicted the
+  comment. The first maintenance path to adopt a manifest another process
+  published would have removed the schedule without touching this function.
+
+Hence `hack/cowsegments.sh` rather than a guard, in CI beside `layercheck` and
+`atomicwrite`. **The decision rule: if a violation is invisible to every test you
+could write, it is a lint, not a guard.** It strips comments before matching —
+the prohibited forms are quoted verbatim in the docs that explain the rule, here
+included — and it carries the harness self-check this repo now always writes: if
+`segmentsSnapshot` ever stops returning the live header, it errors loudly instead
+of passing forever while enforcing a rule that has ceased to exist. Both halves
+falsified before landing, the offender half against a throwaway `.go` file made
+visible to `git ls-files` with `git add -N`.
+
 ## Follow-ups this pass opened
 
-- **`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that
+- ~~**`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that
   moves part of the cursor by poking a field. It is deliberate and it is not a
   `refill()`: keeping `bufStart` and `data` means a subsequent small read can
   still be served from the buffer the direct `ReadAt` bypassed, and that is safe
@@ -623,7 +674,21 @@ on purpose.
   throw the buffer away. Worth a named `bufReader` method carrying that
   sentence, so the next reader does not "tidy" it into a reset and quietly lose
   the buffer, or into nothing and read from a stale position. Not taken in the
-  same change as the cursor operations — one verified thing at a time.
+  same change as the cursor operations — one verified thing at a time.~~
+  **Taken, 2026-08-14, as `bufReader.advanceTo`.**
+
+  Guarded, which was not obvious in advance: the tidy-into-a-`reset` failure is
+  a performance regression no test can see, but the tidy-into-*nothing* failure
+  is loud. Mutating the line to `_ = r.br` leaves the buffered reader at its
+  pre-`ReadAt` position, so the next small read re-serves bytes the direct read
+  already consumed — and what surfaces is not "wrong data" but a **CRC failure
+  on the healthy record after the large one**, with an expected value of
+  `0x78787878`. That reads as ASCII `xxxx`, which is the tell for misalignment
+  rather than damage.
+
+  Both large-message tests are named on the one guard, because `ReadMessage`
+  and `ReadMessageMetadata` reach this line through different callers and either
+  alone would leave the other asserting nothing about it.
 
 ## Deferred, with reasons
 
