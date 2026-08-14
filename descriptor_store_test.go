@@ -63,10 +63,13 @@ func adoptingOpts(t *testing.T, store *FileSegmentStore) Options {
 }
 
 // The descriptor lives where the log's DATA lives. For a store-backed log that
-// is the store, beside the manifest — not the local directory.
+// is the store, beside the manifest — which is where it is READ from, and the
+// fact the two tests below rest on, stated on its own so a failure says which
+// half broke.
 //
-// This is the fact the two tests below rest on, stated on its own so a failure
-// says which half broke.
+// A copy is also written to the local directory (see publishDescriptor), and
+// that is not what this asserts: a copy nobody consults for a decision is not
+// the authority, and the authority is what adoption is checked against.
 func TestAStoreBackedLogPublishesItsDescriptorToTheStore(t *testing.T) {
 	store, _ := tieredCompactedLog(t)
 

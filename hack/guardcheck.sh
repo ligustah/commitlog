@@ -2105,6 +2105,21 @@ run_guard "an offloaded segment publishes its record count" segment.go   $'		Phy
 		BlockMode:      s.blockMode,
 		Records:        0,'   '^TestAnHonestlySizedBlockTableStillLoads$'
 
+# A tiered log stamps its OWN DIRECTORY as well as its tiers. Neutralized to the
+# either/or that shipped: local only when there is no store to publish to.
+#
+# That form still compiles and reads as reasonable -- the descriptor lives where
+# the data lives -- and it leaves a broker's local copy of a tiered partition
+# unable to say what it is. InspectIdentity answers ErrNoLog for such a
+# directory, which is the answer that PERMITS deletion, so the identity mechanism
+# was switched off for exactly the logs whose data outlives the directory.
+run_guard "a tiered log stamps its own directory too" descriptor.go   $'	if err := writeDescriptor(opts.Path, d); err != nil {
+		return err
+	}'   $'	if len(opts.Tiers) == 0 {
+		return writeDescriptor(opts.Path, d)
+	}'   '^TestInspectIdentityReadsATieredLogsLocalCopy$'
+
+
 echo
 if [ "$failures" -ne 0 ]; then
   if [ -n "$anchors_only" ]; then

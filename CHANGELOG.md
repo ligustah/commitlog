@@ -58,6 +58,23 @@ library from that fork onward.
   case above it already covered — so the codec check, whose only production
   caller is `parseBlockHeader`, had no coverage at all.
 
+- **A tiered log now writes its descriptor to its own directory as well.** It
+  used to go to the stores only, on the reasoning that the descriptor belongs
+  where the data lives — which left a broker's local copy of a tiered partition
+  unable to say what it was. `InspectIdentity` answers `ErrNoLog` for a directory
+  with no descriptor, and that is the answer that *permits* deletion, so
+  durable_streams' reclaimer either had to delete a live log's local state or (as
+  it does) refuse to touch anything it cannot identify — leaking a previous
+  incarnation's records forever under a name that was deleted and recreated while
+  the broker was away. The identity mechanism was switched off for exactly the
+  logs whose data outlives the directory.
+
+  The tier remains the **authority**: reconciliation still reads the nearest
+  tier, and `logIsNew` still asks the tiers, so a local file left behind cannot
+  make an adopted tier look like an existing log. The local copy is for
+  inspection. `Tier.ReadOnly` does not suppress it — that flag is about a *shared*
+  store, and a follower still has to be able to say whose bytes it holds.
+
 ### Added
 
 - **`BlockInfo.Records`** — `InspectSegment(...).Blocks()` reports each block's

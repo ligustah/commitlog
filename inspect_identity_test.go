@@ -153,35 +153,86 @@ func dirNames(t *testing.T, dir string) []string {
 	return names
 }
 
-// A tiered log's descriptor is in its STORE, and a path cannot reach one.
+// A TIERED LOG'S DIRECTORY SAYS WHAT IT HOLDS, TOO.
 //
-// Documented as local-only, so this pins that it fails LOUDLY rather than
-// answering for a log it cannot see. The caller this was built for is judging
-// this broker's local copy, so local is the right scope — but "local" has to mean
-// ErrNoLog and not a confident Stored=false, which would be this function
-// asserting something about bytes it never read.
-func TestInspectIdentityDoesNotReachIntoATier(t *testing.T) {
+// This function reads one path and never a store, which is the right scope: the
+// caller is judging THIS broker's local copy, and a copy is what it may delete.
+// But a tiered log used to publish its descriptor only into its stores, so the
+// one directory whose contents are most in question — a broker's local copy of a
+// partition whose data lives in a tier — was the one that could not be asked.
+//
+// The consequence was not a missing feature. It is the answer InspectIdentity
+// gives for a directory with no descriptor: ErrNoLog, "there is no log here",
+// which is the answer that PERMITS deletion. A reclaimer that acted on it would
+// delete a live tiered log's local state; one that refuses to (durable_streams'
+// does, since unstamped and stale are indistinguishable) instead leaks the
+// previous lifetime's records forever under a name that was deleted and
+// recreated while the broker was away. Either way the identity mechanism was
+// switched off for exactly the logs that most need it.
+//
+// So the descriptor is now written locally as well, always. The tier stays the
+// authority — see publishDescriptor — and this is the inspection copy.
+func TestInspectIdentityReadsATieredLogsLocalCopy(t *testing.T) {
 	dir := tempDir(t)
 	fs, err := NewFileSegmentStore(filepath.Join(dir, "store"))
 	require.NoError(t, err)
 	logDir := filepath.Join(dir, "log")
+	want := []byte("incarnation-13")
 	l, cleanup := setupWithOptions(t, Options{
 		Name:            "tiered",
 		Path:            logDir,
 		MaxSegmentBytes: 512,
 		Tiers:           oneTier(fs),
-		Identity:        []byte("incarnation-13"),
+		Identity:        want,
 	})
 	defer cleanup()
 	appendMsg(t, l, "a record")
 	require.NoError(t, l.SyncAll())
 
-	// The premise: the descriptor really is in the store and not on disk.
-	_, err = os.Stat(descriptorPath(logDir))
-	require.True(t, os.IsNotExist(err), "this log keeps a LOCAL descriptor, so the test proves nothing")
+	got, err := InspectIdentity(logDir)
+	require.NoError(t, err,
+		"a tiered log's own directory could not say what it holds, so a "+
+			"reclaimer judging this broker's copy is told there is no log here")
+	require.True(t, got.Stored)
+	require.Equal(t, want, got.Identity)
 
-	_, err = InspectIdentity(logDir)
-	require.ErrorIs(t, err, ErrNoLog)
+	// And the tier still has it: the local copy is an addition, not a move. If
+	// this were the only copy, a node adopting the store alone would have nothing
+	// to be checked against, and logIsNew would call an adopted tier a new log.
+	stored, err := readStoreDescriptor(fs)
+	require.NoError(t, err, "the tier is the authority and must still be able to answer")
+	require.Equal(t, want, stored.Identity)
+}
+
+// A READ-ONLY TIER IS NOT A REASON TO WITHHOLD THE LOCAL COPY.
+//
+// ReadOnly is a statement about a store SHARED with other nodes — this process
+// must not publish into it. It says nothing about the directory this process
+// owns, and a follower still has to be able to say whose bytes it is holding;
+// arguably more so, since a follower's copy is the kind a reclaimer meets.
+//
+// The shape this guards against is the obvious simplification: one loop, skip
+// the whole publish when there is nothing writable to publish to.
+func TestAFollowerOnAReadOnlyTierStillStampsItsOwnDirectory(t *testing.T) {
+	dir := tempDir(t)
+	fs, err := NewFileSegmentStore(filepath.Join(dir, "store"))
+	require.NoError(t, err)
+	logDir := filepath.Join(dir, "log")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+	want := []byte("incarnation-19")
+
+	require.NoError(t, publishDescriptor(Options{
+		Path:  logDir,
+		Tiers: []Tier{{Name: "shared", Store: fs, ReadOnly: true}},
+	}, descriptor{Identity: want, MaxSegmentBytes: 512}))
+
+	got, err := InspectIdentity(logDir)
+	require.NoError(t, err)
+	require.Equal(t, want, got.Identity)
+
+	_, err = readStoreDescriptor(fs)
+	require.True(t, os.IsNotExist(err),
+		"a read-only tier was written to: that store belongs to another node")
 }
 
 // The identity survives a REOPEN by a caller that passes none, which is what

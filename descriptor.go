@@ -566,18 +566,41 @@ func loadDescriptor(opts Options) (descriptor, error) {
 	return readDescriptor(opts.Path)
 }
 
-// publishDescriptor writes it back to the same place.
+// publishDescriptor writes it everywhere this log's identity has to be readable:
+// the log's own directory, always, and every tier it owns.
 //
-// A log that does not own a tier does not write to it — that is what
-// Tier.ReadOnly means, and a descriptor is not an exception to it. Such a
-// process is a follower on that tier: it has already been checked against
-// whatever the owner published, and if the owner published nothing there is
-// nothing for it to disagree with. Silently declining to write is right here in
-// a way it would not be for segment data, because the descriptor is a claim
-// about the log rather than part of it.
+// THE LOCAL COPY IS UNCONDITIONAL, tiers or no tiers, and that is the part worth
+// explaining because it used to be an either/or. A tiered log wrote its
+// descriptor only to the stores, which left the one directory that most needs to
+// say what it holds unable to: a broker's local copy of a tiered partition.
+// durable_streams' reclaimer judges such a directory WITHOUT opening it (see
+// InspectIdentity), and it refuses to delete a copy it cannot identify —
+// deliberately, since an unidentified copy and a stale one look the same and
+// only one of them may ever be removed. So a name that was deleted and recreated
+// while a broker was away left that broker holding the previous lifetime's
+// records under the reused name, forever. Their sidecar file, which this
+// descriptor replaced, was local unconditionally; moving the stamp in here is
+// otherwise the right change and this was the one thing it lost.
+//
+// Tier.ReadOnly does not reach it. That flag is a statement about a store SHARED
+// with other nodes — this process is a follower there and has already been
+// checked against whatever the owner published. It says nothing about the local
+// path, which the process owning the log can always write, and a follower still
+// has to be able to say what its own bytes are.
+//
+// The tier stays the AUTHORITY: loadDescriptor reads the nearest tier and
+// reconciliation is settled there, and logIsNew asks the tiers for the reason
+// its own comment gives — a local descriptor left behind must not make an
+// adopted tier look like an existing log. The local copy is for inspection, and
+// where the two disagree the tier is right.
+//
+// Local FIRST, so that a failure to write it aborts before anything reaches a
+// store other nodes read. The ordering is otherwise free: nothing consults the
+// local copy to decide anything, so a tier write that fails after it leaves a
+// file that is merely inert.
 func publishDescriptor(opts Options, d descriptor) error {
-	if len(opts.Tiers) == 0 {
-		return writeDescriptor(opts.Path, d)
+	if err := writeDescriptor(opts.Path, d); err != nil {
+		return err
 	}
 	// Every tier it owns, because every tier must be able to say which log it
 	// belongs to. A store that cannot is not self-describing, and a node
