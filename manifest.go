@@ -197,11 +197,17 @@ func (l *commitLog) publishTierManifests(tiers []Tier, retiring []int64, pending
 				delete(override, o.BaseOffset)
 			}
 		}
-		for _, p := range pending {
-			if _, ok := override[p.BaseOffset]; ok {
-				objs = append(objs, p)
-				delete(override, p.BaseOffset)
-			}
+		// Whatever the walk above did not consume names a base offset the tier
+		// state does not hold yet, so it is an addition. Taken from the map rather
+		// than by walking `pending` again and asking the map whether each entry
+		// survived: that phrasing needed a second delete to keep two pending
+		// entries with one base offset from being appended twice, and stated the
+		// deduplication as a side effect of a lookup. The map already holds one
+		// entry per base offset. Its iteration order does not reach the output —
+		// the sort below is total over these, since every remaining base offset is
+		// distinct.
+		for _, p := range override {
+			objs = append(objs, p)
 		}
 		sort.Slice(objs, func(i, j int) bool { return objs[i].BaseOffset < objs[j].BaseOffset })
 	}

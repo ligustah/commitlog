@@ -73,6 +73,14 @@ library from that fork onward.
 
 ### Changed
 
+- `publishTierManifests` merged its pending overrides by walking the pending
+  list twice: once to replace matching tier-state entries, then again to ask a
+  map whether each entry had survived the first walk. Whatever the first walk
+  leaves in the map *is* the set of additions, so it is appended from the map
+  now. The second walk needed a second `delete` to stop two pending entries
+  sharing a base offset from being appended twice — deduplication written as a
+  side effect of a lookup, with nothing saying so. No behaviour change.
+
 - Two comments still described the frame header as unchecksummed, one of them
   contradicting a paragraph four lines above it in the same block. The header
   has carried its own CRC since it grew one, verified before any field is read,
