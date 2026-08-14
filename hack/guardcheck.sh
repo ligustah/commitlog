@@ -372,6 +372,42 @@ run_guard "the interface is the reachable API" interface.go \
   '' \
   '^TestCommitLogInterfaceNamesEveryExportedMethod$'
 
+# A prefix read over a digest-less segment must make ONE pass over it. Deleting
+# the servedThrough advance below is silent in every other sense: the records
+# returned are identical, every correctness test stays green, and the only
+# symptom is that each segment gets scanned twice — because pop walks p.next
+# back to the last record it served, leaving a drained segment still looking
+# unfinished to the search loop. That is precisely how the double visit survived
+# in this path for as long as it did, back when a digest made the second visit
+# nearly free. The guard exists because the cost is the whole point of the fix
+# and cost is the thing a passing suite does not notice.
+run_guard "a drained segment is not searched again" prefix_source.go \
+  '	if p.servedThrough > p.next {
+		p.next = p.servedThrough
+	}
+' \
+  '' \
+  '^TestPrefixReadWithoutDigestsScansEachSegmentOnce$'
+
+# The digest-less prefix path must keep filtering by scan, not by building a
+# digest it discards. Restoring the old fallback returns the same records, so
+# nothing but a cost assertion can see it.
+run_guard "a digest-less segment is scanned, not rebuilt" prefix_source.go \
+  '		return p.scanSegmentFiltered(seg, bound)' \
+  '		d, err := buildKeyDigest(seg, newBlockCache())
+		if err != nil {
+			return nil, err
+		}
+		hits, err := digestHits(d, p.spec, p.next, bound)
+		if err != nil {
+			return nil, err
+		}
+		if len(hits) == 0 {
+			return nil, nil
+		}
+		return p.fetch(seg, hits)' \
+  '^TestPrefixReadWithoutDigestsScansEachSegmentOnce$'
+
 run_guard "readMessage CRC" reader.go \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c {' \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c && false {' \
