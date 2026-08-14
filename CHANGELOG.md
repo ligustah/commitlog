@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.87.0 — 2026-08-14
 
 ### Performance
 
@@ -106,6 +106,17 @@ library from that fork onward.
   identity, not just the resulting base offset: an untouched segment already
   starts at its own base, so the offset alone counts a whole-segment delete as a
   rewrite.
+
+- Eight tests were renamed so their names state which method they drive.
+  `Truncate` drops the log's suffix, `TruncateBefore` its prefix — different
+  paths with different lock discipline — and the tests told them apart by word
+  form alone: `TestTruncating…` meant `Truncate`, `TestATruncation…` meant
+  `TruncateBefore`, and nothing recorded that. `TestATruncateUnlinks…` and
+  `TestATruncationUnlinks…` sit 37 lines apart in one file, drive different
+  methods and differ by two letters. All eight were correct; the hazard is the
+  next edit. Found by a whole-function near-duplicate scan, which also reported
+  the production tree clean — one pair over the floor, and it is
+  `digestDecoder.uvarint`/`.varint`.
 
 ## v0.86.0 — 2026-08-14
 
