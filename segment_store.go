@@ -88,9 +88,20 @@ func (l *localBacking) Stream(off int64) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
+	return streamFrom(f, off)
+}
+
+// streamFrom hands back f positioned at off, closing it if it cannot be.
+//
+// The close is the point. A Stream that returned an error after opening the
+// file would leak the handle, and on Windows a leaked handle is not merely a
+// leak: it is what makes the next publish's rename over that path fail with
+// "Access is denied". Both Stream implementations ended in these same eight
+// lines, which is two places to remember it.
+func streamFrom(f *os.File, off int64) (io.ReadCloser, error) {
 	if off > 0 {
 		if _, err := f.Seek(off, io.SeekStart); err != nil {
-			f.Close()
+			f.Close() // nolint: errcheck
 			return nil, err
 		}
 	}
@@ -322,13 +333,7 @@ func (s *FileSegmentStore) Stream(key string, off int64) (io.ReadCloser, error) 
 	if err != nil {
 		return nil, err
 	}
-	if off > 0 {
-		if _, err := f.Seek(off, io.SeekStart); err != nil {
-			f.Close()
-			return nil, err
-		}
-	}
-	return f, nil
+	return streamFrom(f, off)
 }
 
 func (s *FileSegmentStore) Size(key string) (int64, error) {

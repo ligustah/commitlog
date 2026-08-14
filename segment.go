@@ -1668,21 +1668,41 @@ func (s *segment) ReadAt(p []byte, off int64) (n int, err error) {
 	return s.readAtLocked(p, off)
 }
 
+// shutErrorLocked says why this segment cannot serve a read, or nil if it can.
+// Caller holds at least the read lock.
+//
+// A segment that has left the log tells the caller to re-resolve against the
+// current one, which is what the reader does with ErrSegmentReplaced — whether
+// it left by being rewritten or by being deleted. Only ErrSegmentClosed says
+// "this handle is shut" — a claim about the segment, not about the log — and a
+// reader has nowhere to go with it.
+//
+// `left` is consulted only once `closed` is true, and the order is the
+// behaviour rather than a detail of how it is written: a segment a pass has
+// marked as left but not yet closed still HAS its bytes, and answering it with
+// "go and re-resolve" would send a reader away from a segment that can still
+// serve it. Which is not the same question findEntryBy asks — that one refuses
+// a left segment while it is still open, because a SEARCH resolved against a
+// segment on its way out returns entries the caller will then read from the
+// replacement. See there; the two rules neighbour each other and are not the
+// same rule.
+func (s *segment) shutErrorLocked() error {
+	if !s.closed {
+		return nil
+	}
+	if s.left {
+		return ErrSegmentReplaced
+	}
+	return ErrSegmentClosed
+}
+
 // readAtLocked is the body of ReadAt without acquiring the segment lock. It is
 // used both by ReadAt and by index seeks (findEntry/findEntryByTimestamp) which
 // already hold the read lock and must not re-acquire it (sync.RWMutex read locks
 // are not reentrant in the presence of a waiting writer).
 func (s *segment) readAtLocked(p []byte, off int64) (n int, err error) {
-	if s.closed {
-		// A segment that has left the log tells the caller to re-resolve against
-		// the current one, which is what the reader does with ErrSegmentReplaced —
-		// whether it left by being rewritten or by being deleted. Only
-		// ErrSegmentClosed says "this handle is shut" — a claim about the segment,
-		// not about the log — and a reader has nowhere to go with it.
-		if s.left {
-			return 0, ErrSegmentReplaced
-		}
-		return 0, ErrSegmentClosed
+	if err := s.shutErrorLocked(); err != nil {
+		return 0, err
 	}
 	if !s.blockMode {
 		return s.backing.ReadAt(p, off)
@@ -1804,16 +1824,8 @@ func (s *segment) scanReadAt(c *blockCache, st *scanStream, p []byte, off int64)
 	}
 	s.RLock()
 	defer s.RUnlock()
-	if s.closed {
-		// A segment that has left the log tells the caller to re-resolve against
-		// the current one, which is what the reader does with ErrSegmentReplaced —
-		// whether it left by being rewritten or by being deleted. Only
-		// ErrSegmentClosed says "this handle is shut" — a claim about the segment,
-		// not about the log — and a reader has nowhere to go with it.
-		if s.left {
-			return 0, ErrSegmentReplaced
-		}
-		return 0, ErrSegmentClosed
+	if err := s.shutErrorLocked(); err != nil {
+		return 0, err
 	}
 	if !s.blockMode {
 		if st != nil {

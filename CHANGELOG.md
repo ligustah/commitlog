@@ -79,6 +79,14 @@ library from that fork onward.
   left the log, and a rule written down twice is a rule that can be corrected in
   one place. No behaviour change.
 
+- Three more transcriptions found by counting repeated runs of code rather than
+  by reading: `keyOffsets`/`valueOffsets` were one length-prefixed field read
+  twice (including the "-1 means absent, and nothing follows it" rule), both
+  `Stream` implementations ended in the same seek-or-close-the-handle tail, and
+  `readAtLocked`/`scanReadAt` each spelled out when a shut segment answers
+  `ErrSegmentReplaced` rather than `ErrSegmentClosed`. One `fieldOffsets`,
+  `streamFrom` and `shutErrorLocked` now. No behaviour change.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking

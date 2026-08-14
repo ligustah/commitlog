@@ -168,22 +168,29 @@ func (m SerializedMessage) Headers() map[string][]byte {
 }
 
 func (m SerializedMessage) keyOffsets() (start, end, size int32) {
-	start = 6
-	size = int32(encoding.Uint32(m[start:]))
-	end = start + 4
-	if size != -1 {
-		end += size
-	}
-	return
+	return m.fieldOffsets(6)
 }
 
 func (m SerializedMessage) valueOffsets() (start, end, size int32) {
 	_, keyEnd, _ := m.keyOffsets()
-	start = keyEnd
-	size = int32(encoding.Uint32(m[start:]))
-	end = start + 4
+	return m.fieldOffsets(keyEnd)
+}
+
+// fieldOffsets locates the length-prefixed field beginning at start: a 4-byte
+// size, then that many bytes.
+//
+// -1 is ABSENT, and is the whole reason this is one function rather than the
+// two identical ones it replaces. A size of -1 is not a length to skip over —
+// nothing follows it — so the field ends at start+4, and a copy that added the
+// size anyway would move `end` backwards by four bytes and hand the caller a
+// slice into the middle of the previous field. The key and the value are the
+// same wire shape, and there is no version of this format where one of them
+// spells absent differently from the other.
+func (m SerializedMessage) fieldOffsets(start int32) (int32, int32, int32) {
+	size := int32(encoding.Uint32(m[start:]))
+	end := start + 4
 	if size != -1 {
 		end += size
 	}
-	return
+	return start, end, size
 }
