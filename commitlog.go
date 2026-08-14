@@ -2559,28 +2559,25 @@ func (l *commitLog) split(oldActiveSegment *segment) error {
 }
 
 func (l *commitLog) checkpointHWLoop() {
-	ticker := time.NewTicker(l.HWCheckpointInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-		case <-l.closed:
-			return
-		}
-		l.mu.RLock()
-		if l.deleted {
-			l.mu.RUnlock()
-			return
-		}
-		if err := l.checkpointHW(tickWriteRetryBudget); err != nil {
-			// Transient on Windows: the atomic rename can hit a sharing
-			// violation while a scanner holds the file. The checkpoint is
-			// only an optimization (RecoverTail rides out staleness), so a
-			// failed tick is retried on the next one — never fatal.
-			slog.Warn("high-watermark checkpoint failed; retrying next tick",
-				slog.String("path", l.Path), slog.String("err", err.Error()))
-		}
-		l.mu.RUnlock()
+	l.tickUntilClosed(l.HWCheckpointInterval, l.checkpointHWTick)
+}
+
+// checkpointHWTick is one pass of the loop above. A deleted log stops writing
+// but does not stop the loop: tickUntilClosed ends on l.closed, and Delete
+// closes it.
+func (l *commitLog) checkpointHWTick() {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.deleted {
+		return
+	}
+	if err := l.checkpointHW(tickWriteRetryBudget); err != nil {
+		// Transient on Windows: the atomic rename can hit a sharing
+		// violation while a scanner holds the file. The checkpoint is
+		// only an optimization (RecoverTail rides out staleness), so a
+		// failed tick is retried on the next one — never fatal.
+		slog.Warn("high-watermark checkpoint failed; retrying next tick",
+			slog.String("path", l.Path), slog.String("err", err.Error()))
 	}
 }
 

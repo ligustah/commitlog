@@ -18,8 +18,25 @@ import (
 
 func (l *commitLog) cleanerLoop() {
 	l.cleanAtOpen()
+	l.tickUntilClosed(l.CleanerInterval, l.cleanerTick)
+}
 
-	ticker := time.NewTicker(l.CleanerInterval)
+// tickUntilClosed runs fn on every tick of interval, and returns when the log
+// closes.
+//
+// One select, and the ORDER inside it is the whole reason this is shared: the
+// closed arm returns before fn runs, so a log shutting down does not get one
+// last pass out of a loop that has already been told to stop. Written out twice
+// — here and in checkpointHWLoop — it was two chances to get that backwards,
+// and this repo has already lost a day to a cleaner loop whose PASS was fine
+// and whose loop was not.
+//
+// Go picks uniformly among ready cases, so a tick that arrives at the same
+// moment as the close may still run fn once. That is a race with the close, not
+// a use after it: everything fn touches is alive until Close returns, and Close
+// waits for this loop.
+func (l *commitLog) tickUntilClosed(interval time.Duration, fn func()) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -27,7 +44,7 @@ func (l *commitLog) cleanerLoop() {
 		case <-l.closed:
 			return
 		}
-		l.cleanerTick()
+		fn()
 	}
 }
 

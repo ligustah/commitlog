@@ -484,19 +484,32 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, tier string,
 	return stderrors.Join(errs...)
 }
 
-func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec) (*segment, error) {
-	s := &segment{
+// emptySegment is a segment with nothing in it yet: the fields every
+// constructor sets the same way, and no bytes behind them.
+//
+// The two -1s are why this exists rather than being written out per
+// constructor. Offset 0 is a real record, so a zero firstOffset says the log's
+// very first append is already here — a segment that reports a record it does
+// not hold, from a field a constructor merely forgot. Being defaults of the
+// empty value's OPPOSITE is exactly the shape that survives being copied nine
+// times and then not copied the tenth.
+func emptySegment(path string, baseOffset, maxBytes int64, codec compress.Codec) *segment {
+	return &segment{
 		maxBytes:    maxBytes,
 		BaseOffset:  baseOffset,
 		firstOffset: -1,
 		lastOffset:  -1,
 		path:        path,
-		suffix:      suffix,
 		codec:       codec,
 		waiters:     make(map[interface{}]chan struct{}),
-		dirtyData:   true,
-		dirtyIndex:  true,
 	}
+}
+
+func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec) (*segment, error) {
+	s := emptySegment(path, baseOffset, maxBytes, codec)
+	s.suffix = suffix
+	s.dirtyData = true
+	s.dirtyIndex = true
 	// If this is a new segment, ensure the file doesn't already exist.
 	if isNew && exists(s.logPath()) {
 		return nil, ErrSegmentExists
@@ -553,22 +566,14 @@ func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix stri
 // the manifest, the index stays remote (fetched into cache on first seek), and
 // Index is nil.
 func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compress.Codec, store SegmentStore, tier string, meta offloadMeta, cache *RemoteIndexCache) (*segment, error) {
-	s := &segment{
-		maxBytes:    maxBytes,
-		BaseOffset:  baseOffset,
-		firstOffset: -1,
-		lastOffset:  -1,
-		path:        path,
-		codec:       codec,
-		waiters:     make(map[interface{}]chan struct{}),
-		sealed:      true,
-		store:       store,
-		tier:        tier,
-		// Taken from the manifest VERBATIM. Nothing recomputes a key from the
-		// base offset — it could not, since each upload allocated its own — so
-		// objects written by any earlier version stay resolvable.
-		storeKey: meta.LogKey,
-	}
+	s := emptySegment(path, baseOffset, maxBytes, codec)
+	s.sealed = true
+	s.store = store
+	s.tier = tier
+	// Taken from the manifest VERBATIM. Nothing recomputes a key from the base
+	// offset — it could not, since each upload allocated its own — so objects
+	// written by any earlier version stay resolvable.
+	s.storeKey = meta.LogKey
 
 	// Every manifest entry carries the object's size, its logical size and
 	// whether it is block-compressed, for both options — so none of the three is

@@ -87,6 +87,15 @@ library from that fork onward.
   `ErrSegmentReplaced` rather than `ErrSegmentClosed`. One `fieldOffsets`,
   `streamFrom` and `shutErrorLocked` now. No behaviour change.
 
+- Two more from the same count: both segment constructors opened with the same
+  seven-field literal, `firstOffset`/`lastOffset` sentinels included, and both
+  background loops wrote out the same ticker-and-select. `emptySegment` and
+  `tickUntilClosed` now. The sentinels are the reason for the first — offset 0
+  is a real record, so a constructor that forgot the `-1`s would report the
+  log's first append as already present — and the select's ordering is the
+  reason for the second: the closed arm returns before the body runs, so a
+  shutting-down log gets no extra pass. No behaviour change.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking
