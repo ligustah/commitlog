@@ -345,12 +345,19 @@ type Options struct {
 	// caller can usefully say in advance.
 	PrefixReadConcurrency     int
 	PrefixReadTierConcurrency int
-	// AdoptOptions records THESE options as the log's descriptor instead of
-	// checking against the one the log already has. It means one thing — "I know
-	// what this log is, record it" — and that one thing answers both cases New
-	// otherwise refuses: retuning an existing log's compaction settings, and
-	// opening a log that exists with no descriptor. Neither can be settled from
-	// what is stored, which is why both need a human to say so.
+	// AdoptOptions records THESE options' GATING settings as the log's
+	// descriptor instead of checking against the one the log already has. It
+	// means one thing — "I know what this log is, record it" — and that one
+	// thing answers both cases New otherwise refuses: retuning an existing log's
+	// compaction settings, and opening a log that exists with no descriptor.
+	// Neither can be settled from what is stored, which is why both need a human
+	// to say so.
+	//
+	// It does NOT touch Identity. That is a second statement and it has its own
+	// flag, AdoptIdentity. They were one, and the consequence was that a caller
+	// whose settings come from a catalog — so it adopts on every single open —
+	// could never be told about an identity disagreement, because adopting
+	// answered every one of them with "no conflict" before anything looked.
 	//
 	// Requiring an explicit opt-in is the point: an accidentally empty config
 	// must not be able to redefine what a log keeps. Ignored for a log being
@@ -360,6 +367,19 @@ type Options struct {
 	// process passes the settings it believes the log has and is checked against
 	// what the log says; AdoptOptions would skip exactly that check.
 	AdoptOptions bool
+	// AdoptIdentity re-stamps the log with Options.Identity, and is the only way
+	// to resolve an IdentityConflict. The caller's bytes win and the
+	// disagreement is gone, which is why it cannot be a side effect of anything
+	// else: consuming that signal is only correct when someone has decided this
+	// data is theirs.
+	//
+	// Nothing else writes Identity on an existing log. Every other path
+	// republishes the STORED bytes by construction, so a caller with no opinion
+	// about identity — the common case, since most callers never set it — can
+	// neither erase someone else's stamp nor overwrite it by passing the wrong
+	// one. Ignored for a log being created, which records what it was created
+	// with.
+	AdoptIdentity bool
 	// Identity is opaque bytes the CALLER uses to say which of its own entities
 	// this log's data belongs to. commitlog never interprets them; it stores
 	// them with the descriptor and reports a disagreement through
@@ -381,8 +401,8 @@ type Options struct {
 	// the stored bytes alone makes the disagreement survive restarts, so the
 	// caller can act on it whenever it is ready to.
 	//
-	// Resolve it deliberately with AdoptOptions, which rewrites the descriptor
-	// and so re-stamps the identity along with it. Empty means the caller does
+	// Resolve it deliberately with AdoptIdentity, which re-stamps the log with
+	// these bytes and is the only thing that does. Empty means the caller does
 	// not use this, and never conflicts with anything.
 	Identity []byte
 	// DisableAutoClean stops the internal cleaner loop from running Clean. For

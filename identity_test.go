@@ -10,12 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// openWithIdentity opens (or creates) a log at dir stamped with id.
-func openWithIdentity(t *testing.T, dir string, id []byte, adopt bool) CommitLog {
+// openWithIdentity opens (or creates) a log at dir stamped with id. reStamp
+// asks for the deliberate re-stamp — every caller that passes true is resolving
+// a conflict, which is the only thing AdoptIdentity is for.
+func openWithIdentity(t *testing.T, dir string, id []byte, reStamp bool) CommitLog {
 	t.Helper()
 	l, err := New(Options{
 		Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20,
-		Identity: id, AdoptOptions: adopt,
+		Identity: id, AdoptIdentity: reStamp,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = l.Close() })
@@ -197,18 +199,17 @@ func TestAStampSurvivesAnOpenByACallerThatHasNoIdentity(t *testing.T) {
 	require.Nil(t, l3.IdentityConflict(), "the owner was told its own log is not its own")
 }
 
-// The same erase through the other door, and the one a caller can walk into
-// while doing everything right. AdoptOptions skips the comparison the test
-// above relies on and republishes the CALLER's record wholesale, so the guard
-// that protects the republish path does not sit on this one at all: a caller
-// with no identity adopting to retune compaction erased the stamp every time,
-// not only on the opens that happened to change a non-gating field.
-//
 // Adopting means "I know what this log is, record it" — a statement about the
-// log's SETTINGS. An identity the caller never supplied is not one of them, and
-// absence is not an instruction to erase. A caller that means to re-stamp still
-// does, by supplying the bytes; TestAConflictSurvivesEveryReopenUntilItIs-
-// Resolved is that case, and it must keep passing.
+// log's SETTINGS. An identity is not one of them, supplied or not.
+//
+// This began as the erase: AdoptOptions republished the CALLER's record
+// wholesale, so a caller with no identity adopting to retune compaction wiped
+// the stamp every time. It was first fixed by reading the stored record and
+// carrying the identity across, which held for the empty case only. The flags
+// are now separate and the branch builds from the STORED record like every
+// other, so there is nothing to carry and nothing to remember: adopting cannot
+// reach Identity at all. See TestAdoptingSettingsStillReportsAnIdentityConflict
+// for the case the carry-over could not cover.
 func TestAdoptingWithNoIdentityKeepsTheStoredStamp(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(Options{
@@ -247,21 +248,71 @@ func TestAdoptingWithNoIdentityKeepsTheStoredStamp(t *testing.T) {
 	require.NoError(t, l3.Close())
 }
 
-// The half of the same branch that must NOT change: a caller that supplies an
-// identity is making the deliberate re-stamp AdoptOptions documents, and the
-// preservation above must not swallow it.
-func TestAdoptingWithAnIdentityStillReStamps(t *testing.T) {
+// The other half, which must keep working: a caller that has decided the data
+// is its own re-stamps the log, and the preservation above must not swallow it.
+func TestAdoptIdentityReStamps(t *testing.T) {
 	dir := tempDir(t)
 	l := openWithIdentity(t, dir, []byte("stream-7"), false)
 	require.NoError(t, l.Close())
 
 	l2 := openWithIdentity(t, dir, []byte("stream-9"), true)
 	require.NoError(t, l2.Close())
+	require.Nil(t, l2.IdentityConflict(),
+		"the open that resolved the conflict still reported one")
 
 	body, err := os.ReadFile(filepath.Join(dir, descriptorFileName))
 	require.NoError(t, err)
 	require.Contains(t, string(body), "identity="+"73747265616d2d39",
-		"a deliberate re-stamp through AdoptOptions stopped working")
+		"the deliberate re-stamp through AdoptIdentity stopped working")
+}
+
+// The case that made identity unusable for a caller whose settings come from a
+// catalog rather than a config file. Such a caller passes AdoptOptions on EVERY
+// open — there is no other way to say "the catalog is authoritative about this
+// log's settings" — and while the two were one flag, that answered every
+// identity question with "no conflict" before anything compared. The signal was
+// suppressed by the one thing every open did, so the feature could not be used
+// at all by the caller that needed it most.
+//
+// Adopting settings and adopting an identity are two statements. Making them
+// two flags is what lets this open be both: authoritative about the settings,
+// and told about the disagreement.
+func TestAdoptingSettingsStillReportsAnIdentityConflict(t *testing.T) {
+	dir := tempDir(t)
+	l, err := New(Options{
+		Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20,
+		Identity: []byte("stream-7"), CompactMinAge: time.Hour,
+	})
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	// A catalog-sourced open: authoritative about the settings, and carrying an
+	// identity that turns out to disagree with what is stored.
+	l2, err := New(Options{
+		Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20,
+		CompactMinAge: 2 * time.Hour,
+		Identity:      []byte("stream-9"), AdoptOptions: true,
+	})
+	require.NoError(t, err)
+	conflict := l2.IdentityConflict()
+	require.NotNil(t, conflict,
+		"adopting the settings swallowed the identity disagreement, which is "+
+			"the whole defect: this caller adopts on every open")
+	require.Equal(t, []byte("stream-7"), conflict.Stored)
+	require.Equal(t, []byte("stream-9"), conflict.Opened)
+	require.NoError(t, l2.Close())
+
+	// Nothing was written. Not the identity — that would consume the signal a
+	// crash could then lose — and not the settings either, because a caller
+	// holding the wrong log's identity is a caller whose settings this log has
+	// no reason to trust. The conflict is still there on the next open, which
+	// is what makes it something a caller can act on when it is ready to.
+	body, err := os.ReadFile(filepath.Join(dir, descriptorFileName))
+	require.NoError(t, err)
+	require.Contains(t, string(body), "identity="+"73747265616d2d37",
+		"the stored stamp was overwritten by a caller that was told it disagreed")
+	require.Contains(t, string(body), "compact_min_age=1h0m0s",
+		"settings were adopted from a caller whose identity disagreed")
 }
 
 // An unidentified log is a different fact from one belonging to someone else,

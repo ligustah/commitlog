@@ -1587,14 +1587,24 @@ run_guard "a failed truncate-before drops its trim" commitlog.go   '				defer t.
 # between "never tried" and "tried and happened to survive".
 run_guard "an oversized store descriptor is refused, not allocated" descriptor.go   '	if size > maxDescriptorBytes {' '	if false && size > maxDescriptorBytes {'   '^TestAnOversizedStoreDescriptorIsRefusedNotAllocated$'
 
-# A conflicted identity must not be re-stamped by the republish that keeps the
-# non-gating fields current. The republish carries the CALLER's descriptor, so
-# without the conflict term a plain codec or segment-size change adopts the
-# caller's identity and destroys the disagreement the open just found. That is
-# adopt-on-open arriving by the back door, on only the subset of opens that also
-# retune something else -- which is why it needs a guard rather than a comment.
-run_guard "a conflicted identity survives an unrelated retune" descriptor.go   '	if conflict == nil &&
-		(got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes) {' '	if got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes {'   '^TestAConflictIsNotErasedByAnUnrelatedSettingChange$'
+# Nothing is written while the caller and the log disagree about what this log
+# IS. Two ways in, and this one return closes both:
+#
+#   - the republish that keeps the non-gating fields current carries the record
+#     built above, so without this a plain codec or segment-size change destroys
+#     the disagreement the open just found -- adopt-on-open by the back door, on
+#     only the subset of opens that also retune something else;
+#   - an ADOPTING open writes the gating fields for a caller that is holding the
+#     wrong log's identity, which is the caller whose settings this log has least
+#     reason to trust. That door opened when AdoptOptions stopped implying the
+#     identity, and it is why the second test below sits on this guard.
+#
+# Neutralized to a discard rather than a deletion: `conflict` has no other reader
+# once the return goes, so dropping it outright fails to compile and would make
+# this a guard that can never run.
+run_guard "nothing is published over an identity conflict" descriptor.go   '	if conflict != nil {
+		return conflict, nil
+	}' '	_ = conflict'   '^Test(AConflictIsNotErasedByAnUnrelatedSettingChange|AdoptingSettingsStillReportsAnIdentityConflict)$'
 
 # V0 was dropped in v0.82.0, and the version line is the ONLY thing that catches
 # a V0 file: every remaining line in one parses fine, so without this check a V0
@@ -1642,18 +1652,20 @@ run_guard "a negative prefix-read concurrency is refused, not defaulted" commitl
 # said before.
 run_guard "a stamp survives an open by a caller with no identity" descriptor.go   '	fresh := got' '	fresh := want'   '^TestAStampSurvivesAnOpenByACallerThatHasNoIdentity$'
 
-# The same erase through the OTHER door, and the one the guard above cannot
-# reach: AdoptOptions skips the comparison entirely and publishes the caller's
-# record wholesale, so `fresh := got` never runs. A caller adopting to retune a
-# gating setting, with no identity of its own, erased the stamp on every such
-# open rather than only on the ones that changed a non-gating field.
-# Neutralized by dropping the carry-over, which compiles and is what the code
-# said before.
-run_guard "adopting with no identity keeps the stored stamp" descriptor.go   '		if !isNew && len(want.Identity) == 0 {
-			if got, err := loadDescriptor(opts); err == nil {
-				want.Identity = got.Identity
-			}
-		}' '		_ = isNew'   '^TestAdoptingWithNoIdentityKeepsTheStoredStamp$'
+# The same erase through the OTHER door. AdoptOptions takes the caller's whole
+# record, so `fresh := got` above is not what runs -- one line has to put the
+# stored identity back, and adopting is a statement about SETTINGS that must not
+# reach this field at all. This started as a carry-over read on a branch that
+# skipped the comparison; it is one assignment now because the branch starts from
+# `got` like every other. Neutralized by dropping it, which compiles and is what
+# the code did before the flags were split.
+#
+# Two tests, because there are two ways to be wrong here and one covers each: an
+# absent identity ERASES the stamp, a present one OVERWRITES it while the open
+# was being told the two disagree.
+run_guard "adopting settings cannot touch the identity" descriptor.go   '		fresh = want
+		fresh.Identity = got.Identity' '		fresh = want'   '^TestAdopting(WithNoIdentityKeepsTheStoredStamp|SettingsStillReportsAnIdentityConflict)$'
+
 
 # The identity is the caller's opaque bytes and the descriptor is line-based, so
 # hex is load-bearing rather than a formatting choice: raw bytes would let a

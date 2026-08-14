@@ -63,9 +63,10 @@ const (
 // disagree about what the log IS, and continuing would silently apply a
 // retention policy the log was not created with.
 //
-// Resolve it deliberately with AdoptOptions, which rewrites the descriptor to
-// match. That is a retune — "I know what this log is, record it" — and it is
-// the answer to both shapes, since neither can be settled from what is on disk.
+// Resolve it deliberately with AdoptOptions, which rewrites the descriptor's
+// gating settings to match. That is a retune — "I know what this log is, record
+// it" — and it is the answer to both shapes, since neither can be settled from
+// what is on disk. It says nothing about identity; see Options.AdoptIdentity.
 var ErrDescriptorMismatch = errors.New("commitlog: options disagree with the log's descriptor")
 
 // descriptor is the record of what a log IS, kept beside the thing that owns
@@ -414,42 +415,31 @@ func logIsNew(opts Options) (bool, error) {
 // It also returns the identity disagreement, if any, for the caller to report
 // through IdentityConflict. A conflict is NOT an error and NOT written back:
 // see Options.Identity for why both of those would be worse than reporting it.
+//
+// AdoptOptions and AdoptIdentity are two statements, not one, and this function
+// is where that matters. They were one flag, and the consequence was that
+// adopting settings returned a nil conflict on the whole branch — so a caller
+// that adopts on EVERY open, because its settings come from a catalog rather
+// than from a config file, could never see an identity disagreement at all. The
+// signal was suppressed by the very thing every one of its opens did.
+//
+// They compose here field group by field group, always starting from the STORED
+// record and taking only what the caller is entitled to replace.
 func reconcileDescriptor(opts Options, isNew bool) (*IdentityConflict, error) {
 	want := descriptorFromOptions(opts)
-	if isNew || opts.AdoptOptions {
-		// An ABSENT identity is not one of the settings being adopted.
-		//
-		// Options.Identity already promises that empty "means the caller does not
-		// use this, and never conflicts with anything" — and on the path below
-		// that is true, because the republish is built from the STORED record. On
-		// this path it was not: an empty one did not merely fail to conflict, it
-		// overwrote the stamp with nothing. That is precisely the erase the code
-		// below goes to some length to prevent, reached through the one door that
-		// skips the comparison entirely.
-		//
-		// Unrecoverable when it happens, which is why it is worth a read here: the
-		// descriptor is the only record of the stamp, and an unstamped copy and a
-		// stale one look identical, so a caller cannot reclaim either afterwards.
-		//
-		// A caller that MEANS to re-stamp still does. It supplies the bytes, and
-		// they win — adopting is documented as how an identity conflict is
-		// resolved, and this changes nothing about that. What it stops is a caller
-		// with no opinion about identity erasing someone else's, which is what
-		// adopting to retune compaction settings would otherwise do every time.
-		//
-		// The load's error is dropped on purpose: adopting a log that has NO
-		// descriptor is one of the two cases AdoptOptions exists for, and there is
-		// nothing to carry over from it.
-		if !isNew && len(want.Identity) == 0 {
-			if got, err := loadDescriptor(opts); err == nil {
-				want.Identity = got.Identity
-			}
-		}
+	if isNew {
 		return nil, publishDescriptor(opts, want)
 	}
 	got, err := loadDescriptor(opts)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if opts.AdoptOptions {
+				// Nothing stored to compare against or carry over, which is one
+				// of the two cases AdoptOptions exists for. What the caller
+				// passed is all there is, identity included — and an empty one
+				// erases nothing, because there was nothing.
+				return nil, publishDescriptor(opts, want)
+			}
 			// The log exists and its identity does not. Nothing here can
 			// reconstruct it, and adopting whatever the caller happens to pass
 			// is exactly the behaviour this prevents, so it is the same refusal
@@ -460,7 +450,7 @@ func reconcileDescriptor(opts Options, isNew bool) (*IdentityConflict, error) {
 		}
 		return nil, err
 	}
-	if !got.enforced(want) {
+	if !opts.AdoptOptions && !got.enforced(want) {
 		return nil, errors.Wrapf(ErrDescriptorMismatch, "%s: %s",
 			descriptorHome(opts), got.describeDifference(want))
 	}
@@ -483,20 +473,43 @@ func reconcileDescriptor(opts Options, isNew bool) (*IdentityConflict, error) {
 	//
 	// Neither is reachable once the record is built from `got`, because the
 	// stored identity is then carried by construction rather than by a
-	// condition somebody has to remember to extend. The gating fields are equal
-	// here (enforced passed), so `got` and `want` differ only in the two fields
-	// refreshed below and the one that must not be taken.
+	// condition somebody has to remember to extend. That construction is why
+	// the identity carry-over an earlier release had to bolt onto the adopting
+	// branch is gone rather than moved: adoption starts from `got` too now, so
+	// there is nothing to carry.
 	fresh := got
+	if opts.AdoptOptions {
+		// The gating fields, and only those, become the caller's. Identity is
+		// explicitly restored from `got` because `want` carries the caller's,
+		// and taking it here is the whole defect this split exists to remove.
+		fresh = want
+		fresh.Identity = got.Identity
+	}
 	fresh.Compression = want.Compression
 	fresh.MaxSegmentBytes = want.MaxSegmentBytes
-	// The conflict gate stays, for a reason that outlives the erase: while the
-	// caller and the log disagree about what this log IS, the caller's opinion
-	// about how to encode it is not one to act on either.
-	if conflict == nil &&
-		(got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes) {
+
+	if opts.AdoptIdentity {
+		// The caller's bytes win, and after this there is no disagreement left
+		// to report. This is the deliberate re-stamp, and it is now the ONLY
+		// door to it.
+		fresh.Identity = want.Identity
 		return nil, publishDescriptor(opts, fresh)
 	}
-	return conflict, nil
+	// The conflict gate stays, for a reason that outlives the erase: while the
+	// caller and the log disagree about what this log IS, the caller's opinion
+	// about how to encode it is not one to act on either. It now gates the
+	// adopted gating fields as well, on the same reasoning and more strongly —
+	// a caller holding the wrong log's settings is exactly what a conflict
+	// means, so writing them because it also passed AdoptOptions would act on
+	// the disagreement instead of reporting it.
+	if conflict != nil {
+		return conflict, nil
+	}
+	if opts.AdoptOptions ||
+		got.Compression != want.Compression || got.MaxSegmentBytes != want.MaxSegmentBytes {
+		return nil, publishDescriptor(opts, fresh)
+	}
+	return nil, nil
 }
 
 // IdentityConflict reports that a log was opened with an Options.Identity that

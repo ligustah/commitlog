@@ -543,8 +543,10 @@ type CommitLog interface {
 	// The conflict is NOT written back, so it is still there on the next open.
 	// That is deliberate: a signal consumed at open time is lost by a crash
 	// immediately after, which moves the window instead of closing it.
-	// AdoptOptions re-stamps the log and is how a caller says "these are mine
-	// after all".
+	// AdoptIdentity re-stamps the log and is how a caller says "these are mine
+	// after all" — and it is the only thing that does, so this stays reportable
+	// for a caller that adopts its SETTINGS on every open because they come from
+	// a catalog rather than a config file.
 	IdentityConflict() *IdentityConflict
 
 	// SegmentBlockCounts reports each segment's in-memory block-index size,

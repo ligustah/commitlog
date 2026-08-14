@@ -9,6 +9,29 @@ library from that fork onward.
 
 ### Changed
 
+- **Breaking.** `Options.AdoptOptions` no longer adopts `Options.Identity`. It
+  adopts the log's gating settings and nothing else; the deliberate re-stamp is
+  now `Options.AdoptIdentity`, which is the only thing that writes an identity
+  onto an existing log and the only way to resolve an `IdentityConflict`.
+
+  One flag was making two statements, and the cost fell on exactly the caller
+  identity is for. A caller whose settings come from a catalog rather than a
+  config file has to pass `AdoptOptions` on *every* open — there is no other way
+  to say "the catalog is authoritative" — and adoption returned a nil conflict
+  for that whole branch, so it could never be told an identity disagreed. The
+  signal was suppressed by the one thing every one of its opens did.
+
+  Adopting settings now reports a conflict like any other open, and publishes
+  nothing while one stands: a caller holding the wrong log's identity is the
+  caller whose settings this log has least reason to write. This also removes
+  the identity carry-over added in v0.85.0 rather than moving it — the adopting
+  branch builds from the STORED record like every other now, so there is nothing
+  to carry.
+
+  Migration: a caller that passed `AdoptOptions` to re-stamp an identity passes
+  `AdoptIdentity` instead. A caller that passed it to retune settings changes
+  nothing, and starts seeing conflicts it was previously never shown.
+
 - Sentinel matching in the read and roll paths moved from
   `pkgErrors.Cause(err) == X` (and one bare `==`) to `errors.Is`. `Cause` walks
   a `causer` chain and stops at a `%w` one, and this package writes
