@@ -1594,6 +1594,19 @@ run_guard "a negative prefix-read concurrency is refused, not defaulted" commitl
 # said before.
 run_guard "a stamp survives an open by a caller with no identity" descriptor.go   '	fresh := got' '	fresh := want'   '^TestAStampSurvivesAnOpenByACallerThatHasNoIdentity$'
 
+# The same erase through the OTHER door, and the one the guard above cannot
+# reach: AdoptOptions skips the comparison entirely and publishes the caller's
+# record wholesale, so `fresh := got` never runs. A caller adopting to retune a
+# gating setting, with no identity of its own, erased the stamp on every such
+# open rather than only on the ones that changed a non-gating field.
+# Neutralized by dropping the carry-over, which compiles and is what the code
+# said before.
+run_guard "adopting with no identity keeps the stored stamp" descriptor.go   '		if !isNew && len(want.Identity) == 0 {
+			if got, err := loadDescriptor(opts); err == nil {
+				want.Identity = got.Identity
+			}
+		}' '		_ = isNew'   '^TestAdoptingWithNoIdentityKeepsTheStoredStamp$'
+
 # The identity is the caller's opaque bytes and the descriptor is line-based, so
 # hex is load-bearing rather than a formatting choice: raw bytes would let a
 # caller's newline write a descriptor that does not parse back, turning a legal

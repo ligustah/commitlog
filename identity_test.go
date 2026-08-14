@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -194,6 +195,73 @@ func TestAStampSurvivesAnOpenByACallerThatHasNoIdentity(t *testing.T) {
 	// bytes belong to nobody".
 	l3 := openWithIdentity(t, dir, []byte("stream-7"), false)
 	require.Nil(t, l3.IdentityConflict(), "the owner was told its own log is not its own")
+}
+
+// The same erase through the other door, and the one a caller can walk into
+// while doing everything right. AdoptOptions skips the comparison the test
+// above relies on and republishes the CALLER's record wholesale, so the guard
+// that protects the republish path does not sit on this one at all: a caller
+// with no identity adopting to retune compaction erased the stamp every time,
+// not only on the opens that happened to change a non-gating field.
+//
+// Adopting means "I know what this log is, record it" — a statement about the
+// log's SETTINGS. An identity the caller never supplied is not one of them, and
+// absence is not an instruction to erase. A caller that means to re-stamp still
+// does, by supplying the bytes; TestAConflictSurvivesEveryReopenUntilItIs-
+// Resolved is that case, and it must keep passing.
+func TestAdoptingWithNoIdentityKeepsTheStoredStamp(t *testing.T) {
+	dir := tempDir(t)
+	l, err := New(Options{
+		Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20,
+		Identity: []byte("stream-7"), CompactMinAge: time.Hour,
+	})
+	require.NoError(t, err)
+	require.NoError(t, l.Close())
+
+	// Retuning a GATING field, which is the case AdoptOptions exists for: it
+	// cannot be settled from what is stored, so the caller has to say so.
+	l2, err := New(Options{
+		Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20,
+		CompactMinAge: 2 * time.Hour, AdoptOptions: true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, l2.Close())
+
+	body, err := os.ReadFile(filepath.Join(dir, descriptorFileName))
+	require.NoError(t, err)
+	require.Contains(t, string(body), "identity="+"73747265616d2d37",
+		"adopting with no identity erased the stamp")
+	// The adopt still has to have happened — this must not be fixed by
+	// declining to publish.
+	require.Contains(t, string(body), "compact_min_age=2h0m0s",
+		"the adopt stopped taking effect, which is not the fix")
+
+	// The owner's own next open, carrying the settings that were just adopted so
+	// this asserts the identity and not the retune.
+	l3, err := New(Options{
+		Name: "identity", Path: dir, MaxSegmentBytes: 1 << 20,
+		CompactMinAge: 2 * time.Hour, Identity: []byte("stream-7"),
+	})
+	require.NoError(t, err)
+	require.Nil(t, l3.IdentityConflict(), "the owner was told its own log is not its own")
+	require.NoError(t, l3.Close())
+}
+
+// The half of the same branch that must NOT change: a caller that supplies an
+// identity is making the deliberate re-stamp AdoptOptions documents, and the
+// preservation above must not swallow it.
+func TestAdoptingWithAnIdentityStillReStamps(t *testing.T) {
+	dir := tempDir(t)
+	l := openWithIdentity(t, dir, []byte("stream-7"), false)
+	require.NoError(t, l.Close())
+
+	l2 := openWithIdentity(t, dir, []byte("stream-9"), true)
+	require.NoError(t, l2.Close())
+
+	body, err := os.ReadFile(filepath.Join(dir, descriptorFileName))
+	require.NoError(t, err)
+	require.Contains(t, string(body), "identity="+"73747265616d2d39",
+		"a deliberate re-stamp through AdoptOptions stopped working")
 }
 
 // An unidentified log is a different fact from one belonging to someone else,

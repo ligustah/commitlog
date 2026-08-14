@@ -417,6 +417,34 @@ func logIsNew(opts Options) (bool, error) {
 func reconcileDescriptor(opts Options, isNew bool) (*IdentityConflict, error) {
 	want := descriptorFromOptions(opts)
 	if isNew || opts.AdoptOptions {
+		// An ABSENT identity is not one of the settings being adopted.
+		//
+		// Options.Identity already promises that empty "means the caller does not
+		// use this, and never conflicts with anything" — and on the path below
+		// that is true, because the republish is built from the STORED record. On
+		// this path it was not: an empty one did not merely fail to conflict, it
+		// overwrote the stamp with nothing. That is precisely the erase the code
+		// below goes to some length to prevent, reached through the one door that
+		// skips the comparison entirely.
+		//
+		// Unrecoverable when it happens, which is why it is worth a read here: the
+		// descriptor is the only record of the stamp, and an unstamped copy and a
+		// stale one look identical, so a caller cannot reclaim either afterwards.
+		//
+		// A caller that MEANS to re-stamp still does. It supplies the bytes, and
+		// they win — adopting is documented as how an identity conflict is
+		// resolved, and this changes nothing about that. What it stops is a caller
+		// with no opinion about identity erasing someone else's, which is what
+		// adopting to retune compaction settings would otherwise do every time.
+		//
+		// The load's error is dropped on purpose: adopting a log that has NO
+		// descriptor is one of the two cases AdoptOptions exists for, and there is
+		// nothing to carry over from it.
+		if !isNew && len(want.Identity) == 0 {
+			if got, err := loadDescriptor(opts); err == nil {
+				want.Identity = got.Identity
+			}
+		}
 		return nil, publishDescriptor(opts, want)
 	}
 	got, err := loadDescriptor(opts)
