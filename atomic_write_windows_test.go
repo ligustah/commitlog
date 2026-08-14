@@ -234,6 +234,19 @@ func TestPublishingADigestRidesOutAHeldDestination(t *testing.T) {
 // The hold is deliberately longer than tickWriteRetryBudget and well inside
 // waitedOnRetryBudget: a suite whose only handle clears in 120ms cannot see a
 // budget that is too short for the caller holding it.
+//
+// It sits MIDWAY between the two rather than just past the lower one, and the
+// margin is what this test is actually made of. The sleep below starts when the
+// goroutine is scheduled; the retry's deadline starts when checkpointHW is
+// reached, and SyncAll fsyncs every segment first. Everything in between comes
+// out of the margin. At tickWriteRetryBudget+250ms the Windows runner spent all
+// 250ms on those fsyncs, so under the guard's mutation — SyncAll given the
+// tick's budget — the handle was already gone by the shortened deadline, the
+// call succeeded, and guardcheck reported the guard as NO COVERAGE. Green on
+// every other runner, on a test that had not changed.
+//
+// Deriving it from both budgets rather than picking a number also means it
+// tracks if either one moves, and there is no interval left to pick badly.
 func TestSyncAllRidesOutAHandleTheTickWouldGiveUpOn(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path:                 tempDir(t),
@@ -248,18 +261,30 @@ func TestSyncAllRidesOutAHandleTheTickWouldGiveUpOn(t *testing.T) {
 	l.SetHighWatermark(0)
 	require.NoError(t, l.SyncAll(), "the checkpoint file must exist before it can be held")
 
-	hold := tickWriteRetryBudget + 250*time.Millisecond
+	hold := (tickWriteRetryBudget + waitedOnRetryBudget) / 2
+	require.Greater(t, hold, tickWriteRetryBudget, "the fixture must sit BETWEEN the two budgets")
 	require.Less(t, hold, waitedOnRetryBudget, "the fixture must sit BETWEEN the two budgets")
 
 	h := openDenyAll(t, filepath.Join(l.Path, hwFileName))
 	released := make(chan struct{})
+	var closedAt time.Time
 	go func() {
 		time.Sleep(hold)
+		closedAt = time.Now()
 		syscall.CloseHandle(h) // nolint: errcheck
 		close(released)
 	}()
 
 	require.NoError(t, l.SyncAll(),
 		"a barrier with nothing behind it must wait the handle out, not fail the caller")
+	returned := time.Now()
+
+	// The margin's own assertion, and the reason it is here rather than left
+	// implicit: "SyncAll returned nil" is also what a SyncAll that never met the
+	// held handle returns. Only the ordering separates waiting it out from
+	// missing it. Reading closedAt after the receive is what orders the write.
 	<-released
+	require.True(t, returned.After(closedAt),
+		"SyncAll returned %s before the handle was released, so it never waited on it — "+
+			"the fixture is racing the fsyncs, not the budget", closedAt.Sub(returned))
 }
