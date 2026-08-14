@@ -2277,3 +2277,62 @@ absence as a value:
 So the manifest was the only one, and it is closed. Worth stating as a negative
 rather than leaving unsaid: the next person to add a field to a format has three
 worked examples of the bump being mandatory and none of it being optional.
+
+### A refusal that was a side effect of a file not being written
+
+`TestOffload_ReopenWithoutStoreErrors` went red on the first full suite that
+actually completed after #295. Its own doc comment names the mechanism it
+depended on, and reads as a design statement rather than an accident:
+
+> What refuses is the DESCRIPTOR, which is in the store too: a directory that
+> plainly holds a log, with no descriptor to say what log it is, is not
+> something to guess at.
+
+Which is true, and was never the rule. The rule was an ABSENCE. A tiered log
+wrote its descriptor only to its tiers, so opening its directory alone found no
+descriptor and fell into "the log exists and its identity does not". #295 writes
+the local copy — which is the whole point, durable_streams' reclaimer needs it —
+so the directory now has one, the branch is not reached, and `New` returns nil
+for a log whose bytes are somewhere else.
+
+What that costs is not abstract. The local segments are the **tail**:
+`OldestOffset` reports far past what the caller wrote, reads skip the offloaded
+prefix, and retention runs against a log it can only see the end of. Every one
+of those is silent, which is why nothing but that one test noticed.
+
+**The lens.** A rule enforced by a side effect has no anchor. There is no line
+to guard, no name to grep, and no comment that a change would contradict — so
+the change that removes it looks unrelated to it. The test comment above is
+what a stated rule looks like *after* it has been inferred from behaviour, and
+it was accurate right up until it wasn't. Worth asking of any refusal: is there
+a line of code that would have to be deleted for this to stop happening? If the
+answer is "no, you would just have to write a file somewhere", it is not
+enforced.
+
+**Two decisions in the fix.**
+
+- **Not an `enforced()` field.** The obvious shape is to add `Tiered` beside
+  `Compact` and let `describeDifference` name it. That would have been wrong in
+  the direction that matters: `AdoptOptions` bypasses `enforced()` entirely, and
+  durable_streams adopts on *every* open because its settings come from a
+  catalog rather than a config file. The check would have been no check at all
+  for the caller most exposed to it. So it is a separate refusal, above the
+  adoption branch. Adopting is a statement about POLICY; where the bytes are is
+  not policy, and adopting does not relocate them. This is strictly stronger
+  than what was lost — the old refusal lived in a branch `AdoptOptions` was
+  allowed straight through.
+- **One-directional.** The reverse — a plain log the caller is attaching a store
+  to — is a legitimate adoption and must keep working. It is also unreachable
+  from this check: `loadDescriptor` reads the nearest TIER when `Tiers` are set
+  and never consults the local file. Asserted anyway, because "unreachable" is a
+  claim about code that changes.
+
+And the version bump, one day after #300 taught the same lesson on the manifest:
+a v1 descriptor is refused rather than read as `tiered=false`, because that
+default is wrong on exactly the logs the field exists to protect.
+
+**Two guards, not one.** Deleting the whole refusal turns both subtests red, so
+it cannot say whether the AdoptOptions arm is covered on its own. The second
+guard neutralizes to the plausible wrong version — `!opts.AdoptOptions && ...` —
+and only `with_adoption` goes red under it, which is what proves the two
+subtests cover different arms rather than one arm twice.

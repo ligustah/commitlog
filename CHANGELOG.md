@@ -81,6 +81,29 @@ library from that fork onward.
   inspection. `Tier.ReadOnly` does not suppress it — that flag is about a *shared*
   store, and a follower still has to be able to say whose bytes it holds.
 
+  Writing that local copy **removed a refusal**, which is the other half of this
+  entry and the reason `descriptorFileV1` is now `descriptorFileV2`. A tiered log
+  opened without its store used to fail because its directory had no descriptor
+  at all — "the log exists and its identity does not". Give the directory a
+  descriptor and that refusal disappears, and the open succeeds: the local
+  segments are the log's *tail*, so the caller gets an `OldestOffset` far past
+  what it wrote, reads that skip the offloaded prefix, and retention running
+  against a log it can only see the end of. All silent.
+
+  The rule had never been written down anywhere — it was a consequence of a file
+  not being written — so nothing went red until a full suite ran. It is now
+  stated: the descriptor carries `tiered`, and an open with no `Tiers` against a
+  log that has them is refused. **`AdoptOptions` does not overrule it.** Adopting
+  is a statement about policy ("I know what this log is, record it") and it is
+  entitled to overrule a compaction setting; where the bytes *are* is not policy,
+  and no amount of adopting relocates them. That makes this stronger than the
+  refusal it replaces, which lived in a branch `AdoptOptions` was allowed
+  through — no protection at all for a caller that adopts on every open because
+  its settings come from a catalog.
+
+  A v1 descriptor is refused rather than read as `tiered=false`, since that
+  default is wrong on precisely the logs the field protects.
+
 ### Added
 
 - **`BlockInfo.Records`** — `InspectSegment(...).Blocks()` reports each block's

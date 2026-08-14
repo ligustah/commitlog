@@ -44,6 +44,7 @@ func TestADescriptorRoundTripsEveryField(t *testing.T) {
 		Compression:               compress.Zstd,
 		MaxSegmentBytes:           12345,
 		Identity:                  []byte{0xde, 0xad, 0xbe, 0xef},
+		Tiered:                    true,
 	}
 
 	v := reflect.ValueOf(full)
@@ -83,6 +84,7 @@ func TestEveryEnforcedDisagreementIsNamed(t *testing.T) {
 		Compression:               compress.Zstd,
 		MaxSegmentBytes:           12345,
 		Identity:                  []byte{0xde, 0xad, 0xbe, 0xef},
+		Tiered:                    true,
 	}
 
 	enforcedFields := 0

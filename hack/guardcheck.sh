@@ -2141,6 +2141,24 @@ run_guard "a tiered log stamps its own directory too" descriptor.go   $'	if err 
 # the check defends did not move when the layout under it did.
 run_guard "the manifest version moved with the record count" manifest.go   'const manifestVersion = 4'   'const manifestVersion = 3'   '^TestTheManifestLayoutBeforeRecordsIsRefused$'
 
+# A store-backed log will not open without its store. Neutralized by deleting
+# the refusal outright, which is the state #295 left the package in: the rule
+# had never been written down, so writing the local descriptor removed it and
+# every test stayed green until a full suite ran.
+run_guard "a store-backed log refuses to open with no store" descriptor.go   $'	if got.Tiered && len(opts.Tiers) == 0 {'   $'	if false {'   '^TestATieredLogRefusesToOpenWithoutItsStore$'
+
+# ...and the refusal is NOT adoptable, which is a separate claim needing a
+# separate guard: neutralizing the whole check above leaves both subtests red,
+# so it cannot tell whether the AdoptOptions arm is covered on its own.
+#
+# The neutralized form is the plausible wrong version, not a nonsense one --
+# treating "where the bytes are" as an ordinary enforced setting a caller may
+# overrule. That is the shape the old behaviour actually had, since the refusal
+# it replaced came from the missing-descriptor branch AdoptOptions is allowed
+# through. durable_streams adopts on every open, so that version would be no
+# check at all for the caller most exposed to it.
+run_guard "the store-backed refusal is not adoptable" descriptor.go   $'	if got.Tiered && len(opts.Tiers) == 0 {'   $'	if !opts.AdoptOptions && got.Tiered && len(opts.Tiers) == 0 {'   '^TestATieredLogRefusesToOpenWithoutItsStore$/^with_adoption$'
+
 
 echo
 if [ "$failures" -ne 0 ]; then

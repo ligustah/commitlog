@@ -31,8 +31,15 @@ const (
 	// be able to ask what the log IS from the same place it asks what the log
 	// HOLDS. The directory can only answer for logs that live entirely in it.
 	descriptorKey = "log-descriptor"
-	// descriptorFileV1 is the only descriptor format: the one this build writes
+	// descriptorFileV2 is the only descriptor format: the one this build writes
 	// and the only one it reads.
+	//
+	// V1 — the same file without the `tiered` line — is refused rather than
+	// read as "not tiered". That default would be wrong on precisely the logs
+	// the line exists to protect: a v1 file in a directory whose segments are in
+	// a store would open as a complete local log, which is the silent truncation
+	// the refusal in reconcileDescriptor is for. The version line is what turns
+	// that into "this file predates the field" instead of a guess.
 	//
 	// V0 — the same file without the optional identity line — was read for one
 	// release so v0.79.x directories kept opening across the v0.80.0 upgrade.
@@ -48,7 +55,7 @@ const (
 	// into "this file is newer than me", which is the thing that is actually
 	// true. That value is about future formats and does not depend on any past
 	// one still being readable.
-	descriptorFileV1 = 1
+	descriptorFileV2 = 2
 	// maxDescriptorBytes bounds what readStoreDescriptor will allocate for an
 	// object the store claims is the descriptor. Equal to bufio.Scanner's
 	// default maximum token, which is what parseDescriptor reads with — so it
@@ -92,6 +99,12 @@ type descriptor struct {
 	// absent from enforced(): it does not gate the open, because a caller whose
 	// identity disagrees still needs the log open to do anything about it.
 	Identity []byte
+	// Tiered records that this log's segments can live in a store rather than
+	// only in its directory. Deliberately absent from enforced() as well, but
+	// for the opposite reason to Identity: it does not describe a SETTING the
+	// caller owns, it describes where the bytes ARE, so AdoptOptions must not be
+	// able to agree its way past it. See the refusal in reconcileDescriptor.
+	Tiered bool
 }
 
 func descriptorFromOptions(opts Options) descriptor {
@@ -102,6 +115,7 @@ func descriptorFromOptions(opts Options) descriptor {
 		Compression:               opts.Compression,
 		MaxSegmentBytes:           opts.MaxSegmentBytes,
 		Identity:                  opts.Identity,
+		Tiered:                    len(opts.Tiers) > 0,
 	}
 }
 
@@ -222,7 +236,7 @@ func parseDescriptor(r io.Reader) (descriptor, error) {
 	if err != nil {
 		return d, errors.Wrap(err, "parse descriptor version")
 	}
-	if version != descriptorFileV1 {
+	if version != descriptorFileV2 {
 		return d, errors.Errorf("unsupported descriptor version %d", version)
 	}
 	for scanner.Scan() {
@@ -266,6 +280,8 @@ func (d *descriptor) set(key, value string) error {
 		d.Compression, err = compress.Parse(value)
 	case "max_segment_bytes":
 		d.MaxSegmentBytes, err = strconv.ParseInt(value, 10, 64)
+	case "tiered":
+		d.Tiered, err = strconv.ParseBool(value)
 	case "identity":
 		// Hex because the bytes are the CALLER's and this file is line-based:
 		// an identity containing a newline or an "=" would otherwise write a
@@ -286,12 +302,18 @@ func (d *descriptor) set(key, value string) error {
 // stored so the two cannot drift into writing different files.
 func renderDescriptor(d descriptor) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d\n", descriptorFileV1)
+	fmt.Fprintf(&b, "%d\n", descriptorFileV2)
 	fmt.Fprintf(&b, "compact=%t\n", d.Compact)
 	fmt.Fprintf(&b, "compact_min_age=%s\n", d.CompactMinAge)
 	fmt.Fprintf(&b, "compact_tombstone_retention=%s\n", d.CompactTombstoneRetention)
 	fmt.Fprintf(&b, "compression=%s\n", d.Compression)
 	fmt.Fprintf(&b, "max_segment_bytes=%d\n", d.MaxSegmentBytes)
+	// Written even when false, unlike identity. An absent line has to mean
+	// something, and here the two candidate meanings are "this log has no store"
+	// and "written by a build that did not record it" — the second being exactly
+	// the state whose data an open would silently drop. Stated always, so the
+	// absence never has to be interpreted.
+	fmt.Fprintf(&b, "tiered=%t\n", d.Tiered)
 	// Omitted entirely when unset, so a caller that does not use identity gets
 	// the same file it always did. An empty line would round-trip to []byte{}
 	// rather than nil, which is a distinction identityConflict would then have
@@ -449,6 +471,39 @@ func reconcileDescriptor(opts Options, isNew bool) (*IdentityConflict, error) {
 					"settings it should have been created with", descriptorHome(opts))
 		}
 		return nil, err
+	}
+	// A log whose bytes can be in a store, opened with no store to reach them.
+	//
+	// This refusal used to be free, and that was the problem. A tiered log wrote
+	// its descriptor ONLY to its tiers, so opening its directory alone found no
+	// descriptor at all and fell into the branch above — "the log exists and its
+	// identity does not". Writing the local copy for InspectIdentity's sake took
+	// the refusal away with it, and nothing said so, because the rule was never
+	// stated anywhere: it was a consequence of a file not being written.
+	//
+	// What it prevents is the reason TruncateBefore and OffloadBefore can move
+	// bytes out of the directory at all. The local segments are the TAIL, and a
+	// log that opens with only the tail reports an OldestOffset far past what the
+	// caller wrote, serves reads that skip the offloaded prefix entirely, and
+	// lets retention run against a log it can only see the end of. Every one of
+	// those is silent.
+	//
+	// One-directional on purpose. The other case — a local log the caller is
+	// attaching a store to — is a legitimate adoption, and loadDescriptor cannot
+	// even produce it: with Tiers set it reads the nearest tier, never the local
+	// file.
+	//
+	// Above the AdoptOptions check, and NOT an enforced() field, which is the
+	// distinction that matters. AdoptOptions means "I know what this log is,
+	// record it", and it is entitled to overrule a compaction setting because a
+	// setting is a statement about policy. Where the bytes ARE is not policy, and
+	// no amount of adopting relocates them — durable_streams adopts on every open
+	// because its settings come from a catalog, so an adoptable version of this
+	// check would be no check at all for the caller most exposed to it.
+	if got.Tiered && len(opts.Tiers) == 0 {
+		return nil, errors.Wrapf(ErrDescriptorMismatch,
+			"the log at %s has segments in a store and no Tiers were supplied; "+
+				"opening it would present its local tail as the whole log", opts.Path)
 	}
 	if !opts.AdoptOptions && !got.enforced(want) {
 		return nil, errors.Wrapf(ErrDescriptorMismatch, "%s: %s",
