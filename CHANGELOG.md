@@ -7,6 +7,20 @@ library from that fork onward.
 
 ## Unreleased
 
+### Changed
+
+- The last place a reader moved part of its cursor by poking a field is now a
+  named operation. `committedReader.readLoop` falls through to a direct
+  `seg.ReadAt` for a read that crosses the high watermark or outruns the 64 KB
+  buffer, and then had to hand the cursor back with `r.br.pos = r.pos`. That is
+  `bufReader.advanceTo` now, whose doc carries the sentence the assignment could
+  not: keeping `bufStart` and `data` is the *point* — a written byte never
+  changes, so a buffer filled before the direct read is still true of the
+  segment after it — and `reset` would also be correct while throwing that
+  buffer away. Guarded, because the failure is a stream off by the size of one
+  large message and it surfaces as a CRC error on the healthy record after it.
+  No behaviour change.
+
 ## v0.86.0 — 2026-08-14
 
 ### Changed

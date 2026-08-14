@@ -95,6 +95,25 @@ func (b *bufReader) fill() (int, error) {
 	return n, err
 }
 
+// advanceTo moves the read cursor to pos and KEEPS the buffer, for a caller
+// that consumed the bytes in between by some other route — committedReader
+// falls through to a direct seg.ReadAt for a read that crosses the high
+// watermark or outruns the buffer, and the next small read has to continue
+// after those bytes rather than from the stale pre-ReadAt position.
+//
+// Keeping bufStart and data is the point, and it is not a shortcut: a byte this
+// segment has already written never changes, so a buffer filled before the
+// direct read is still true of the segment after it, and a subsequent small
+// read inside that window is served without a syscall the direct read has
+// already made unnecessary. reset() would also be correct and would throw the
+// buffer away — which is why this is a named operation and not a field poke
+// that reads like one waiting to be tidied into a reset. A pos outside the
+// buffered window is not a special case here: Read's window guard misses and
+// fills, exactly as it would have.
+func (b *bufReader) advanceTo(pos int64) {
+	b.pos = pos
+}
+
 func (b *bufReader) reset(seg *segment, pos int64) {
 	b.seg = seg
 	b.pos = pos

@@ -603,8 +603,9 @@ func (r *committedReader) readLoop(
 			r.pos += int64(readSize)
 			// Keep the buffered reader in sync: the next small read must
 			// continue after the bytes consumed here, not from the buffer's
-			// stale pre-ReadAt position.
-			r.br.pos = r.pos
+			// stale pre-ReadAt position. advanceTo rather than refill because the
+			// buffer is still true of the segment — see its doc.
+			r.br.advanceTo(r.pos)
 		}
 		if err != nil && err != io.EOF {
 			break

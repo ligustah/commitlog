@@ -1536,6 +1536,19 @@ run_guard "a reader crossing a roll starts the new segment at 0" reader.go   '		
 			r.seekTo(nextSeg, 0)' '		if nextSeg := findSegmentAfter(r.cl.segmentsSnapshot(), r.seg); nextSeg != nil {
 			r.seekTo(nextSeg, r.br.pos)'   '^TestAnUncommittedReader(CrossesARollItNeverParkedFor|ParkedAtTheTailIsCarriedAcrossARoll)$'
 
+# A committed read that outruns the buffer bypasses bufReader entirely and must
+# hand the cursor back afterwards. Neutralized to a bare mention of the field, so
+# the buffered reader keeps its pre-ReadAt position and the next small read
+# re-serves bytes the direct read already consumed -- a stream off by the size of
+# the large message, reported as a CRC failure on the healthy record after it.
+#
+# The mutation is `_ = r.br` and not an outright deletion because deleting the
+# only use of a field in a branch still compiles here; the point is to keep the
+# line's SHAPE and remove its effect. Both large-message tests are named because
+# ReadMessage and ReadMessageMetadata reach this through different callers and
+# either one alone would leave the other unattributed.
+run_guard "a direct read hands the cursor back to the buffer" reader.go   '			r.br.advanceTo(r.pos)' '			_ = r.br'   '^TestReaderCommittedLargeMessage(|Metadata)$'
+
 # A header read takes the header, not the whole buffer it was handed. Neutralized
 # back to reading headersBuf entire, which is what turns a buffer bigger than a
 # header into a stream off by the difference -- and then reports the healthy
