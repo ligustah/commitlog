@@ -2336,3 +2336,105 @@ it cannot say whether the AdoptOptions arm is covered on its own. The second
 guard neutralizes to the plausible wrong version — `!opts.AdoptOptions && ...` —
 and only `with_adoption` goes red under it, which is what proves the two
 subtests cover different arms rather than one arm twice.
+
+## The bump's aftershock, second pass: two more fixtures, and the one that predicted itself
+
+`descriptorFileV1 → V2` broke two descriptor fixtures the same day the block
+header bump broke one (#297). Three fixtures, three different failure modes, one
+cause — a fixture built from a format's CURRENT value.
+
+- **The no-op.** `TestAVersion0DescriptorIsRefusedByVersion` downgraded with
+  `strings.Replace(body, "1\n", "0\n", 1)`. At version 2 there was no `"1\n"`
+  left to match — no other line in a descriptor ends in a bare 1 — so the
+  substitution changed nothing and the file written back was the file read. The
+  only thing that caught it was the fixture's own self-check,
+  `require.NotEqual(body, old, "the fixture did not actually downgrade the
+  version")`. Without that line a v2 descriptor would simply have opened and the
+  assertion below would have reported that the version check had gone missing.
+- **The wrong-reason pass.** `TestDescriptorRefusesUnknownKeysAndBadValues` hand-
+  wrote `"1\n"` atop three bodies. At version 2 all three fail on the VERSION
+  check without reaching the key parsing the test exists to exercise, and
+  `require.Error` cannot tell those apart. All three subtests were green for the
+  wrong reason.
+
+The second one is the interesting one, because **its doc comment already said
+so**: the fixtures read `"0"` until v0.82.0 dropped V0, and the comment written
+then explained in full that leaving a stale version would keep the test green
+without reaching the key parsing. It predicted the bug exactly. It was still
+there, unchanged and correct, while the bug it described was live.
+
+**A comment warning about rot is not a defence against rot.** The fix has to be
+something that runs. Two things now do: the version is interpolated from
+`descriptorFileV2`, so the fixture follows the format rather than recording one
+moment of it; and each subtest asserts the error is NOT `"unsupported descriptor
+version"`, which converts a wrong-reason pass into a failure. Pinning the fixture
+to `descriptorFileV2-1` turns all three red on exactly that line — which is the
+only version of the warning that has any force.
+
+Method note, because it nearly cost the verification: the first attempt at that
+mutation silently failed to apply and `go test` answered `ok (cached)`. A
+mutation that did not apply plus a cached pass is indistinguishable from a
+mutation that applied and was survived. **Use `-count=1` on every mutation run.**
+
+## Closing the version-guard set from the other side
+
+Prompted by #300 — `TierObject.Records` shipped without moving
+`manifestVersion` — the obvious follow-up is not "check the other formats once"
+but "what makes the NEXT format get checked". Inventory first:
+
+| format | refusal tested | guarded |
+|---|---|---|
+| `manifestVersion` | yes | yes (the refusal, and the constant) |
+| `descriptorFileV2` | yes | anchor stale, see below |
+| `leaderEpochFileV0` | yes | yes |
+| `BlockFormatVersion` | yes (`blockformat_test.go`) | **no** |
+| `blockTableVersion` | yes (`block_table_test.go`, `b[1] = 9`) | **no** |
+| `digestVersion` | **no** | **no** |
+
+The digest one soft-fails to "no digest", which is the right behaviour for a
+cache — a version it cannot read is a digest it rebuilds. But nothing asserts
+it, so a stale-version sidecar could start being MISPARSED rather than ignored
+and no test would notice.
+
+Three guards fixes today. The structural fix is a `hack/` check that enumerates
+version constants compared in a refusal and requires each to be named by a
+`run_guard` — same shape as `hack/storesize.sh` (#293), and the same reasoning as
+every other place this repo replaced "remember to" with a script.
+
+## An anchor audit is cheap and finds what a guard cannot report
+
+`hack/guardcheck.sh` reports a missing anchor as a failure, but only when it
+runs — and it takes the better part of an hour. Parsing every `run_guard` line
+and checking its anchor against a `git archive` of HEAD takes two seconds, needs
+no build, and does not touch the tree, so it can run while a suite or a
+guardcheck is in flight.
+
+104 single-line anchors, one genuine miss: `hack/guardcheck.sh:1862` still names
+`descriptorFileV1`, renamed by #301. (Multi-line and `$'...'` guards need a real
+shell to parse and were reported as unparseable rather than guessed at — an audit
+that quietly skips what it cannot read is the failure mode this repo already
+knows from `GUARDCHECK_SET=platform`.)
+
+## Negatives, recorded so the next sweep does not re-open them
+
+- **Back-compat and migrations.** A grep for backward/legacy/deprecated/migrate
+  across every non-test file returns nothing that keeps an old path alive. Every
+  hit is a comment explaining why a clean cutover was taken. Axis 1 is closed.
+- **`blockHeaderLen` cannot drift from its writer.** `compression_test.go:395`
+  asserts `require.Len(t, hdr, blockHeaderLen)` against `encodeBlockHeader`'s
+  output, and the round-trip test reads all four fields back.
+- **The format bump did not disarm any fuzz seed.** This is the trap from the
+  keydigest change — a byte-offset seed becomes a no-op when a layout grows — and
+  v0.89.0 moved two byte layouts. All three byte-poking targets are immune by
+  construction: `corruption_fuzz_test.go` finds its byte with
+  `bytes.Index(raw, marker)`, `frame_header_fuzz_test.go` walks the frames to
+  build `starts`, and `digest_corruption_fuzz_test.go` uses `raw[at%len(raw)]`.
+  None uses a fixed offset. The seeds are `{recordIdx, byteWithinRecord, mask}`,
+  which is a coordinate the layout cannot invalidate.
+- **`manifest_key_traversal_test.go`.** Flagged by the bare-`require.Error` scan,
+  and both are fine. The four version cases all target the SAME check, so there
+  is no earlier condition to mask them, and they interpolate `manifestVersion`.
+  The traversal case follows its `require.Error` with a positive consequence
+  assertion — the file outside the store must still exist — which is stronger
+  than an error-identity check, because it proves the traversal did not happen
+  rather than that something failed.
