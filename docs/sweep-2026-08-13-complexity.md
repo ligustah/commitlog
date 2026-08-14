@@ -1449,3 +1449,40 @@ this document: the script prints its own count, and that is the answer.
 Same shape as [[a transcribed rule grows a dissimilar copy]] seen from the
 measuring end — a second and third spelling of one registration, and a count
 that only knows about the first.
+
+### The lock-order lens, and why its first two versions were worthless
+
+This package documents three lock orders — `cleanMu` before `mu`, `appendMu`
+before `mu`, `mu` before `mapMu` — and has already paid for getting one wrong
+(a lock-taking call added below `setupIndex`, which has callers on both sides of
+the segment write lock, hung the whole suite). Nothing checks them, so this
+looked like a lens worth building.
+
+The orders hold. What is worth writing down is how badly the first two attempts
+lied about that.
+
+**Version one, name-based: 62 "violations", all false.** Two reasons, both
+embarrassing and both general:
+
+- `append`, `close`, `len`, `make` are **Go builtins**, and a call-graph built
+  by matching `name(` resolves `append(...)` to whatever method in the package
+  happens to be called `append`. Half the report was "holds mu, calls append()".
+- **Five different types have a field named `mu`** — `commitLog`, `index`,
+  `indexCache`, `leaderEpochCache`, `segment`. A rule about *`commitLog`'s* `mu`
+  applied to every one of them at once.
+
+**Version two, scoped to the receiver type that owns both locks and with
+builtins removed: 2 candidates.** Both still false, for a third reason: the scan
+treats "acquires L somewhere in the body" as "holds L at the call site".
+`cleanPass` takes `cleanMu` first and `mu` after it, which is the documented
+order; `closeIndex` takes `mu` first and `mapMu` inside, releasing it before the
+call that was flagged.
+
+So: **the documented orders are respected, verified structurally**, and the
+lens is not worth keeping in this form. A real one needs types and a
+lock-held-at-this-point analysis, which is a type checker's job and not a
+regex's. Recorded so the next pass builds it properly or not at all, rather than
+re-deriving 62 false positives and either chasing them or — worse — concluding
+from a scoped run of 2 that the codebase is nearly clean, which would have been
+the right answer reached by an instrument that could not have told the
+difference.
