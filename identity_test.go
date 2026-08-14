@@ -460,7 +460,16 @@ func TestAVersion0DescriptorIsRefusedByVersion(t *testing.T) {
 	path := filepath.Join(dir, descriptorFileName)
 	body, err := os.ReadFile(path)
 	require.NoError(t, err)
-	old := strings.Replace(string(body), "1\n", "0\n", 1)
+	// Rewrite the version LINE, rather than substituting the current version's
+	// digit. This was `strings.Replace(body, "1\n", "0\n", 1)`, which read as
+	// "swap the version" only because the version happened to be 1 and no other
+	// line ended in a bare 1. descriptorFileV2 broke both halves at once: there
+	// was no "1\n" left to match, so the fixture silently became a no-op and the
+	// self-check below is what failed. A fixture that names a format's current
+	// value ages into a different test the moment that value moves.
+	_, rest, ok := strings.Cut(string(body), "\n")
+	require.True(t, ok, "a descriptor is line-oriented; there is no version line to downgrade")
+	old := "0\n" + rest
 	require.NotEqual(t, string(body), old, "the fixture did not actually downgrade the version")
 	require.NoError(t, os.WriteFile(path, []byte(old), 0644))
 
