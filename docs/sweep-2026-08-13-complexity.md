@@ -1077,3 +1077,49 @@ No script was added to hold the rule. "A test name must name the method it
 drives" is not mechanically checkable in general, and a check that special-cased
 the word "truncation" would be a guard against one instance of a class — the
 thing this sweep keeps deleting.
+
+## Two more mechanical scans: write-only fields, and one message for many causes
+
+**Fields assigned and never read.** staticcheck cannot see these — a field counts
+as used the moment anything mentions it, so a field faithfully maintained and
+never consulted stays green forever. 240 unexported fields, two real hits (the
+other three were parser artifacts: a local named like a field, and
+`x := s.superseded` read as a literal key).
+
+`keyDigest.keyedLen` was parsed, stored, and read by nothing. `newDigestIter`
+seeks to `keyedOff` and reads exactly `nKeys` entries; where the section ends is
+not needed. The struct doc listed it as part of the location record, so the doc
+was asserting a mechanism that did not exist. Deleted — the parse still uses a
+length to bounds-check and skip, and that is a local.
+
+`recInfo.hasPid` was the better one, because a test field that is written and
+never read is usually a *missing assertion* rather than dead weight, and it was:
+`TestCleanDigestMergeEquivalence` checked that records below `StripBelow` lose
+their headers and never that records at or above it keep them. A strip that
+ignored the floor entirely passed. Falsified before landing (drop `offset <
+spec.StripBelow` from both data arms of `classify` → red on seed 2, offset 52
+against a floor of 51) and now guarded. The count is floored across all five
+seeds, not per seed: a seed whose header-carrying records all land below the
+floor makes the assertion vacuous, and failing *that* seed would say nothing
+about stripping.
+
+**One error message, several causes.** 207 distinct error texts in the non-test
+tree, seven duplicated. Three are correct: two platform-split pairs
+(`dirlock_unix`/`dirlock_windows`, the two `index_mmap` files) which are one
+error with two implementations, and `"commitlog: negative read offset %d"`,
+which is one rule refused identically by both readers.
+
+The other four named nothing. `"stat file failed"` appeared three times —
+twice inside `newIndex`, on the stat before pre-allocation and the stat after
+it, so an operator reading a log could not tell which. `"open file failed"` was
+the index file in one place and the segment log in the other; `"path is empty"`
+was `Options.Path` in one and the index path in the other. And `reopenLocked`
+wrapped all three of its steps — open backing, positions, index — in one
+sentence. Each now names its subject. One bare `return nil, err` on the index
+pre-allocation `Truncate` picked up a wrap while there, which is the same defect
+with the message missing entirely rather than duplicated.
+
+Neither scan is worth keeping as a script. The write-only check has a real false
+positive rate (3 of 5 here) that a human resolves in a minute and a script would
+have to encode a Go parser to avoid, and the error-text check has three
+legitimate duplicates it cannot distinguish from the bad ones.

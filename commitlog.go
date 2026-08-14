@@ -471,7 +471,7 @@ type Options struct {
 // other and why nothing after open time can detect it.
 func New(opts Options) (_ CommitLog, err error) {
 	if opts.Path == "" {
-		return nil, errors.New("path is empty")
+		return nil, errors.New("commitlog: Options.Path is empty")
 	}
 	// Refused HERE because every other place that meets an unknown codec meets it
 	// too late. Compress has no error to return and falls through to storing the

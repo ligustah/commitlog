@@ -120,29 +120,29 @@ func newIndex(opts options) (idx *index, err error) {
 		opts.bytes = 10 * 1024 * 1024
 	}
 	if opts.path == "" {
-		return nil, errors.New("path is empty")
+		return nil, errors.New("index path is empty")
 	}
 	idx = &index{
 		options: opts,
 	}
 	idx.file, err = os.OpenFile(opts.path, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
-		return nil, errors.Wrap(err, "open file failed")
+		return nil, errors.Wrap(err, "open index file")
 	}
 	fi, err := idx.file.Stat()
 	if err != nil {
-		return nil, errors.Wrap(err, "stat file failed")
+		return nil, errors.Wrap(err, "stat index file")
 	}
 	// Pre-allocate the index if we just created it.
 	if fi.Size() == 0 {
 		if err := idx.file.Truncate(roundDown(opts.bytes, entryWidth)); err != nil {
-			return nil, err
+			return nil, errors.Wrap(err, "pre-allocate index file")
 		}
 	}
 	// Get updated stats after resize.
 	fi, err = idx.file.Stat()
 	if err != nil {
-		return nil, errors.Wrap(err, "stat file failed")
+		return nil, errors.Wrap(err, "stat index file after pre-allocation")
 	}
 	idx.position = fi.Size()
 	idx.size = fi.Size()

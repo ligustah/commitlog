@@ -553,7 +553,7 @@ func newSegmentWith(path string, baseOffset, maxBytes int64, isNew bool, suffix 
 	}
 	backing, err := openLocalBacking(s.logPath())
 	if err != nil {
-		return nil, errors.Wrap(err, "open file failed")
+		return nil, errors.Wrap(err, "open segment log file")
 	}
 	s.backing = backing
 	if err := s.initPositions(); err != nil {
@@ -751,7 +751,7 @@ func (s *segment) fetchBlockTable() ([]blockRef, error) {
 func (s *segment) initPositions() error {
 	size, err := s.backing.Size()
 	if err != nil {
-		return errors.Wrap(err, "stat file failed")
+		return errors.Wrap(err, "size of segment backing file")
 	}
 	s.physPosition = size
 	s.cache = newBlockCache()
@@ -2786,14 +2786,14 @@ func openBackingWithRetry(path string) (*localBacking, error) {
 func (s *segment) reopenLocked() error {
 	backing, err := openBackingWithRetry(s.logPath())
 	if err != nil {
-		return errors.Wrap(err, "reopening a segment after a failed replace")
+		return errors.Wrap(err, "reopening a segment after a failed replace: open backing")
 	}
 	s.backing = backing
 	s.closed = false
 	if err := s.initPositions(); err != nil {
-		return errors.Wrap(err, "reopening a segment after a failed replace")
+		return errors.Wrap(err, "reopening a segment after a failed replace: positions")
 	}
-	return errors.Wrap(s.setupIndex(), "reopening a segment after a failed replace")
+	return errors.Wrap(s.setupIndex(), "reopening a segment after a failed replace: index")
 }
 
 // SupersededBy records that next carries the records this segment still owes a
