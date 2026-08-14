@@ -1486,3 +1486,106 @@ re-deriving 62 false positives and either chasing them or — worse — concludi
 from a scoped run of 2 that the codebase is nearly clean, which would have been
 the right answer reached by an instrument that could not have told the
 difference.
+
+## "All checks against the catalog, never the disk" — applied inside commitlog
+
+One of the standing questions is why anything is checked against directories on
+disk when a catalog exists. Applied here, the lens is: **does any code path
+answer a question by consulting the filesystem when an authoritative structure
+already knows?**
+
+Grepping `os.Stat`/`os.ReadDir`/`filepath.Glob`/`Walk` gives ~80 hits, of which
+**five are non-test**, and all five turn out to be legitimate — which is the
+useful half of the result, because it is not what I expected going in.
+
+- `commitlog.go:796`, `index_cache.go:78`, `segment_store.go:350,361` — a
+  filesystem-backed store and a cache directory enumerating themselves. The
+  disk *is* the catalog for these; there is nothing above them to ask.
+- `util.go:239` (`removeAllExcept`) — a deletion enumerating what to delete.
+- `descriptor.go:386` (`logIsNew`) — this one *looks* like the defect and is
+  not, and its doc already says why: it asks the store when there is one and
+  the directory only when there is not.
+
+`exists()` has four production callers. Three are a creation refusal and two
+deletion checks, where the disk is the only authority that can answer. The
+fourth, `clean_join.go:253`, is the interesting one:
+
+```go
+wantDigest := exists(digestPath(first))
+```
+
+That reads as the defect — a *configuration* question ("does this log keep key
+digests?") answered by a file's existence. **The hypothesis was wrong, and the
+refutation is worth keeping.** I assumed segment join was reachable only from
+the compaction arm, which would have made `l.Compact` the catalog answer.
+`clean.go:760-764` says otherwise, deliberately:
+
+> Its own stage, after both branches, because it belongs to both: compaction
+> and consolidation are the two arms of `if l.Compact`, and a join placed in
+> either would only ever reach half the logs.
+
+So a retention-only log reaches this line, has genuinely never had a digest, and
+`exists()` is the *more* accurate predicate — `l.Compact` would answer "should
+this log have digests in principle", where the code needs "does this segment
+have one". **A negative for the lens; the whole finding is downstream of it.**
+
+### The finding the refutation produced
+
+Chasing "so who *does* write a digest" gives the fact the lens was actually
+worth running for: **`loadOrBuildDigests` (the compact cleaner) is the only
+thing that ever persists a `.keys` sidecar.** Therefore on a log with `Compact`
+disabled, no sealed segment has a digest and none ever will. Not a warm-up — a
+steady state.
+
+And `prefix_source.go` handled a missing digest by *building one*:
+
+```go
+if d == nil {
+    if d, err = buildKeyDigest(seg, newBlockCache()); err != nil { ... }
+}
+```
+
+`buildKeyDigest` reads every record in the segment **and** holds a
+`map[string]*keyRecs` over every distinct key in it. The digest was then thrown
+away, and the offsets it named were read a **second** time. So the "optimised"
+prefix path cost strictly more than the scan-and-filter it was avoiding, on
+every read, forever.
+
+The sharpest version of it is a **sibling asymmetry** (the lens from earlier in
+this sweep, used again): the compact cleaner bounds this exact call at two
+concurrent builds, and says why —
+
+> 10 concurrent ~40MB maps measured >1GB on a 12h soak … peak memory is what
+> matters, and peak memory is a function of this number alone.
+
+— while the read path called the same function with **no bound at all**.
+`PrefixReadConcurrency` sounds like the bound and is not: it governs record
+*reads*, not digest builds. The number in flight was however many readers
+happened to be doing prefix reads.
+
+**Why nothing caught it.** Correctness was covered well — two tests run their
+whole comparison with the sidecars deleted, and the fuzz target catches a
+missing CRC check on this route. *Cost* was covered by tests that were
+measuring the wrong path: `costLog` and `offloadedPrefixLog` both set
+`Compact: true` **with `DisableAutoClean: true`** and never called `Clean`, so
+their segments had no digests either, and every number they compared was
+measured on top of an unmeasured full rebuild scan. A test can be pointed at
+the path it names and still be standing on a different one.
+
+### A second bug that only became visible once the first was fixed
+
+With the scan in place the new cost test read **exactly 2× the sealed segment
+count**. The traversal visited every segment twice: `pop` walks `p.next` back to
+the last record it served — correct, since that is where a *resumed read* must
+continue — so a fully drained segment still looks unfinished to the search loop,
+which re-plans it to discover it has nothing left.
+
+With a digest that second visit is nearly free, which is exactly how it survived
+in a path that had been profiled. **A cheap redundant operation is invisible
+until something makes it expensive.** The fix separates the two offsets
+(`servedThrough` vs `next`), and the digest path saves a redundant plan per
+segment as a side effect.
+
+The new tests assert **equality**, not a bound: "at most one pass per segment"
+would still be satisfied by a build-then-fetch that happened to coalesce into a
+single run, so it would not notice the old shape coming back.
