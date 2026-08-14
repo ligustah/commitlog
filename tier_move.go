@@ -195,13 +195,8 @@ func (l *commitLog) movePlaced(placement map[int64]string) ([]pendingReclaim, er
 		dests[base] = t
 	}
 
-	l.mu.RLock()
-	segments := make([]*segment, len(l.segments))
-	copy(segments, l.segments)
-	l.mu.RUnlock()
-
 	var superseded []pendingReclaim
-	for _, s := range segments {
+	for _, s := range l.segmentsSnapshot() {
 		dst, ok := dests[s.BaseOffset]
 		if !ok {
 			continue

@@ -190,7 +190,16 @@ jobs:
       # cannot notice a caller that never joins it.
       - name: atomicwrite
         run: bash hack/atomicwrite.sh
-      # The three scripts above and guardcheck decide whether this repo is
+      # The segment slice is shared with every reader, unlocked, so a change to
+      # the set publishes a new array instead of writing into the old one. Both
+      # breaks of that rule were writes that did not look like writes — an
+      # element assignment in TruncateBefore (v0.44.2), and a sort.Slice in the
+      # manifest adopt, which swaps in place. The second could not have been
+      # caught by a test: it runs inside open(), where no reader exists to lose
+      # the race, so it was safe by the schedule and not by the code.
+      - name: cowsegments
+        run: bash hack/cowsegments.sh
+      # The four scripts above and guardcheck decide whether this repo is
       # correct, and until now nothing checked THEM. Every bug they have had was
       # shell semantics rather than logic: a `| while` setting its flag in a
       # subshell so layercheck printed every violation and exited 0; a substring

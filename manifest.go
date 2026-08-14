@@ -485,7 +485,17 @@ func (l *commitLog) TierManifest() ([]TierObject, error) {
 // got, and an import is not the place to overrule that.
 //
 // Caller holds l.mu.
-func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (int, error) {
+//
+// It builds a NEW segment array rather than appending to and sorting the live
+// one, which is the rule segmentsSnapshot() states for everyone who changes the
+// set: readers index a snapshot without holding l.mu, so an element written in
+// place is a data race against every one of them. sort.Slice swaps elements in
+// place — this is the one caller that was breaking that rule, and it was safe
+// only because it happens to run inside open(), before there is a log to hold a
+// reader. That is a fact about the schedule, not about the function, and the
+// first maintenance path to adopt a manifest published by another process would
+// have taken it away silently.
+func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (adopted int, err error) {
 	if len(objs) == 0 {
 		return 0, nil
 	}
@@ -494,7 +504,20 @@ func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (int, error) {
 		have[s.BaseOffset] = true
 	}
 
-	adopted := 0
+	next := make([]*segment, len(l.segments), len(l.segments)+len(objs))
+	copy(next, l.segments)
+	// Published on every exit, error paths included, because that is what the
+	// direct appends this replaces did: a segment opened before the failure is
+	// already holding a file handle and a mapping, and the only thing that
+	// releases them is the log closing the segments it knows about.
+	defer func() {
+		if adopted > 0 {
+			sort.Slice(next, func(i, j int) bool {
+				return next[i].BaseOffset < next[j].BaseOffset
+			})
+			l.segments = next
+		}
+	}()
 	for _, o := range objs {
 		if have[o.BaseOffset] || o.LogKey == "" {
 			continue
@@ -543,13 +566,8 @@ func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (int, error) {
 					"rebuild index for manifest segment %d", o.BaseOffset)
 			}
 		}
-		l.segments = append(l.segments, seg)
+		next = append(next, seg)
 		adopted++
-	}
-	if adopted > 0 {
-		sort.Slice(l.segments, func(i, j int) bool {
-			return l.segments[i].BaseOffset < l.segments[j].BaseOffset
-		})
 	}
 	return adopted, nil
 }

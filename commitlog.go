@@ -1201,12 +1201,7 @@ func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, errors.New("commitlog: maxBytes must be positive")
 	}
-	l.mu.RLock()
-	segments := make([]*segment, len(l.segments))
-	copy(segments, l.segments)
-	l.mu.RUnlock()
-
-	seg, contains := findSegmentContains(segments, offset)
+	seg, contains := findSegmentContains(l.segmentsSnapshot(), offset)
 	if seg == nil {
 		return nil, ErrSegmentNotFound
 	}
@@ -2425,6 +2420,12 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 // the shared array: append can only touch indices at or past len(l.segments),
 // and a snapshot's length is fixed when it is taken, so no reader ever indexes
 // there.
+//
+// Because the obligation holds, a caller that copies the returned slice is
+// defending against nothing — three of them did, under their own RLock,
+// open-coding this function and then paying for an array no one can write to.
+// The copy also reads as the safety, which is worse than costing an allocation:
+// it makes the rule above look optional for whoever writes the fourth one.
 func (l *commitLog) segmentsSnapshot() []*segment {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -2756,18 +2757,14 @@ func (l *commitLog) syncSegments() error {
 	return l.forEachSegment((*segment).Sync)
 }
 
-// forEachSegment fsyncs every segment with sync. It snapshots the segment slice
-// rather than holding l.mu across the fsyncs: an append that rolls a new
-// segment needs the write lock, so holding the read lock for the duration would
-// stall the roll behind the very fsync a concurrent commit is waiting on. A
-// segment appended after the snapshot is simply not covered by this call, which
-// is the same boundary the per-segment sync already draws.
+// forEachSegment fsyncs every segment with sync. It takes a snapshot rather
+// than holding l.mu across the fsyncs: an append that rolls a new segment needs
+// the write lock, so holding the read lock for the duration would stall the roll
+// behind the very fsync a concurrent commit is waiting on. A segment appended
+// after the snapshot is simply not covered by this call, which is the same
+// boundary the per-segment sync already draws.
 func (l *commitLog) forEachSegment(sync func(*segment) error) error {
-	l.mu.RLock()
-	segments := make([]*segment, len(l.segments))
-	copy(segments, l.segments)
-	l.mu.RUnlock()
-	for _, seg := range segments {
+	for _, seg := range l.segmentsSnapshot() {
 		if err := sync(seg); err != nil {
 			// A segment closed concurrently: Clean rewrites/closes segments
 			// OUTSIDE l.mu (see the struct comment), so a sync racing a Clean

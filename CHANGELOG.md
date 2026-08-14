@@ -7,6 +7,32 @@ library from that fork onward.
 
 ## Unreleased
 
+### Fixed
+
+- **The manifest adopt sorted the live segment array in place.**
+  `segmentsSnapshot`'s doc states the obligation on everyone who changes the
+  segment set — readers index a snapshot *without* holding `l.mu`, so writing an
+  element in place is a data race against all of them, which is what v0.44.2 was
+  spent on. `adoptTierManifestLocked` appended to `l.segments` and then called
+  `sort.Slice` on it, and `sort.Slice` swaps elements in place.
+
+  Not reachable today: it runs inside `open()`, before there is a log for anyone
+  to hold a reader on. That makes it safe by the schedule rather than by the
+  function, and the first maintenance path to adopt a manifest another process
+  published would have taken the schedule away without touching this code. It
+  builds a new array now, published on every exit including the error paths —
+  which is what the direct appends it replaces did, and it matters because a
+  segment opened before a failure holds a file handle that only the log closing
+  its segments releases.
+
+  No test could have caught it — there is no reader to lose the race — so the
+  rule is a script now rather than a sentence: `hack/cowsegments.sh`, in CI
+  beside `layercheck` and `atomicwrite`. It refuses an element assignment, any
+  sort, and `copy` into the slice, across tests as well as production, and it
+  fails loudly if `segmentsSnapshot` ever stops handing out the live header —
+  otherwise it would go on passing while enforcing a rule that had ceased to
+  exist. Both halves were falsified before landing.
+
 ### Changed
 
 - The last place a reader moved part of its cursor by poking a field is now a
@@ -20,6 +46,12 @@ library from that fork onward.
   buffer away. Guarded, because the failure is a stream off by the size of one
   large message and it surfaces as a CRC error on the healthy record after it.
   No behaviour change.
+
+- Three sites open-coded `segmentsSnapshot()` under their own `RLock` and then
+  copied the result — `ReadMessageSet`, `forEachSegment` and `movePlaced`. With
+  the set copy-on-write the copy defends against nothing, and it reads as though
+  it *were* the safety, which is how the rule above stops looking obligatory to
+  whoever writes the fourth one. All three call the function now.
 
 ## v0.86.0 — 2026-08-14
 
