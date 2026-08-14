@@ -105,6 +105,16 @@ library from that fork onward.
   reason for the second: the closed arm returns before the body runs, so a
   shutting-down log gets no extra pass. No behaviour change.
 
+- `TruncateBefore` no longer holds the kept region of a boundary segment in
+  memory. It collected every record at or above the cut into a slice, then
+  created the trim and wrote them, because `Trimmed` needs the new base offset
+  before the destination exists — an `int64` the *first* kept record already
+  had. The trim is now created on that record and the rest stream into it, the
+  way `Truncate` has always done the mirror-image job. On a boundary that
+  straddles the cut the buffer was bounded only by `MaxSegmentBytes`, so a
+  retention pass over large segments allocated a segment's worth of records to
+  learn one offset. No behaviour change.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking

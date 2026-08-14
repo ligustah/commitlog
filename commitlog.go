@@ -2238,15 +2238,20 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 	if boundaryIdx < len(oldSegments)-1 && oldSegments[boundaryIdx].BaseOffset < minOffset {
 		boundary = oldSegments[boundaryIdx]
 		ss := newSegmentScanner(boundary)
-		var (
-			newBaseOffset int64 = -1
-			kept          []messageSet
-		)
+		// The destination is created on the FIRST kept record rather than after
+		// the scan, and every record is written as it is read. Trimmed() needs
+		// the new base offset, which is the first kept offset — known at that
+		// record, not at the last one. Collecting them all first meant holding
+		// the entire kept region of the boundary in memory, up to a whole
+		// segment's worth on a boundary that straddles the cut, to learn one
+		// int64 the first iteration already had. Truncate, doing the mirror
+		// image of this, has always streamed.
+		var t *segment
 		for {
 			ms, _, err := ss.Scan()
 			if err != nil {
 				// See the same guard in Truncate. This one has the sharper
-				// edge: if the FIRST scan fails, newBaseOffset stays -1, and
+				// edge: if the FIRST scan fails, no trim was ever created, and
 				// "no records at or above minOffset" is indistinguishable
 				// from "could not read the first frame" — so the branch
 				// below deleted the whole boundary segment, including every
@@ -2259,31 +2264,35 @@ func (l *commitLog) TruncateBefore(minOffset int64) error {
 				}
 				break
 			}
-			if ms.Offset() >= minOffset {
-				if newBaseOffset < 0 {
-					newBaseOffset = ms.Offset()
+			if ms.Offset() < minOffset {
+				continue
+			}
+			if t == nil {
+				if t, err = boundary.Trimmed(ms.Offset()); err != nil {
+					ss.Close()
+					return errors.Wrap(err, "create trimmed segment failed")
 				}
-				kept = append(kept, ms)
+				// The fifth site of the same rule; see
+				// segment.dropIfUnpublished. This path publishes by Finalize
+				// rather than Replace, but Finalize clears the suffix the same
+				// way, so the discriminator is the same one and the defer goes
+				// quiet from there on. Registered inside the loop because that
+				// is where the trim comes into existence — it runs at return
+				// like any other defer, and only once, because this branch is
+				// only ever taken once.
+				defer t.dropIfUnpublished()
+			}
+			if err := t.WriteMessageSet(ms, entriesForMessageSet(t.Position(), ms)); err != nil {
+				ss.Close()
+				return errors.Wrap(err, "write trimmed segment failed")
 			}
 		}
+		// Before Finalize and before the deletes below, not deferred: on
+		// Windows a read handle still open on the boundary denies the removal
+		// at the end of this call.
 		ss.Close()
 
-		if newBaseOffset >= 0 {
-			t, err := boundary.Trimmed(newBaseOffset)
-			if err != nil {
-				return errors.Wrap(err, "create trimmed segment failed")
-			}
-			// The fifth site of the same rule; see segment.dropIfUnpublished.
-			// This path publishes by Finalize rather than Replace, but Finalize
-			// clears the suffix the same way, so the discriminator is the same
-			// one and the defer goes quiet from there on.
-			defer t.dropIfUnpublished()
-			for _, ms := range kept {
-				entries := entriesForMessageSet(t.Position(), ms)
-				if err := t.WriteMessageSet(ms, entries); err != nil {
-					return errors.Wrap(err, "write trimmed segment failed")
-				}
-			}
+		if t != nil {
 			if err := t.Finalize(); err != nil {
 				return errors.Wrap(err, "finalize trimmed segment failed")
 			}

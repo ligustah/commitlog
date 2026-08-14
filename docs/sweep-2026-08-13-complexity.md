@@ -433,3 +433,44 @@ the durations are the answer.
   over a rule whose every use is a judgement about what that caller loses.
 - `uncommittedReader.segmentBounds` / `committedReader.segmentBounds` — still
   identical, still waiting on the shared embedded base that is the honest fix.
+
+# 2026-08-14 — measuring the mechanism, not the source
+
+Once the repeated-run count stopped finding anything, the next lens was size:
+every non-test function of 80 lines or more, with its branch count. It reported
+15, and the two biggest after `New`/`open` were `Truncate` (171) and
+`TruncateBefore` (180) — the mirror image of each other, and exactly the shape
+the transcription lens keeps finding.
+
+They are **not** a transcription, and that is worth writing down so the next
+sweep does not try to merge them. Their commit-point orders are deliberately
+opposite: `Truncate` deletes the records above the cut *before* publishing,
+because making them unreachable as early as possible is the whole point of the
+call (a follower that has been told it diverged); `TruncateBefore` publishes
+*before* it unlinks, because a retention pass that fails halfway should leave
+files behind rather than a list naming files that are gone. Both say so in
+place. One function taking a direction flag would have to carry both orders and
+choose between them, which is the same code with the reason deleted.
+
+What the size lens *did* find is one real defect, and it was invisible to every
+lens before it because nothing was duplicated: `TruncateBefore` collected the
+whole kept region of the boundary segment into `kept []messageSet` before
+creating the trim, while `Truncate` streamed. The buffer existed to learn one
+`int64` — the new base offset `Trimmed()` needs — which the FIRST kept record
+already had. Creating the destination lazily on that record removes an
+allocation bounded only by `MaxSegmentBytes`, and removes the `newBaseOffset`
+sentinel with it.
+
+The generalisation: **a duplication lens cannot see a divergence.** Two
+functions doing the mirror image of one job are the place to look for one of
+them having quietly grown a worse implementation, and the tell is not that the
+code matches — it is that the *job* does.
+
+## Lenses run and closed
+
+- Exported functions with zero production call sites. Eight hits, all false:
+  most are library API for external callers, and the two that looked genuinely
+  dead — `segment.SyncData` (0 prod, 0 test) and `segment.MessageCount` — are
+  called as **method expressions**, `l.forEachSegment((*segment).SyncData)`. A
+  call-site scan looking for `.Name(` cannot see those. Any future dead-code
+  pass has to count `(*T).Name` too, or it will propose deleting live code.

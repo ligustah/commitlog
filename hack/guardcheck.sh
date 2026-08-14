@@ -1529,7 +1529,7 @@ run_guard "a half-done finalize puts the log back" segment.go   '		return stderr
 # one publishes with Finalize rather than Replace -- the suffix is renamed off in
 # place instead of over a source -- so it is the site that shows the
 # discriminator is the SUFFIX and not the rename target.
-run_guard "a failed truncate-before drops its trim" commitlog.go   '			defer t.dropIfUnpublished()' '			defer func() {}()'   '^TestAFailedTruncateBeforeDropsTheTrimItBuilt$'
+run_guard "a failed truncate-before drops its trim" commitlog.go   '				defer t.dropIfUnpublished()' '				defer func() {}()'   '^TestAFailedTruncateBeforeDropsTheTrimItBuilt$'
 
 # The size steering readStoreDescriptor's allocation is the STORE's answer and
 # nothing verifies it, so a store reporting a huge descriptor allocates it in the
