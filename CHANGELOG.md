@@ -31,6 +31,23 @@ library from that fork onward.
   An older manifest is refused, as versions 1 and 2 are; re-offload rather than
   convert.
 
+- **Every existing descriptor is invalidated.** `descriptorFileV1` → `V2`, for
+  the new `tiered` line. This is the **broadest** of the four breaks in this
+  release and the only one that reaches a log using no compression and no tiers:
+  the other three touch block-compressed segments and offloaded ones, this one
+  touches every log that has ever been through `New`. A v1 descriptor is refused
+  rather than read as `tiered=false`, because that default is wrong on precisely
+  the logs the field protects. Delete the descriptor and reopen with the same
+  `Options`, or open once with `AdoptOptions`.
+
+  It carries a **behaviour** break with it, not just a format one: opening a
+  partition directory that has tiered segments while supplying no `Tiers` now
+  returns `ErrDescriptorMismatch`, and **`AdoptOptions` does not bypass it**.
+  Callers whose settings come from a catalog adopt on every open, so this is the
+  one refusal in `reconcileDescriptor` that is deliberately not adoptable. The
+  reasoning is under *Fixed*, with the local-descriptor change that made it
+  necessary.
+
 ### Fixed
 
 - **`MaxLogMessages` no longer deletes records it was asked to keep.**
