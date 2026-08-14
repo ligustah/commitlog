@@ -1856,10 +1856,28 @@ run_guard "nothing is published over an identity conflict" descriptor.go   '	if 
 	}' '	_ = conflict'   '^Test(AConflictIsNotErasedByAnUnrelatedSettingChange|AdoptingSettingsStillReportsAnIdentityConflict)$'
 
 # V0 was dropped in v0.82.0, and the version line is the ONLY thing that catches
-# a V0 file: every remaining line in one parses fine, so without this check a V0
-# descriptor opens silently as though it were current. Neutralized with `false
-# &&`, which compiles.
-run_guard "a v0 descriptor is refused by its version line" descriptor.go   '	if version != descriptorFileV1 {' '	if false && version != descriptorFileV1 {'   '^TestAVersion0DescriptorIsRefusedByVersion$'
+# an older file: every remaining line in one parses fine, so without this check a
+# V0 descriptor opens silently as though it were current. Neutralized with
+# `false &&`, which compiles.
+#
+# The anchor named descriptorFileV1 until #301 renamed the constant, and the
+# guard then reported SKIP for a release — a reminder that a guard anchored on a
+# CONSTANT'S NAME is a guard that a rename disarms. Nothing here can prevent
+# that; the defence is that guardcheck counts an unresolved anchor as a failure
+# rather than passing over it, which is what surfaced this one.
+run_guard "a v0 descriptor is refused by its version line" descriptor.go   '	if version != descriptorFileV2 {' '	if false && version != descriptorFileV2 {'   '^TestAVersion0DescriptorIsRefusedByVersion$'
+
+# The refusal above proves the version LINE is checked. This proves the CONSTANT
+# moved when the layout did — a different claim, because a check that runs
+# against the wrong number is still a check that runs.
+#
+# #301 added the `tiered` field AND bumped the constant, and the bump is what
+# makes a v1 descriptor refused instead of read as `tiered=false` — a default
+# that is wrong on precisely the logs the field protects. Without this, a future
+# field lands with no bump and nothing goes red, which is exactly how #300
+# happened to the manifest. Same guard as "the manifest version moved with the
+# record count", one format over.
+run_guard "the descriptor version moved with the tiered field" descriptor.go   '	descriptorFileV2 = 2'   '	descriptorFileV2 = 1'   '^TestADescriptorFromBeforeTheTieredFieldIsRefused$'
 
 # noRetentionLimits() decides whether the retention pass runs; the three gates in
 # cleanLocal decide whether each limit applies. With `== 0` here they disagreed
