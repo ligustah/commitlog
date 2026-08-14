@@ -539,6 +539,12 @@ func reconcileDescriptor(opts Options, isNew bool) (*IdentityConflict, error) {
 		// and taking it here is the whole defect this split exists to remove.
 		fresh = want
 		fresh.Identity = got.Identity
+		// Tiered is deliberately NOT restored from `got`, and that is only safe
+		// because of the refusal above. want.Tiered is len(opts.Tiers) > 0, so
+		// taking the caller's value here would clear the flag on a tiered log
+		// opened without its store — which is the one state that can no longer
+		// reach this line. Reorder the two and this silently becomes the erase
+		// the Identity line beside it exists to prevent.
 	}
 	fresh.Compression = want.Compression
 	fresh.MaxSegmentBytes = want.MaxSegmentBytes
