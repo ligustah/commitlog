@@ -16,9 +16,11 @@ is `v1.9.0`, and `v1.9.0`'s `go.mod` names a different module — so the resolut
 fails outright rather than falling back to the next candidate. Nobody could add
 this module without knowing to pin an explicit `v0.x`.
 
-They were deleted from the repository on 2026-08-14. None of them had a GitHub
-release attached, and all fifteen were lightweight tags, so each was exactly a
-name pointing at a commit. The names and the commits they pointed at:
+Deleting them was chosen on 2026-08-14, and at the time of writing the deletion
+itself is still outstanding — the record below was written first, on purpose, so
+that the destructive step is the reversible one. None of the fifteen has a GitHub
+release attached and all fifteen are lightweight tags, so each is exactly a name
+pointing at a commit. The names and the commits they point at:
 
 | tag | commit |
 | --- | --- |
@@ -47,8 +49,8 @@ reachable from `master`.
 ## What deleting them does and does not fix
 
 It fixes the repository, which is the part this project controls: `git ls-remote`
-no longer offers a `v1.x`, and a resolver reading tags directly — `GOPROXY=direct`,
-or a `replace` against a checkout — now sees `v0.88.0` as the highest.
+stops offering a `v1.x`, and a resolver reading tags directly — `GOPROXY=direct`,
+or a `replace` against a checkout — sees `v0.88.0` as the highest.
 
 It does **not** retroactively fix `proxy.golang.org`. The public proxy is
 append-only by design: a version it has already served stays served, so that a
