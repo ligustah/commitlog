@@ -55,6 +55,22 @@ library from that fork onward.
   seconds a waiting caller gets, because a lost digest is free: every caller
   rebuilds it from the segment when it is absent.
 
+- **Adopting a log with no identity erased its stored stamp.** `AdoptOptions`
+  skips the descriptor comparison and republishes the caller's record whole,
+  identity included — so a caller that does not use identity at all, adopting
+  only to retune a gating setting (which is what the option exists for),
+  published an empty one. `renderDescriptor` omits an empty identity entirely,
+  so the stamp did not become wrong, it ceased to exist.
+
+  That is the state `Options.Identity` exists to make unreachable: an unstamped
+  copy and a stale one look identical, so the owner can reclaim neither. The
+  option's own doc already promised the opposite — "empty means the caller does
+  not use this, and never conflicts with anything" — which held on the normal
+  republish path, where the record is rebuilt from what is stored, and not on
+  this one. An absent identity is carried over now. A caller that means to
+  re-stamp still does by supplying the bytes, and adopting remains the
+  documented way to resolve an identity conflict.
+
 ### Changed
 
 - `readMessage` and `readMessageMetadata` shared a verbatim copy of the frame
