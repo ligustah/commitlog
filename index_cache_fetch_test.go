@@ -3,6 +3,7 @@ package commitlog
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -152,4 +153,58 @@ func TestAStoreReturningNothingIsRefusedRatherThanRetriedForever(t *testing.T) {
 	}
 	require.Equal(t, int64(1), store.calls.Load(),
 		"one (0, nil) is enough to know; asking again cannot change it")
+}
+
+// emptyObjectStore reports every object as zero bytes, whatever it holds. The
+// store agreeing with itself and being wrong, rather than disagreeing with
+// itself as shortObjectStore does — which is why the short-read check cannot see
+// it.
+type emptyObjectStore struct {
+	*FileSegmentStore
+}
+
+func (s emptyObjectStore) Size(string) (int64, error) { return 0, nil }
+
+// AN EMPTY INDEX OBJECT IS REFUSED, NOT PRE-ALLOCATED INTO ONE.
+//
+// The state between the two checks that already stand in this download: the
+// (0, nil) contract breach inside the loop, and the ended-early check after it.
+// Zero passes both — the loop never runs, and the walk reached the reported size
+// exactly — because the short-read check compares against the same number that
+// is wrong.
+//
+// What got through was not a missing index but a fabricated one. newIndex
+// pre-allocates when it finds an EMPTY file, which is the arm a genuinely fresh
+// index takes, so an empty download is indistinguishable from a new index and
+// gets 10MB of zeroes mapped and read as this segment's table. Seeks then ANSWER
+// rather than fail. Asserted below on the two things a caller can observe: the
+// error, and a cache that grew no file for it.
+func TestAnEmptyRemoteIndexObjectIsRefused(t *testing.T) {
+	fs, err := NewFileSegmentStore(t.TempDir())
+	require.NoError(t, err)
+	writeIndexObject(t, fs, "k.index", 100, []*entry{
+		{Offset: 100, Timestamp: 11, Position: 0, Size: 8},
+	})
+
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	c, err := NewRemoteIndexCache(cacheDir, 1<<20)
+	require.NoError(t, err)
+	defer c.Close()
+
+	_, _, err = c.acquire(emptyObjectStore{FileSegmentStore: fs}, "k.index", 100)
+	require.Error(t, err, "an empty object was mapped as this segment's index")
+	require.Contains(t, err.Error(), "cannot be the index of an offloaded segment")
+
+	// The second half, and the one the error alone does not cover: the refusal
+	// has to happen BEFORE the file exists, because a cached entry recorded as
+	// zero bytes never counts toward the budget, is never evicted for size, and
+	// leaves the cache reading as empty while the disk fills.
+	entries, err := os.ReadDir(cacheDir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the refusal left a file behind, which is the untracked 10MB")
+
+	c.mu.Lock()
+	total := c.total
+	c.mu.Unlock()
+	require.Zero(t, total)
 }

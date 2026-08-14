@@ -48,6 +48,25 @@ library from that fork onward.
 
 ### Fixed
 
+- **An index object a store reports as zero bytes is refused rather than
+  fabricated.** `RemoteIndexCache.fetch` drove its download from
+  `store.Size(key)` and never checked the value. A size of zero is the one
+  length between the two checks already standing there — the `(0, nil)` contract
+  breach inside the loop, and the ended-early check after it — because that
+  second check compares the download against *the same number that is wrong*, and
+  `0 == 0` passes.
+
+  What got through was not a missing index but a **fabricated** one: `newIndex`
+  pre-allocates when it finds an empty file, which is the arm a genuinely *fresh*
+  index takes, so the empty download was indistinguishable from a new index and
+  got 10 MB of zeroes mapped and read as that segment's table. Seeks then
+  *answered* instead of failing. The entry was also recorded as `bytes: 0`, so it
+  never counted toward the cache's total, could never be evicted for size, and
+  left the budget reading as empty while the disk filled.
+
+  `readStoreDescriptor` already refuses `size <= 0` one reader over; this now
+  matches it.
+
 - **Every byte budget that bounds a RESOURCE now counts the bytes that are
   there.** `Options.MaxLogBytes`, `Tier.MaxBytes` and `LocalBytes()` all summed
   `(*segment).Position` — the segment's *logical* extent, which on a

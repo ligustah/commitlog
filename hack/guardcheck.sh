@@ -1249,6 +1249,21 @@ run_guard "LocalBytes counts the bytes on disk" commitlog.go \
   '		n += seg.Position()' \
   '^TestACompressedLogsLocalBytesAreTheBytesOnDisk$'
 
+# An index object the store reports as EMPTY is refused. Neutralized to `< 0`,
+# which is the exact hole this closed: negative was already unreachable (the
+# ended-early check below catches it), so the mutation restores the state where
+# zero is the one length nothing here can see. The short-read check cannot,
+# because it compares the download against the same number that is wrong.
+#
+# Without it the download succeeds with no bytes, newIndex takes its
+# pre-allocate-if-empty arm — the one a genuinely FRESH index takes — and 10MB of
+# zeroes is mapped and read as this segment's table, while the entry is recorded
+# as 0 bytes and so never counts toward the cache budget.
+run_guard "an empty remote index object is refused" index_cache.go \
+  '	if size <= 0 {' \
+  '	if size < 0 {' \
+  '^TestAnEmptyRemoteIndexObjectIsRefused$'
+
 # InspectIdentity's three answers, guarded separately because the caller acts
 # oppositely on each and every collapse between them is silent. A reclaimer
 # deletes on "stale", refuses on "unstamped", skips on "no log" and leaves alone

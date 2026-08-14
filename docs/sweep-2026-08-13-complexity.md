@@ -1832,3 +1832,43 @@ deletes either way; only a fixture standing between them has an opinion.
 Three guards, one per call site, because each is separately removable and each
 fails differently — and a fourth test (`...StillDeletes`) so that "never delete
 anything" cannot satisfy the first three.
+
+### #287: the length between two length checks
+
+Found by following the same thread one more step — after `Position` vs
+`physPosition`, the question "what else is a number here trusted as a measure of
+something it does not measure?" leads straight to `RemoteIndexCache.fetch`, where
+`store.Size(key)` steers a download and is never checked.
+
+Two checks already stand in that loop, both added deliberately and both with
+guards:
+
+- `(0, nil)` mid-download is named as the `io.ReaderAt` contract breach it is,
+  rather than retried forever.
+- an object that ends before the size the store just reported is refused, because
+  "a partial download is not a smaller index, it is bytes newIndex would map and
+  read as a whole one."
+
+Zero is the length neither can see. The loop never runs, so there is no read to
+breach a contract; and the second check asks `off != size`, which compares the
+download against **the same number that is wrong**. Two checks, adjacent, with
+one state uncovered between them — the shape recorded earlier this sweep for the
+four recovery mechanisms, arriving again in a much smaller function.
+
+The consequence is the default-arm lens, exactly:
+
+> `newIndex` pre-allocates when it finds an EMPTY file — the arm a genuinely
+> FRESH index takes. An empty download is not distinguishable from a new index,
+> so it gets the same treatment.
+
+Ten megabytes of zeroes, mapped, and read as that segment's table. A seek into it
+does not fail; it *answers*. And `cachedIndex.bytes` is set from the same zero, so
+the entry is invisible to the cache's byte budget: `total` never grows for it, it
+can never be evicted for size, and the disk fills under a budget that reads as
+empty.
+
+The fix is four lines, and the argument for where it goes is the whole finding:
+it belongs **before** `os.Create`, not in the loop, because the second half of the
+damage is a file existing at all. `readStoreDescriptor` has had `if size <= 0`
+since it was written, for the identical reason, one reader over — so this is also
+another instance of a rule stated in one place and not transcribed to its sibling.

@@ -191,6 +191,29 @@ func (c *RemoteIndexCache) fetch(store SegmentStore, objectKey string, baseOffse
 	if err != nil {
 		return nil, errors.Wrap(err, "remote index size")
 	}
+	// Refused here rather than left to the short-read check below, which cannot
+	// see it: that check asks whether the download reached the size the store
+	// reported, and for a size of zero it reached it exactly. Zero is the one
+	// length between the two checks that already stand here — the (0, nil)
+	// contract breach inside the loop, and the ended-early check after it.
+	//
+	// What got through was worse than a failed seek. newIndex pre-allocates when
+	// it finds an EMPTY file, which is the arm a genuinely fresh index takes, so
+	// an empty download is indistinguishable from a new index and gets the same
+	// treatment: a 10MB zero-filled table, mapped and read as this segment's. Every
+	// seek then resolves against it and answers rather than failing. And the entry
+	// is recorded as `bytes: size` — zero — so it never counts toward the cache's
+	// total, can never be evicted for size, and the budget reads as empty while the
+	// disk fills.
+	//
+	// readStoreDescriptor already refuses `size <= 0` for the same reason, one
+	// reader over. Negative is folded in: the loop cannot run for it either.
+	if size <= 0 {
+		return nil, errors.Errorf(
+			"commitlog: store reports remote index %s as %d bytes; an index object "+
+				"holding no entries cannot be the index of an offloaded segment",
+			objectKey, size)
+	}
 	path := c.cacheFileName(objectKey)
 	f, err := os.Create(path)
 	if err != nil {
