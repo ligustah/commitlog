@@ -429,11 +429,18 @@ type LogIdentity struct {
 // log elsewhere may be rewriting its descriptor, and the answer is whichever
 // version was published when this read ran.
 //
-// LOCAL ONLY, by definition rather than by omission. A store-backed log keeps
-// its descriptor in the store (see descriptorKey), and a path is not enough to
-// reach one — so this answers for THIS directory's copy, which is the question a
-// reclaimer judging this broker's disk is asking. A tiered log whose local
-// directory holds no descriptor is ErrNoLog here, not an identity-less log.
+// LOCAL ONLY, by definition rather than by omission — and that is now a
+// statement about which COPY is read, not about which logs can answer. A
+// store-backed log writes its descriptor to its own directory as well as to its
+// tiers, precisely so a broker's copy of a tiered partition can say what it is;
+// this reads that local file and never the store. Which is the question a
+// reclaimer judging this broker's disk is asking, and the reason ErrNoLog can be
+// acted on: a tiered directory used to answer ErrNoLog because its descriptor
+// was only ever in the store, and ErrNoLog is the answer that PERMITS deletion.
+//
+// The tier remains the authority where the two disagree (see publishDescriptor).
+// This call cannot consult it, so a caller that needs the authoritative answer
+// rather than this disk's answer has to open the log.
 func InspectIdentity(path string) (LogIdentity, error) {
 	d, err := readDescriptor(path)
 	if os.IsNotExist(err) {
