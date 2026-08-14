@@ -5,6 +5,66 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- Four error messages named no subject. `"stat file failed"` appeared three
+  times — twice inside `newIndex`, on the stat before pre-allocation and the
+  stat after it, so a failure told an operator nothing about which one broke.
+  `"open file failed"` was the index file in one place and the segment log in
+  the other; `"path is empty"` was `Options.Path` in one and the index path in
+  the other; and `reopenLocked` wrapped all three of its steps — open backing,
+  positions, index — in one sentence. Each names its subject now. The index
+  pre-allocation `Truncate` also returned a bare OS error with no context at
+  all, which is the same defect with the message missing rather than
+  duplicated.
+
+  Found by scanning every error text in the non-test tree: 207 distinct, seven
+  duplicated. The other three duplicates are correct — two platform-split pairs,
+  which are one error with two implementations, and `"commitlog: negative read
+  offset %d"`, which is one rule refused identically by both readers.
+
+### Testing
+
+- **Stripping's floor was only ever tested from below.**
+  `TestCleanDigestMergeEquivalence` asserted that records below `StripBelow`
+  lose their headers and never that records at or above it KEEP them, so a
+  strip that ignored the floor and took the headers off every record it rewrote
+  passed. The evidence had been sitting in the fixture the whole time: a
+  `hasPid` field, recorded per record since the test was written, that nothing
+  read. Falsified before landing — dropping `offset < spec.StripBelow` from both
+  data arms of `classify` turns it red — and guarded. The count is floored
+  across all five seeds rather than per seed, because a seed whose
+  header-carrying records all land under the floor makes the assertion vacuous
+  and failing *that* seed would say nothing about stripping.
+
+- **`TestChaosAReadFromThePublishedFloorStartsAtIt` assumed two of its
+  dangers.** It already retires on danger rather than duration, but "a
+  truncation ran" is not "a truncation REWROTE the boundary segment" — a cut
+  landing on a segment's own base drops whole segments and never builds the
+  replacement a reader can be holding the original of, which is the entire
+  mechanism of the bug it exists for. And "a read was taken" is not "a read
+  overlapped a trim in flight". Both are counted and floored now. Establishing
+  the overlap needs a trim SEQUENCE number rather than a boolean: the truncator
+  hammers without a sleep, so `trimming` is true at both ends of almost any
+  read, including one that straddled two different trims.
+
+  Floors chosen from measurement (rewrites 19–32, overlaps 11706–11789 of
+  ~12030 checked over six runs) and set well under the low end, at 10 and 2000,
+  so a loaded runner cannot fail on its own precondition. The floor is on
+  rewrites rather than on truncation calls deliberately: the call count swung
+  from 33 to 61,497 across those runs, since a repeat cut at an unchanged floor
+  is a no-op that returns nil. Both falsified in
+  isolation: cutting at the boundary segment's own base drives rewrites to 0,
+  and not announcing the trim window drives overlaps to 0.
+
+- `keyDigest.keyedLen` was parsed, stored and read by nothing. `newDigestIter`
+  seeks to `keyedOff` and reads exactly `nKeys` entries; where the section ends
+  is not needed and is recorded nowhere else either. The struct doc listed it as
+  part of the location record, so the doc described a mechanism that did not
+  exist. Removed.
+
 ## v0.87.0 — 2026-08-14
 
 ### Performance

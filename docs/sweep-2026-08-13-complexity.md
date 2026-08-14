@@ -1123,3 +1123,62 @@ Neither scan is worth keeping as a script. The write-only check has a real false
 positive rate (3 of 5 here) that a human resolves in a minute and a script would
 have to encode a Go parser to avoid, and the error-text check has three
 legitimate duplicates it cannot distinguish from the bad ones.
+
+## Answering the standing question: why does finding things need a soak run?
+
+The standing complaint is that issues surface under high-intensity soak tests
+rather than under something that pressures the flow directly. Most of this
+sweep is the answer by example — the strip floor, the COW rewrite counter and
+the block-tail open cost were all found by construction, not by running
+anything for a long time. But it is worth stating what makes a chaos test
+carry its weight, because this repo has two and they were not equal.
+
+A chaos test earns its place when it **retires on danger, not on duration**: it
+runs until the dangerous thing has demonstrably happened enough times, and
+fails if it never did. `TestChaosAFollowerSurvivesMaintenance` was rebuilt that
+way in #264/#265 and counts five — passes run, retention collected, reads
+taken, boundaries crossed mid-scan, retention overtaking the follower — plus a
+writer check that stays in the list for its failure message alone.
+`TestChaosAReadFromThePublishedFloorStartsAtIt` had four, and two of its
+dangers were *assumed*:
+
+- **"a truncation ran" is not "a truncation rewrote the boundary segment."** A
+  cut landing on a segment's own base drops whole segments and never builds the
+  replacement a reader can be holding the original of — which is the entire
+  mechanism of the bug this test exists for. Counted on segment IDENTITY, for
+  the reason #272 established: an untouched segment already starts at its own
+  base, so checking the resulting offset scores a whole-segment delete as a
+  rewrite.
+- **"a read was taken" is not "a read overlapped a trim in flight."** Two
+  booleans cannot establish this — the truncator hammers without a sleep, so
+  `trimming` is true at both ends of almost any read, including reads that
+  straddled two different trims. A trim SEQUENCE number can: same seq at both
+  ends, with `trimming` true at both, means the read ran entirely inside one
+  call.
+
+Measured over six runs before choosing floors: rewrites 19–32, overlapping
+reads 11706–11789 of ~12030 checked. The rewrite spread is load-dependent —
+the low end came from a run sharing the box, and the count of truncations
+swung from 33 to 61,497 across the same runs, which is why the floor is on
+rewrites rather than on calls. Floors set at 10 and 2000 — under the low end
+so a loaded runner does not fail on its own precondition, far enough above
+zero that the danger cannot quietly evaporate.
+
+### The falsification that failed, and why it was right to
+
+The first attempt to falsify the overlap floor gave the truncator a 50 ms
+sleep, expecting overlap to collapse. **The test still passed**, and that is the
+correct outcome rather than a hole. The floor claims *at least 2000 reads ran
+inside a trim*; with the sleep that claim is still true, and 2000 overlapping
+reads are still 2000 chances at the race. An absolute count is the honest
+measure here — a ratio would have failed that run while the test was still
+just as dangerous.
+
+The first attempt at the rewrite floor was worse: it made the truncator cut at
+`OldestOffset()`, an idempotent no-op. That does stop rewrites, but it also
+stops deletion, so `"nothing was ever deleted"` fires first and the run says
+nothing about the floor under test. **A falsification has to isolate the thing
+it falsifies** — earlier conditions in an ordered check will mask it otherwise.
+The isolations that worked: cut at the boundary segment's own base (deletion
+proceeds, rewrites go to 0 → fails on the rewrite floor at 120s), and stop
+announcing the trim window (everything proceeds, overlaps go to 0).
