@@ -2,6 +2,7 @@ package commitlog
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/ligustah/commitlog/compress"
@@ -149,6 +150,97 @@ func TestATieredSegmentCountsWithoutFetchingItsBlockTable(t *testing.T) {
 		"asking a cold tiered segment for its record count fetched its block "+
 			"table: a retention pass over a tier nothing has read would download "+
 			"every table in it")
+}
+
+// THE SAME COUNT, CARRIED BY THE MANIFEST INTO A DIRECTORY THAT NEVER HELD IT.
+//
+// The test above SETS s.records, because a gappy segment cannot be reached
+// through a store fixture. It can be reached through an offload: compact first,
+// then hand the compacted segments to a tier, and the count that travels is the
+// one compaction left behind. Nothing here is poked — it leaves as
+// offloadMeta.Records, is published in the manifest entry, and is read back by a
+// process holding the STORE and not the directory the records were written in,
+// which is the state a tier retention pass runs in.
+//
+// This is the assertion the bug would have failed at the layer it shipped in:
+// the reopened log reports what it holds, rather than the distance between the
+// offsets it kept.
+func TestATieredCompactedLogReportsItsRecordCountFromTheManifest(t *testing.T) {
+	dir := tempDir(t)
+	store, err := NewFileSegmentStore(filepath.Join(dir, "store"))
+	require.NoError(t, err)
+
+	// The cache is what selects option 2 — index offloaded ALONGSIDE the log —
+	// and option 2 is the state this is about. With the index left local
+	// (option 1), openOffloadedSegment has to run setupIndex against a local
+	// file that a crash could have torn, and that fetches the block table on the
+	// spot; the count would then come from the resident blocks and the manifest
+	// field would never be read. Option 2 reads nothing at all on open, which is
+	// both the cheaper path and the only one where the manifest is the sole
+	// authority. See openOffloadedSegment.
+	cache, err := NewRemoteIndexCache(filepath.Join(dir, "idxcache"), 1<<30)
+	require.NoError(t, err)
+	t.Cleanup(func() { cache.Close() })
+
+	opts := compactedLogOptions(t, compress.Snappy)
+	opts.Path = dir
+	opts.Tiers = oneTier(store)
+	opts.RemoteIndexCache = cache
+
+	l, err := New(opts)
+	require.NoError(t, err)
+	fillAndCompact(t, l.(*commitLog))
+	n, err := l.OffloadBefore(l.NewestOffset())
+	require.NoError(t, err)
+	require.Positive(t, n, "the fixture needs offloaded segments to have a manifest to read")
+	require.NoError(t, l.Close())
+
+	// A different directory over the same store: no index, no block table, no
+	// local segment. Whatever it says about its size, it says from the manifest.
+	adopting := opts
+	adopting.Path = tempDir(t)
+	l2, err := New(adopting)
+	require.NoError(t, err)
+	t.Cleanup(func() { l2.Close() })
+
+	segments := l2.(*commitLog).segmentsSnapshot()
+	require.NotEmpty(t, segments, "the adopting log picked up no segments")
+
+	var reported, span int64
+	var fetched []int
+	for i, seg := range segments {
+		reported += seg.MessageCount()
+		seg.RLock()
+		if seg.lastOffset >= 0 {
+			span += seg.lastOffset - seg.firstOffset + 1
+		}
+		if !seg.blocksPending {
+			fetched = append(fetched, i)
+		}
+		seg.RUnlock()
+	}
+
+	present := int64(len(readAll(t, l2)))
+	require.Greater(t, span, present,
+		"the offloaded segments have no offset gaps, so this fixture cannot tell "+
+			"a manifest count from an offset span")
+	require.Equal(t, present, reported,
+		"a log reopened over its tier reported %d records and holds %d: the "+
+			"manifest's count was not what answered", reported, present)
+	// Exactly one table is fetched, the NEWEST segment's — the log establishes
+	// its own tail there, and that is the one segment an adopting process cannot
+	// treat as merely historical. The other 47 stay unfetched, which is the
+	// property that makes the manifest count worth carrying: they are counted
+	// without being downloaded.
+	//
+	// Asserted as the exact set rather than as "not all of them". A regression
+	// that fetched a second table would satisfy any weaker form of this while
+	// putting the per-segment round trip back.
+	require.Equal(t, []int{len(segments) - 1}, fetched,
+		"the tables fetched during open were %v, not just the newest segment's: "+
+			"the counts above may have come from resident blocks rather than "+
+			"from the manifest, and a retention pass over a tier nothing has "+
+			"read would download every table it touched", fetched)
 }
 
 // A BLOCK TABLE THAT DISAGREES WITH THE MANIFEST ABOUT THE COUNT IS REFUSED.

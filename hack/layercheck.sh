@@ -174,8 +174,25 @@ iface=$(awk '/^type CommitLog interface \{/,/^\}$/' interface.go)
 # The regex keeps the anchoring the grep had: start of a line, indentation, the
 # method name, an open paren. $nl is a literal newline; $m is the method name,
 # matched by `[A-Z][A-Za-z0-9]*` above, so it holds no regex metacharacters.
+#
+# The receiver is matched as an IDENTIFIER, not as the literal `l`. Every one of
+# the 95 methods spells it `l` today, so hard-coding it worked — and renaming the
+# receiver would have emptied the selection, skipped the loop body, and printed
+# the same "with no exceptions" green as a fully checked run. That is the failure
+# this repo has now had in five separate tools, so the count is asserted and
+# printed rather than assumed: an empty selection is a HARNESS ERROR here, not a
+# pass. (Nothing else in this file needs the guard — rules 1-3 iterate lists that
+# are written down in the script, and an entry naming a file that does not exist
+# is already an error.)
 nl=$'\n'
-for m in $(grep -ohE '^func \(l \*commitLog\) [A-Z][A-Za-z0-9]*' *.go | sed 's/.*) //' | sort -u); do
+methods=$(grep -ohE '^func \([a-z][A-Za-z0-9]* \*commitLog\) [A-Z][A-Za-z0-9]*' *.go | sed 's/.*) //' | sort -u)
+if [ -z "$methods" ]; then
+	echo "layercheck: HARNESS ERROR — found no exported methods on *commitLog." >&2
+	echo "  Rule 4 checked nothing. The receiver pattern in $0 no longer matches" >&2
+	echo "  the code, so fix the pattern rather than trusting this run." >&2
+	exit 1
+fi
+for m in $methods; do
 	case " $EXPORTED_EXCEPT " in *" $m "*) continue ;; esac
 	if ! [[ $iface =~ (^|$nl)[[:space:]]+$m\( ]]; then
 		echo "layercheck: commitLog.$m is exported but not on the CommitLog interface."
@@ -194,8 +211,12 @@ if [ "$fail" -ne 0 ]; then
 fi
 
 echo "layercheck: OK — $(echo $LOWER | wc -w) files below the log, none of them name it;"
+# The method count is what rule 4 actually looked at, not the length of a list
+# written in this file. A green line quoting only the hand-written LOWER list
+# says nothing about whether the other rule ran at all.
+n_methods=$(echo $methods | wc -w | tr -d ' ')
 if [ -n "$EXPORTED_EXCEPT" ]; then
-	echo "  every exported commitLog method is on the interface but $EXPORTED_EXCEPT"
+	echo "  all $n_methods exported commitLog methods are on the interface but $EXPORTED_EXCEPT"
 else
-	echo "  every exported commitLog method is on the interface, with no exceptions"
+	echo "  all $n_methods exported commitLog methods are on the interface, no exceptions"
 fi

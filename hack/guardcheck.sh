@@ -2105,6 +2105,16 @@ run_guard "an offloaded segment publishes its record count" segment.go   $'		Phy
 		BlockMode:      s.blockMode,
 		Records:        0,'   '^TestAnHonestlySizedBlockTableStillLoads$'
 
+# The THIRD arm of the same rule, and the one the other guard cannot reach: a
+# segment with no index and no resident table answers from the manifest entry.
+# That is the state a cold tier is in, so this is the arm tier retention runs
+# through. Neutralized to the span for that arm alone, which leaves the two
+# resident authorities intact -- a guard on the whole function would have been
+# satisfied by either.
+run_guard "a cold tiered segment counts from its manifest entry" segment.go   $'	return s.records
+}'   $'	return s.lastOffset - s.firstOffset + 1
+}'   '^TestATieredCompactedLogReportsItsRecordCountFromTheManifest$'
+
 # A tiered log stamps its OWN DIRECTORY as well as its tiers. Neutralized to the
 # either/or that shipped: local only when there is no store to publish to.
 #

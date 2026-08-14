@@ -2123,3 +2123,83 @@ disagree would make a segment's count change the first time anybody read it.
 already covers — so `compress.Codec.Valid()`, whose only production caller is
 `parseBlockHeader`, had no test reaching it at all. It pokes `hdr[2]` now, and
 the version case it was duplicating is spelled out separately.
+
+### The bump's own aftershock: a fixture that ages into a different test
+
+The format change made the whole suite go red in exactly one place, and the
+place is worth recording because two more sites had the same defect and stayed
+green.
+
+`TestBlocksAndRecordsAgreeOnATruncatedPayload` laid its block header out as a
+byte literal — magic, version, codec, then two hand-written `uint32`s — to
+express "a header that is well formed in every way except the payload length it
+claims". At 15 bytes the literal is a 14-byte file, so the parse stopped at the
+length check, one step before the overrun check the test exists to cover. It
+only went red at all because the assertion names the claim
+(`"claims 1024 payload bytes"`) instead of merely requiring an error.
+
+`TestClassifySegmentDoesNotReadTheBody` has the identical fixture and did NOT go
+red: its second half only requires that `Blocks()` fail, and a short header fails
+too. Its stated proof — "the fixture's body must be unparseable" — had quietly
+become a proof about the header. Both now build the header with
+`encodeBlockHeader` and corrupt only the field under test, so the next layout
+change carries them along instead of degrading them.
+
+The two `version 9` fixtures (`TestAnUnknownBlockVersionIsReportedNotRefused`,
+`TestInspectSegmentNamesBothBlockFormatVersions`) are fine and were left alone:
+they pad with 64 bytes, so the header is long enough for the version check to be
+the one that fires. That is luck rather than design, but they assert on the
+version byte specifically, which is the field they hand-write.
+
+**The lens:** a fixture asserting "valid except for X" is coupled to the whole
+layout, not to X. Build it with the writer. And assert on the error's CONTENT —
+that is the difference between the one that went red and the one that did not.
+
+### Rule 4 of layercheck could be switched off by renaming a receiver
+
+Same family, one layer up. `hack/layercheck.sh` selected the methods to check
+with `grep -ohE '^func \(l \*commitLog\) [A-Z]...'`, hard-coding the receiver
+name. All 95 methods spell it `l` today; renaming it would have emptied the
+selection, skipped the loop body, and printed
+`every exported commitLog method is on the interface, with no exceptions` — the
+same green as a fully checked run. The other four checkers all treat an empty
+selection as a HARNESS ERROR and print what they actually examined; this rule
+printed the length of the hand-written `LOWER` list instead, which is a different
+rule's input.
+
+Now: the receiver is matched as an identifier, an empty selection exits 1, and
+the green line quotes the method count that was checked. Falsified by pointing
+the pattern at a type that does not exist — it exits 1 with the harness error.
+
+**Recorded as a negative:** `docdrift.sh` has the weaker form (it counts files,
+not doc comments examined) and was left alone. Its inner selection is `/^func /`
+over gofmt'd Go, which cannot silently become empty while the package has
+functions; the file count it prints is the selection that can.
+
+### The manifest count, asserted where it is actually read
+
+`TestATieredSegmentCountsWithoutFetchingItsBlockTable` sets `seg.records` by
+hand, because a gappy segment cannot be built through a store fixture. It can be
+built through an offload, and
+`TestATieredCompactedLogReportsItsRecordCountFromTheManifest` now does: compact a
+snappy log, offload it index-and-all, and reopen it over the same store from a
+directory that never held it. Nothing is poked — the count leaves as
+`offloadMeta.Records` and comes back through `openOffloadedSegment`.
+
+Two things had to be got right for it to mean anything, and the first one failed
+first:
+
+- **`RemoteIndexCache` is what selects the cold path.** Without it the index
+  stays local (option 1), and `openOffloadedSegment` runs `setupIndexKnownEnd`,
+  which fetches the block table on the spot — so the count would have come from
+  resident blocks and the manifest field would never have been read. The
+  assertion that every table stayed pending is what caught that.
+- **Exactly one table is fetched**, the newest segment's, where the log
+  establishes its tail. The test asserts that exact set rather than "not all of
+  them", because a regression that fetched a second table would satisfy any
+  weaker form while putting the per-segment round trip back.
+
+Mutation-verified: reinstating the span for the manifest arm alone makes it
+report **95 records for 59 present**. The existing guard could not have caught
+that arm — it neutralizes the resident-table branch, which this path never
+reaches — so the third arm got a guard of its own.

@@ -69,13 +69,11 @@ func TestClassifySegmentDoesNotReadTheBody(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "00000000000000000000.log")
 
-	// magic, version, codec, uncompressedLen=1024, compressedLen=1024 — then a
-	// body of three bytes.
-	hdr := []byte{
-		blockMagic, BlockFormatVersion, byte(compress.Zstd),
-		0, 0, 0x04, 0x00,
-		0, 0, 0x04, 0x00,
-	}
+	// A header claiming 1024 payload bytes, then a body of three. Built by the
+	// writer for the reason the sibling fixture gives: hand-laid bytes stop being
+	// a WELL-FORMED header the moment the layout changes, and this one's whole
+	// job is to be sound everywhere except the length it claims.
+	hdr := encodeBlockHeader(compress.Zstd, 1024, 1024, 4)
 	require.NoError(t, os.WriteFile(path, append(hdr, 1, 2, 3), 0666))
 
 	got, err := ClassifySegment(path)
