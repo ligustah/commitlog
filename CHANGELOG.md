@@ -18,6 +18,17 @@ library from that fork onward.
   `segmentSwapped` also stated its predicate twice, `Cause(err) == X` OR
   `errors.Is(err, X)`, where the second subsumes the first. No behaviour change.
 
+- `uncommittedReader.Read` advanced to the next segment in two places, chosen by
+  a `waiting` flag: one for a roll it walked into, one for a roll that woke it
+  out of `waitForData`. They are one rule — drained, so take the next segment if
+  there is one and otherwise park — and it is now written once, without the flag
+  or the loop label. The segment snapshot is also re-taken at each boundary
+  rather than once at entry: the arm that searched the entry-time snapshot could
+  hold it for as long as the writer stayed idle, which is precisely how a parked
+  reader would fail to see the roll it is waiting for. Two new tests drive a roll
+  with the reader parked and with it not, and each was falsified against the old
+  arms separately before the merge.
+
 - `uncommittedReader` and `committedReader` now embed a `segmentCursor` — the
   segment they are positioned in, the byte offset into it, the buffered reader
   over it, and the mutex guarding all three — so `contextReader.segmentBounds`

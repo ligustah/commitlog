@@ -380,18 +380,13 @@ func (r *uncommittedReader) Read(ctx context.Context, p []byte) (n int, err erro
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	var (
-		segments = r.cl.segmentsSnapshot()
-		readSize int
-		waiting  bool
-	)
+	var readSize int
 
 	// Initialise buffered reader on first use.
 	if r.br.seg == nil {
 		r.br.reset(r.seg, r.pos)
 	}
 
-LOOP:
 	for {
 		readSize, err = r.br.Read(p[n:])
 		n += readSize
@@ -403,49 +398,43 @@ LOOP:
 			break
 		}
 		if readSize != 0 && err == nil {
-			waiting = false
 			continue
 		}
 
-		// We hit the end of the segment.
-		if err == io.EOF && !waiting {
-			// Check if there are more segments.
-			nextSeg := findSegmentAfter(segments, r.seg)
-			if nextSeg != nil {
-				r.seg = nextSeg
-				r.br.reset(nextSeg, 0)
-				continue
-			}
-			// Otherwise, wait for segment to be written to (or split).
-			waiting = true
-			if werr := r.waitForData(ctx, r.seg); werr != nil {
-				err = werr
-				break
-			}
-			// The segment may have more data now. Refill buffer.
-			r.br.reset(r.seg, r.pos)
+		// This segment has no more bytes for us. Exactly two things can be true:
+		// the log rolled and the rest is in the next segment, or nothing further
+		// has been written yet. Ask, in that order, and park only when the answer
+		// is neither.
+		//
+		// This used to be two arms with a `waiting` flag deciding between them —
+		// take the next segment if there is one, else park; and, on a second EOF
+		// after parking, take the next segment or park again until there is one.
+		// Two spellings of one rule, with the flag existing only to say which had
+		// already been tried. They had drifted apart in the way duplicated advances
+		// always do: this one set r.pos explicitly, that one left it to the next
+		// iteration's `r.pos = r.br.pos`. Both were right, which is why the pair
+		// survived so long, and neither had a test until the roll pair in
+		// reader_roll_test.go.
+		//
+		// The snapshot is re-taken here rather than once at the top. A reader
+		// parked at the tail can hold its snapshot for as long as the writer is
+		// idle, and a roll is precisely the event it must not miss.
+		if nextSeg := findSegmentAfter(r.cl.segmentsSnapshot(), r.seg); nextSeg != nil {
+			r.seg = nextSeg
+			r.pos = 0
+			r.br.reset(nextSeg, 0)
 			continue
 		}
-
-		// We hit an EOF after waiting for data which means a new segment was
-		// rolled, so move to the next segment.
-		segments = r.cl.segmentsSnapshot()
-		nextSeg := findSegmentAfter(segments, r.seg)
-
-		// If there are not enough segments to read, wait for new segment to be
-		// appended or the context to be canceled.
-		for nextSeg == nil {
-			if werr := r.waitForData(ctx, r.seg); werr != nil {
-				err = werr
-				break LOOP
-			}
-			segments = r.cl.segmentsSnapshot()
-			nextSeg = findSegmentAfter(segments, r.seg)
+		if werr := r.waitForData(ctx, r.seg); werr != nil {
+			err = werr
+			break
 		}
-		r.seg = nextSeg
-		r.br.reset(nextSeg, 0)
-		r.pos = 0
-		waiting = false
+		// Woken, and deliberately without deciding why. Bytes may have landed in
+		// this segment, or a roll may have sealed it — refilling and reading again
+		// answers that, because a sealed segment reads EOF a second time and takes
+		// the advance above on the next pass. Deciding here is what needed the
+		// flag.
+		r.br.reset(r.seg, r.pos)
 	}
 
 	return n, err

@@ -565,14 +565,60 @@ return — which `io.ReaderAt` forbids — was retried at the same offset foreve
 
 ## Deferred, with reasons
 
-- **`uncommittedReader.Read`.** Two arms advance to the next segment with
+- ~~**`uncommittedReader.Read`.** Two arms advance to the next segment with
   near-identical code, a `waiting` flag threads through both, and one arm sets
   `r.pos = 0` where the other relies on the next iteration to resync it. It is
   genuinely harder to read than anything else in the package. Not taken: it is
   live-tailing code with recent fixes under it, the duplication is four lines,
   and a restructure buys legibility at the cost of a class of bug this package
   has already paid for once. Worth doing behind a test that drives a roll
-  during a parked read, not before one.
+  during a parked read, not before one.~~ **Taken, 2026-08-14, in that order.**
+
+  The test came first because the deferral said it had to. Two of them, in
+  `reader_roll_test.go`: a reader parked at the tail when an age-driven
+  `cleanerTick` seals its segment, and a reader that finds the roll already
+  done. Two rather than one because *which arm a run takes was decided by a
+  race* — a single test covers whichever state it happened to reach and reports
+  the other as covered. The parked case waits until a waiter is actually
+  registered on the segment before rolling, so the pair cannot silently collapse
+  into the same test run twice.
+
+  Both were falsified against the pre-restructure code, one arm at a time:
+  carrying `r.pos` into the new segment in the woken arm turned the parked test
+  red and left the other green, and the same edit in the walked-into arm did the
+  reverse. That is the evidence that the two arms were separately reachable, and
+  it is what made the merge safe to attempt.
+
+  The restructure then deleted the `waiting` flag, the `LOOP:` label and one of
+  the two advances. What remains is the rule both arms were spelling: *drained —
+  so take the next segment if there is one, otherwise park; on waking, refill and
+  read again rather than deciding here why you woke.* The old second arm existed
+  only because the flag had committed it to answering that question at the point
+  of waking; a sealed segment simply reads EOF a second time and takes the one
+  advance on the next pass.
+
+  One thing changed on purpose rather than incidentally: the segment snapshot is
+  re-taken at each boundary instead of once at function entry. The old first arm
+  searched the entry-time snapshot, which a reader parked at the tail can hold
+  for as long as the writer is idle — and a roll is exactly the event it must
+  not miss. The old second arm already re-snapshotted; now there is one rule
+  instead of two, and it is the safe one.
+
+  The two guards collapsed into one with it, and the remaining guard names
+  *both* tests — because the code is one site now, and a guard naming one test
+  would leave the other asserting nothing about that line.
+
+  **One loose end, recorded rather than buried.** The first `-race` run after the
+  merge came back `FAIL`, and it was piped through `tail -6` — which drops the
+  `--- FAIL` line and keeps the noise, exactly the failure mode already written
+  down in the local-suite note. The failing test's name is simply gone. Ten
+  subsequent runs of the same selection were clean: four standalone, four in one
+  `-count=4`, and two deliberately run concurrently with each other to test the
+  CPU-starvation theory (which did not reproduce it). `tempDir` is
+  `os.MkdirTemp`, so concurrent runs cannot collide on a fixture path either. It
+  is committed on that evidence, with CI's fourteen jobs across three platforms
+  as the next check — but if this area goes red once more, this paragraph is the
+  prior, and the run that produces it must not be piped through anything.
 - ~~**A shared embedded base for `uncommittedReader`/`committedReader`,** so
   `segmentBounds` exists once.~~ **Taken, 2026-08-14.** The base is
   `segmentCursor` — `mu`, `seg`, `pos`, `br` — and it stops there on purpose.

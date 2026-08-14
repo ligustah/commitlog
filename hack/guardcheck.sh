@@ -1514,26 +1514,22 @@ run_guard "a committed read reports a watermark it cannot find" reader.go   '	hw
 	}'   '^TestACommittedReadReportsALostWatermarkRatherThanCorruption$'
 
 # A tailing reader crossing a segment boundary starts the new segment at its
-# START. Two arms of uncommittedReader.Read do this — one for a roll it walked
-# into, one for a roll that woke it — and neither had a test until the pair
-# below. Both are neutralized the same way, by carrying the byte position from
-# the segment just finished into the segment just entered, which is the
-# transcription error the duplication invites: the arms are four lines apart and
-# each reads correctly on its own.
+# START. Neutralized by carrying the byte position from the segment just
+# finished into the segment just entered, which is the transcription error this
+# advance invited while it existed twice: uncommittedReader.Read had one arm for
+# a roll it walked into and another for a roll that woke it, four lines apart,
+# each correct on its own and neither tested.
 #
-# Registered as two guards rather than a pair because they are NOT one defence
-# at two sites. Which arm a read takes is decided by whether the reader was
-# parked when the roll landed, so a single test covers whichever one it raced
-# into and reports the other as covered.
-run_guard "a reader that walked into a roll starts the new segment at 0" reader.go   '				r.seg = nextSeg
-				r.br.reset(nextSeg, 0)
-				continue' '				r.seg = nextSeg
-				r.br.reset(nextSeg, r.pos)
-				continue'   '^TestAnUncommittedReaderCrossesARollItNeverParkedFor$'
-
-run_guard "a reader woken by a roll starts the new segment at 0" reader.go   '		r.br.reset(nextSeg, 0)
-		r.pos = 0' '		r.br.reset(nextSeg, r.pos)
-		r.pos = 0'   '^TestAnUncommittedReaderParkedAtTheTailIsCarriedAcrossARoll$'
+# BOTH tests run against the one mutation, on purpose. Which of the two states
+# a read passes through is decided by whether it was parked when the roll
+# landed, so naming a single test here would leave the other one asserting
+# nothing about this line. They are one guard now because the code is one site;
+# they were registered as two while it was two.
+run_guard "a reader crossing a roll starts the new segment at 0" reader.go   '			r.seg = nextSeg
+			r.pos = 0
+			r.br.reset(nextSeg, 0)' '			r.pos = r.br.pos
+			r.seg = nextSeg
+			r.br.reset(nextSeg, r.pos)'   '^TestAnUncommittedReader(CrossesARollItNeverParkedFor|ParkedAtTheTailIsCarriedAcrossARoll)$'
 
 # A header read takes the header, not the whole buffer it was handed. Neutralized
 # back to reading headersBuf entire, which is what turns a buffer bigger than a
