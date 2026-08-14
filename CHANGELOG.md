@@ -48,6 +48,29 @@ library from that fork onward.
 
 ### Fixed
 
+- **A block table's size is checked before it is allocated.**
+  `(*segment).fetchBlockTable` read `store.Size(blocksKey)` and passed it
+  straight to `make([]byte, size)`. Every length check in `decodeBlockTable`
+  happens *after* that allocation, so none of them could protect it.
+
+  A **negative** size was not a small read — it was `makeslice: len out of
+  range`, a panic, in the caller's process, out of a library. A large one was
+  simply taken: a remote store deciding how much of this process's memory it
+  gets.
+
+  Both ends are refused now, and the upper bound is *derived* rather than picked,
+  in the style of `maxDescriptorBytes`: the table is fixed-width and every block
+  occupies at least `blockHeaderLen` physical bytes, so a segment of
+  `physPosition` bytes needs at most
+  `blockTableHeaderLen + (physPosition/blockHeaderLen)*blockTableEntryLen + 4`.
+  Anything past that could not decode whatever else were true of it.
+
+  This was the **fourth** reader of a caller-supplied store and the last one
+  without the check — `readStoreDescriptor` refuses a non-positive size and
+  bounds the rest, `readTierManifest` refuses a non-positive size, and the remote
+  index cache's `fetch` now does too. The first of them has documented this exact
+  hazard since it was written.
+
 - **An index object a store reports as zero bytes is refused rather than
   fabricated.** `RemoteIndexCache.fetch` drove its download from
   `store.Size(key)` and never checked the value. A size of zero is the one

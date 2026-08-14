@@ -1872,3 +1872,52 @@ it belongs **before** `os.Create`, not in the loop, because the second half of t
 damage is a file existing at all. `readStoreDescriptor` has had `if size <= 0`
 since it was written, for the identical reason, one reader over — so this is also
 another instance of a rule stated in one place and not transcribed to its sibling.
+
+### #288: the fifth reader, and the one that panics
+
+The obvious follow-up to #287 is not "is there another one like it?" but the
+mechanical version of that question: `store.Size` has five call sites, so read all
+five. They are `descriptor.go:177`, `manifest.go:377`, `index_cache.go:190`,
+`copy_tier.go:129`, and `segment.go:723`. Three refuse a bad answer. `copy_tier`
+does not allocate from it — it hands the number to a copy that streams. The fifth,
+`(*segment).fetchBlockTable`, allocated it:
+
+```go
+size, err := s.store.Size(s.blocksKey)
+...
+buf := make([]byte, size)
+```
+
+`decodeBlockTable` is thorough — magic, version, an EXACT length, a CRC, a
+per-block minimum — and none of it can help, because every one of those checks
+runs on `buf` after `buf` exists. That is the general form worth keeping:
+
+> the checks that matter for an allocation are the ones that happen before it.
+
+Two bounds, because the two ends fail differently and only one of them is even an
+error. A **negative** size is `makeslice: len out of range` — not a wrong answer, a
+panic, in the caller's process, thrown by a library. Any store that can return a
+negative int64 can crash a process that merely opened a tier. A **large** size is
+taken quietly: the object is allocated in full before a single byte is parsed, so
+a remote store decides how much of this process's memory it gets, and the refusal
+that eventually comes from `decodeBlockTable` arrives after the damage.
+
+The upper bound is derived rather than picked, the argument `maxDescriptorBytes`
+already makes: the table is fixed-width, and every block occupies at least
+`blockHeaderLen` physical bytes in the object, so a segment of `physPosition`
+bytes describes at most `physPosition/blockHeaderLen` blocks. Nothing that could
+have decoded is refused by it — a size past the ceiling fails the exact-length
+check anyway. Only *when* changes, which is the entire point, and is why the test
+for the upper bound asserts on `runtime.MemStats.TotalAlloc` and not on the error:
+the error is there either way.
+
+**What made it hard to test** is worth recording, because it is a property of the
+code and not of the test. The state where a store's size reaches this allocation
+is `blocksPending`, and it is set in exactly one place: `openOffloadedSegment`. A
+segment that offloads inside this process keeps the table it already built, and a
+reopen with the index kept locally resolves the table during `setupIndex`. Only a
+reopen with a `RemoteIndexCache` — option 2 — leaves the table for the first read
+to fetch. So the fixture has to build a log, offload it, close it, and reopen it
+through a cache; there is no shorter path to the only arrangement in which the bug
+is reachable, and the first draft of the test failed on its own precondition
+(`no offloaded segment with a table still to fetch`) rather than on the code.

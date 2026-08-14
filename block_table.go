@@ -23,6 +23,21 @@ const (
 // ErrBlockTableFormat means the object holding a block table is not one.
 var ErrBlockTableFormat = errors.New("commitlog: not a block table")
 
+// maxBlockTableBytes is the largest table a segment of phys physical bytes could
+// possibly need, and it exists to bound an allocation made from a size the STORE
+// reported and nothing has verified.
+//
+// Derived rather than picked, the same argument maxDescriptorBytes makes. The
+// table's layout is fixed-width, and every block occupies at least
+// blockHeaderLen physical bytes in the object, so a segment of phys bytes holds
+// at most phys/blockHeaderLen blocks. A size past this cannot decode whatever
+// else is true of it — decodeBlockTable requires an EXACT length and would refuse
+// it — so refusing early costs nothing that could have succeeded, and refuses it
+// before the bytes are allocated rather than after.
+func maxBlockTableBytes(phys int64) int64 {
+	return blockTableHeaderLen + (phys/blockHeaderLen)*blockTableEntryLen + 4
+}
+
 // The block table is a segment's map from logical position to a byte range in
 // the object, and it is the one thing a tier manifest entry does not carry. It
 // is written to the store at offload, beside the log and index objects, so that

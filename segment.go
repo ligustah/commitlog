@@ -724,6 +724,31 @@ func (s *segment) fetchBlockTable() ([]blockRef, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "size block table %q", s.blocksKey)
 	}
+	// The size steering the allocation below is the STORE's answer, and nothing
+	// has verified it. Every length check in decodeBlockTable happens after the
+	// bytes are already allocated, so the checks that matter here are the ones
+	// that happen before.
+	//
+	// Both ends, because they fail differently. A NEGATIVE size is not a small
+	// read, it is `makeslice: len out of range` — a panic, in the caller's
+	// process, out of a library. And a large one is allocated in full before a
+	// single byte is parsed, which is a remote store deciding how much of this
+	// process's memory to take.
+	//
+	// This is the fourth reader of a caller-supplied store and was the last one
+	// without the check: readStoreDescriptor refuses a non-positive size and
+	// bounds the rest by maxDescriptorBytes, readTierManifest refuses a
+	// non-positive size, and the remote index cache's fetch does too.
+	if size < blockTableHeaderLen+4 {
+		return nil, errors.Wrapf(ErrBlockTableFormat,
+			"store reports block table %q as %d bytes, shorter than a table holding no blocks",
+			s.blocksKey, size)
+	}
+	if max := maxBlockTableBytes(s.physPosition); size > max {
+		return nil, errors.Wrapf(ErrBlockTableFormat,
+			"store reports block table %q as %d bytes, past the %d a %d-byte segment can need",
+			s.blocksKey, size, max, s.physPosition)
+	}
 	buf := make([]byte, size)
 	if _, err := s.store.ReadAt(s.blocksKey, buf, 0); err != nil {
 		return nil, errors.Wrapf(err, "read block table %q", s.blocksKey)

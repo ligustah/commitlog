@@ -1249,6 +1249,29 @@ run_guard "LocalBytes counts the bytes on disk" commitlog.go \
   '		n += seg.Position()' \
   '^TestACompressedLogsLocalBytesAreTheBytesOnDisk$'
 
+# The block table's size comes from the STORE and steers an allocation. Two
+# guards, because the two ends fail differently and each check is separately
+# removable.
+#
+# The lower bound is neutralized to `< -1`, which lets -1 straight through to
+# make([]byte, -1) -- so the test does not merely fail, it PANICS, which is
+# precisely what the guard is worth: the absence is a library taking down the
+# caller's process, not a wrong answer.
+run_guard "a block table size shorter than a table is refused" segment.go \
+  '	if size < blockTableHeaderLen+4 {' \
+  '	if size < -1 {' \
+  '^TestABlockTableShorterThanATableIsRefused$'
+
+# The upper bound is neutralized by raising it out of reach rather than by
+# deleting the branch, which would orphan `max` and break the build. Its test
+# asserts ALLOCATION rather than the error, because an oversized object is
+# refused either way -- decodeBlockTable requires an exact length -- and the only
+# thing the bound changes is whether the bytes were taken first.
+run_guard "a block table size past the segment is refused" segment.go \
+  '	if max := maxBlockTableBytes(s.physPosition); size > max {' \
+  '	if max := maxBlockTableBytes(s.physPosition); size > max+(1<<40) {' \
+  '^TestABlockTablePastWhatTheSegmentCouldNeedIsNotAllocated$'
+
 # An index object the store reports as EMPTY is refused. Neutralized to `< 0`,
 # which is the exact hole this closed: negative was already unreachable (the
 # ended-early check below catches it), so the mutation restores the state where
