@@ -1525,9 +1525,17 @@ run_guard "a committed read reports a watermark it cannot find" reader.go   '	hw
 # landed, so naming a single test here would leave the other one asserting
 # nothing about this line. They are one guard now because the code is one site;
 # they were registered as two while it was two.
-run_guard "a reader crossing a roll starts the new segment at 0" reader.go   '			r.seg = nextSeg
+# The anchor carries its `if` line because the three lines under it are NOT
+# unique: committedReader.readLoop advances across a boundary with the same
+# three statements at the same indentation. guardcheck said so — SKIP, "matches
+# more than one place" — which is the check earning its keep twice over, since
+# the ambiguity only appeared when the two uncommitted arms merged into one that
+# happens to read like the committed one.
+run_guard "a reader crossing a roll starts the new segment at 0" reader.go   '		if nextSeg := findSegmentAfter(r.cl.segmentsSnapshot(), r.seg); nextSeg != nil {
+			r.seg = nextSeg
 			r.pos = 0
-			r.br.reset(nextSeg, 0)' '			r.pos = r.br.pos
+			r.br.reset(nextSeg, 0)' '		if nextSeg := findSegmentAfter(r.cl.segmentsSnapshot(), r.seg); nextSeg != nil {
+			r.pos = r.br.pos
 			r.seg = nextSeg
 			r.br.reset(nextSeg, r.pos)'   '^TestAnUncommittedReader(CrossesARollItNeverParkedFor|ParkedAtTheTailIsCarriedAcrossARoll)$'
 
