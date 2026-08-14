@@ -2438,3 +2438,81 @@ knows from `GUARDCHECK_SET=platform`.)
   assertion — the file outside the store must still exist — which is stronger
   than an error-identity check, because it proves the traversal did not happen
   rather than that something failed.
+
+## Closing the version-guard set, and what closing it exposed
+
+The six-format table above said three of six version constants had neither
+guard. Fixed in `cab05fa`, but the interesting part is not the three.
+
+**The per-format fixtures had to be written twice.** The claim under test is
+*the constant moved when the layout did*, so the falsifying mutation is the
+constant put back to its previous value — and two obvious fixture shapes are
+invariant under exactly that mutation:
+
+- `theVersion - 1` moves **with** the constant. Neutralize `digestVersion` to 1
+  and the fixture writes 0, which is still refused, and the test stays green.
+- an arbitrary wrong value (9, `0xFF`) is refused whatever the constant says,
+  so it tests the *other* claim — that the version line is checked — which was
+  already held.
+
+Both were written before this was noticed. All three tests now name the old
+version as a literal, with a comment saying why, because a later tidy-up that
+"removes the magic number" would disarm them in silence.
+
+`TestAV1BlockTableIsRefusedByItsVersion` needed one more thing: an assertion on
+the error **message**. A v1 entry is 9 bytes against v2's 13, so a v1 table
+fails `decodeBlockTable`'s exact-length check as well, and both refusals are
+`ErrBlockTableFormat` — `require.ErrorIs` cannot tell them apart. Neutralized,
+it dies on the length instead, and only the message assertion sees it. This is
+the #307 shape one format over: an ordered check where the sentinel is shared.
+
+The digest had no test at all, and the reason generalizes. Its version mismatch
+is a **soft** failure by design — `loadKeyDigest` returns nil and the caller
+rebuilds — and nothing goes red when a soft path stops working. It gets slower,
+or worse, it starts succeeding on bytes it should not have understood.
+
+### The structural half found the same three cold, then failed at its own job
+
+`hack/formatversion.sh` enumerates version constants that gate a refusal and
+requires each to be named by a guard. Run before the guards were added, it
+independently reported the same three — a real cross-check of the hand
+inventory, not a restatement of it.
+
+Then it reported **all five held**, and there are six.
+
+`manifestVersion` is declared `const manifestVersion = 4` on its own line rather
+than inside a `const (...)` block. The declaration pattern was written against
+the spellings that happened to be in front of me, none of which had the keyword,
+so the scan never saw it — and the script silently omitted the one format whose
+missed bump (#300) is the entire reason the script exists. **That is #300 one
+layer up: the check ran, against the wrong set.**
+
+The fix is not a wider pattern, because the next unpredicted shape defeats a
+wider pattern the same way. It is the lens from #294: *close the set from the
+other side.* The script now also extracts every name **compared** as a version
+and requires each to appear in the declaration scan. A name compared like a
+version whose declaration was not found is a **harness error**, not a missing
+guard — it cannot be satisfied by adding a guard, and until the scan is taught
+the shape the script has no standing to report anything. Reverting the `const`
+widening now produces that error naming `manifestVersion`, where before it
+produced a green.
+
+### Two more, found by mutating the checker rather than reading it
+
+Neither was visible on a read-through. Both came from trying to falsify the
+script one constant at a time.
+
+- **The guard-presence test was a substring match.** `grep -q "$name" "$guards"`
+  reads as "is this constant named by a guard" and is not: renaming the guard's
+  anchor to `manifestVersionXX` still satisfied it. It is now word-bounded. Same
+  slip as guardcheck's own `--filter` argument, which was a substring taken for
+  a regex — the third time this exact confusion has cost something here.
+- **A `| grep -q` in the declared-name lookup.** The comment beside CI's
+  shellcheck step says neither script pipes into `grep -q` any more, and that is
+  not a style rule: under `pipefail` grep exits early, the upstream command takes
+  EPIPE, and the pipeline's status becomes the write failure rather than the
+  match. It is a `case` on a newline-delimited string now.
+
+The general point: **a checker gets read for what it says and mutated for what it
+does, and only the second one found these.** Six mutations, one per constant,
+took under a minute; the read-through that preceded them found nothing.
