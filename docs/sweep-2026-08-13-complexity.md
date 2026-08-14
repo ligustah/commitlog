@@ -730,6 +730,51 @@ and on a loaded runner it grows instead of lying. A priced wait is usually
 faster than the conservative constant it replaces, because the constant has to be
 large enough for the worst machine anyone will ever run it on.
 
+## A fifth, and the sharpest form of it: a test whose only assertion is a detector
+
+`TestRetentionNeverWritesIntoASliceAReaderIsHolding` reproduces the v0.44.2 bug —
+`TruncateBefore` replacing its boundary segment *in place* while lock-free
+readers index the same backing array. Its doc says so plainly: *"It asserts
+nothing by itself — the race detector is the assertion."*
+
+Which makes it the purest instance of the lens on this page, because a detector
+that finds nothing and a test that never performed the operation produce the
+identical result. This one had two independent ways to perform none:
+
+- The truncation's error was discarded — `_ = l.TruncateBefore(newest - 20)`.
+  Every call could have been failing.
+- The rewrite branch runs **only when the cut straddles a sealed segment**. Cut
+  on a segment base and `TruncateBefore` unlinks whole segments and returns nil,
+  never touching a shared array. `newest - 20` was a *hope* that the cut would
+  land mid-segment.
+
+And the only thing checked afterwards was `l.NewestOffset() >= 0`.
+
+Fixed by making the straddle a **construction** rather than a hope — the cut is
+one past a sealed segment's base, which that segment therefore spans by
+definition, and a concurrent roll cannot spoil it because rolls only append — and
+then counting the rewrites and flooring them, alongside a count of non-empty
+reader snapshot walks. 66 rewrites and ~400k walks in three seconds here; the
+floors are 10 and 100, sized to catch zero rather than to measure the machine.
+
+### The counter needed falsifying too, and failed the first time
+
+The first version counted `TruncateBefore` returning nil, relying on my reading
+of the selection rule to make that mean "rewrote" — the transcription trap. The
+second counted the outcome: the log's first segment now starting at the cut.
+
+Mutating the cut down onto `s.BaseOffset` — which by the production condition
+skips the rewrite entirely — **still counted 418 rewrites**, because an
+*untouched* segment already starts at its own base. The offset alone cannot tell
+a published trim from a survivor. What distinguishes them is object identity:
+`after[0] != s`. That is what "rewritten" means, and a whole-segment delete never
+produces it.
+
+Worth stating as a rule, because it is the same mistake in miniature: **an
+outcome check is only a check if the outcome is unreachable without the
+operation.** Falsify the counter, not just the assertion — a floor over a count
+that a vacuous run also produces is exactly the thing this whole section is about.
+
 ## Follow-ups this pass opened
 
 - ~~**`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that

@@ -67,6 +67,20 @@ library from that fork onward.
   the disabled log's wait. The `Eventually` fails loudly, naming the fixture, in
   precisely the state that used to make the real assertion vacuous.
 
+- `TestRetentionNeverWritesIntoASliceAReaderIsHolding` reproduces the v0.44.2
+  in-place segment write, and by design asserts nothing itself — the race
+  detector is the assertion. A detector that finds nothing is therefore
+  indistinguishable from a test that never performed the operation, and this one
+  had two ways to perform none: `TruncateBefore`'s error was discarded outright,
+  and its rewrite branch runs only when the cut *straddles* a sealed segment,
+  which `newest - 20` merely hoped for. The cut is now one past a sealed
+  segment's base — a straddle by construction, which a concurrent roll cannot
+  spoil because rolls only append — and the rewrites and non-empty reader
+  snapshot walks are counted and floored. The rewrite count checks segment
+  identity, not just the resulting base offset: an untouched segment already
+  starts at its own base, so the offset alone counts a whole-segment delete as a
+  rewrite.
+
 ## v0.86.0 — 2026-08-14
 
 ### Changed
