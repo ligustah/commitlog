@@ -242,6 +242,14 @@ guard_finish() {
     failures=$((failures + 1))
   elif [ "$rc" -eq 0 ]; then
     echo "NO COVERAGE — $test_re passed without it"
+    # NO COVERAGE is a question — why did the test not bite — and the answer was
+    # in the run this used to throw away. It cost two CI round trips to learn
+    # that a Windows fixture's 120ms window had closed before New() reached the
+    # file it was holding: the DURATION said so outright, and only the runner
+    # had it, because the guard is covered on this box. Result lines only; a
+    # verbose multi-package run is thousands of lines and the timings are all of
+    # it that matters here.
+    printf '%s\n' "$out" | grep -E '^(=== RUN|--- (PASS|FAIL|SKIP)|    [A-Za-z0-9_]+\.go:)' | sed 's/^/      /'
     failures=$((failures + 1))
   else
     echo "ok (test fails without it)"

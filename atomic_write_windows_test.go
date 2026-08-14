@@ -96,15 +96,22 @@ func TestAtomicWritePermanentHandleStillFails(t *testing.T) {
 // deny-all handle on this file failed the open with "The process cannot access
 // the file because it is being used by another process".
 //
-// The hold is MEASURED, not assumed, and that is the difference between this
-// fixture and the three above it. Those hold a file across a call that reaches
-// it immediately, so any hold at all covers the attempt. New() reaches the
+// The fixture CHECKS ITSELF, and that is the difference between this test and
+// the three above it. Those hold a file across a call that reaches it
+// immediately, so any hold at all covers the attempt. New() reaches the
 // descriptor only after claiming the directory, building the epoch cache and
-// running init(), so the hold has to outlast all of that — and a fixed 120ms
-// did not on the CI Windows runner. Nothing went red there: the read simply
-// happened after the handle had cleared, the retry was never exercised, and
-// guardcheck reported the guard as uncovered. Timing an unheld reopen first
-// prices that prologue on the machine actually running the test.
+// running init(), so the hold has to outlast all of that — and on the CI
+// Windows runner a fixed 120ms did not. Nothing went red there. The read simply
+// landed after the handle had cleared, the retry was never exercised, and the
+// only thing that noticed was guardcheck, which reported the guard uncovered
+// while the test itself stayed green.
+//
+// So the hold is priced from an unheld reopen on the machine actually running
+// the test, and then the test asserts the two things that make it mean
+// anything: that the handle really does deny access here, and that the open
+// really did WAIT. Without the second, a window that closes early is again a
+// silent pass — a test that proves nothing looks exactly like a test that
+// passes.
 func TestReopeningALogRidesOutAHeldDescriptor(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(Options{Path: dir, MaxSegmentBytes: 1 << 20, CleanerInterval: time.Hour})
@@ -113,17 +120,27 @@ func TestReopeningALogRidesOutAHeldDescriptor(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, l.Close())
 
-	start := time.Now()
+	priced := time.Now()
 	warm, err := New(Options{Path: dir, MaxSegmentBytes: 1 << 20, CleanerInterval: time.Hour})
 	require.NoError(t, err)
 	require.NoError(t, warm.Close())
 	// Strictly longer than a whole unheld reopen, so the descriptor read is
-	// certainly inside the window rather than probably inside it.
-	hold := 2*time.Since(start) + 250*time.Millisecond
+	// inside the window by construction rather than by luck.
+	hold := 2*time.Since(priced) + 500*time.Millisecond
 	require.Less(t, hold, waitedOnRetryBudget,
 		"the hold must sit inside the read's retry budget, or a correct retry gives up first")
 
-	h := openDenyAll(t, filepath.Join(dir, descriptorFileName))
+	descriptor := filepath.Join(dir, descriptorFileName)
+	h := openDenyAll(t, descriptor)
+	// The fixture's own precondition. A share mode of 0 is what makes every
+	// later open fail, and a filesystem that ignored it would leave this test
+	// asserting that an unobstructed open succeeds.
+	if f, derr := os.Open(descriptor); derr == nil {
+		f.Close() // nolint: errcheck
+		syscall.CloseHandle(h)
+		t.Fatal("the exclusive handle did not deny access, so nothing below is a test")
+	}
+
 	released := make(chan struct{})
 	go func() {
 		time.Sleep(hold)
@@ -131,9 +148,18 @@ func TestReopeningALogRidesOutAHeldDescriptor(t *testing.T) {
 		close(released)
 	}()
 
+	start := time.Now()
 	l2, err := New(Options{Path: dir, MaxSegmentBytes: 1 << 20, CleanerInterval: time.Hour})
+	elapsed := time.Since(start)
 	require.NoError(t, err,
 		"a transient handle on the descriptor must be waited out, not fail the open")
+	// An open that returned before the handle cleared never met it: the read
+	// happened after the window closed, and the retry this test is named for
+	// was not exercised. Reported as a failure rather than a pass, because the
+	// pass is indistinguishable from the real thing.
+	require.GreaterOrEqual(t, elapsed, hold-50*time.Millisecond,
+		"New() returned in %s while the descriptor was held for %s — it reached the "+
+			"read after the window closed, so the retry was never exercised", elapsed, hold)
 	<-released
 	require.NoError(t, l2.Close())
 	remove(t, dir)
