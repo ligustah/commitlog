@@ -64,17 +64,26 @@ fi
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 
+# POSIX awk only, no gawk extensions. The lint job runs on ubuntu-latest, where
+# /usr/bin/awk is mawk: three-argument match(s, r, arr) and `delete arr` (the
+# whole array) are both gawk-isms that would make this a hard CI failure rather
+# than a wrong answer. split("", a) is the portable clear, and the capture is
+# done with sub() on a copy of the line.
+#
 # shellcheck disable=SC2086 # $files is a deliberately word-split path list
 awk '
   # Function boundary: a size never travels between functions, and pretending
   # otherwise would let a check in one cover an allocation in another.
-  /^func / { delete from_size; delete checked; next }
+  /^func / { split("", from_size); split("", checked); next }
 
   # A variable taking a store size. Both `:=` and `=`, and any receiver, so
   # s.store.Size(k), store.Size(k) and src.Size(k) all count.
-  match($0, /^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*,[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:?=[[:space:]]*[^=]*\.Size\(/, m) {
-    from_size[m[1]] = NR
-    delete checked[m[1]]
+  /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*,[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:?=[^=]*\.Size\(/ {
+    v = $0
+    sub(/^[[:space:]]*/, "", v)     # leading indent
+    sub(/[[:space:]]*,.*$/, "", v)  # everything from the comma on
+    from_size[v] = NR
+    delete checked[v]               # one element: POSIX, unlike `delete checked`
     next
   }
 
