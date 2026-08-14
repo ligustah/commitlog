@@ -1589,3 +1589,13 @@ segment as a side effect.
 The new tests assert **equality**, not a bound: "at most one pass per segment"
 would still be satisfied by a build-then-fetch that happened to coalesce into a
 single run, so it would not notice the old shape coming back.
+
+### The same lens, swept: are there other bounded-here/unbounded-there pairs?
+
+Worth asking once the first one was found, and the answer bounds the question
+rather than opening it. The package has exactly **two** production concurrency
+bounds — `compact_cleaner.go:671` (`buildConc`, the digest builds) and
+`prefix_read.go:150` (`fetchRuns`, the record reads). Both are the ones already
+under discussion, and there is no third expensive operation with a semaphore in
+one caller and none in another. The asymmetry found above was the only instance,
+not the first of a family.
