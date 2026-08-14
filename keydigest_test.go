@@ -138,6 +138,12 @@ func TestConvergedCleanReadsNoSealedRecords(t *testing.T) {
 // expired latest tombstones vanish. The reference is computed independently
 // from the pre-clean records.
 func TestCleanDigestMergeEquivalence(t *testing.T) {
+	// Counted across every seed and floored after the loop. The "a record at or
+	// above StripBelow keeps its headers" assertion below is vacuous for a seed
+	// whose header-carrying records all happen to land under the floor, and a
+	// per-seed floor would then fail that seed for a reason that says nothing
+	// about stripping.
+	preserved := 0
 	for seed := int64(1); seed <= 5; seed++ {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			rng := rand.New(rand.NewSource(seed))
@@ -241,6 +247,27 @@ func TestCleanDigestMergeEquivalence(t *testing.T) {
 				}
 			}
 
+			// The other half of the strip rule. Only "below StripBelow loses the
+			// header" was ever asserted, so a strip that ignored the floor and
+			// took the headers off every record it rewrote passed this test —
+			// and `hasPid`, recorded per record since this test was written, was
+			// the evidence of which records could tell the difference. Nothing
+			// read it.
+			for _, r := range recs {
+				if !r.hasPid || r.off < stripBelow {
+					continue
+				}
+				msg, present := got[r.off]
+				if !present {
+					continue // compacted away or dropped; nothing to preserve
+				}
+				_, kept := msg.Headers()["pid"]
+				require.True(t, kept,
+					"offset %d is at or above StripBelow (%d) and must keep its "+
+						"pid header (seed %d)", r.off, stripBelow, seed)
+				preserved++
+			}
+
 			// A second pass must converge to the identical visible set.
 			requireCleanOK(t, l, (spec))
 			got2 := readAllMsgs(t, l)
@@ -251,6 +278,9 @@ func TestCleanDigestMergeEquivalence(t *testing.T) {
 			}
 		})
 	}
+	require.Greater(t, preserved, 0,
+		"no seed produced a surviving record at or above StripBelow carrying a "+
+			"header, so nothing checked that stripping stops at the floor")
 }
 
 // Sidecar lifecycle: cleans install digests for sealed segments; deleting a

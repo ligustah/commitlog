@@ -61,13 +61,17 @@ type keyDigest struct {
 
 	// The keyed section (entries sorted by key) lives in exactly one of two
 	// places: freshly built digests hold the encoded bytes in `keyed`; loaded
-	// sidecars record only the section's file position (path/keyedOff/
-	// keyedLen) and iteration streams it from disk, so a clean never holds
-	// every segment's keys in memory at once.
+	// sidecars record only where the section STARTS (path/keyedOff) and
+	// iteration streams it from disk, so a clean never holds every segment's
+	// keys in memory at once.
+	//
+	// Where it ends is not recorded, and does not need to be: the iterator
+	// reads exactly nKeys entries and stops. A length was kept here for a
+	// while and never read by anything — the parse uses one, to bounds-check
+	// and to skip the section, but that is a local.
 	keyed    []byte
 	path     string
 	keyedOff int64
-	keyedLen int
 	nKeys    int
 	unkeyed  []digestRec // offsets ascending
 	control  []int64     // offsets ascending
@@ -406,7 +410,6 @@ func loadKeyDigest(seg *segment) *keyDigest {
 	// rewrites replace the file only after the merge).
 	d.path = digestPath(seg)
 	d.keyedOff = int64(r.pos)
-	d.keyedLen = int(keyedLen)
 	r.bytes(int(keyedLen))
 	nUnkeyed := r.uvarint()
 	if r.err != nil || nUnkeyed > uint64(len(body)) {

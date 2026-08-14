@@ -333,6 +333,23 @@ run_guard "stripFrame CRC (no laundering)" compact_cleaner.go \
   'if want, got := msg.Crc(), crc32.Checksum(msg[4:], crc32cTable); want != got && false {' \
   '^TestCompactionDoesNotResignCorruptRecords$'
 
+# Stripping has a FLOOR, and only the other side of it was ever tested: the
+# equivalence test asserted that records below StripBelow lose their headers and
+# said nothing about records at or above it keeping them, so a strip that ignored
+# the floor entirely passed. The anchor is the keyed-data arm; the unkeyed arm a
+# few lines up is byte-identical in its condition, which is why the pattern
+# carries the two lines after it.
+run_guard "stripping stops at StripBelow" compact_cleaner.go \
+  '	if offset < spec.StripBelow && len(spec.StripHeaders) > 0 {
+		return dispStrip
+	}
+	return dispRetain' \
+  '	if len(spec.StripHeaders) > 0 {
+		return dispStrip
+	}
+	return dispRetain' \
+  '^TestCleanDigestMergeEquivalence$'
+
 run_guard "readMessage CRC" reader.go \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c {' \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c && false {' \
