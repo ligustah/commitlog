@@ -7,7 +7,7 @@ library from that fork onward.
 
 ## Unreleased
 
-### Fixed
+### Performance
 
 - **Opening a block-compressed tier without a `RemoteIndexCache` made a remote
   round trip per segment.** With the index kept local (option 1, which
@@ -32,6 +32,8 @@ library from that fork onward.
   paths — including an assertion that adopting into a *fresh* directory still
   downloads, because that rebuild is real and necessary and a test that only
   checks for zeros would certify a version that skipped it everywhere.
+
+### Fixed
 
 - **The manifest adopt sorted the live segment array in place.**
   `segmentsSnapshot`'s doc states the obligation on everyone who changes the
