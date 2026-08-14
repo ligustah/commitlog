@@ -426,20 +426,21 @@ run_guard "a digest-less segment is scanned, not rebuilt" prefix_source.go \
 # is that the same block is fetched and decompressed once per hit inside it, so
 # nothing but a cost assertion can see it. Measured at the 4KB tier default: 120
 # requests where 3 suffice.
+#
+# Neutralized with `&& false` rather than by deleting the branch: prevBlk, prevOK
+# and blk are declared for this test alone, and removing their only reader makes
+# the package fail to compile, which the harness reports as its own error rather
+# than as a missing guard.
 run_guard "a block segment's runs are planned in physical bytes" prefix_read.go \
-  '			if blk, ok := seg.blockAt(e.Position); ok && prevOK {
-				split = blk.physStart-(prevBlk.physStart+prevBlk.physLen) > coalesce
-			} else {
-				split = e.Position-prevEnd > coalesce
-			}' \
-  '			split = e.Position-prevEnd > coalesce' \
+  '			if blk, ok := seg.blockAt(e.Position); ok && prevOK {' \
+  '			if blk, ok := seg.blockAt(e.Position); ok && prevOK && false {' \
   '^TestPrefixReadOverBlocksThatAllHoldHitsIsBudgetIndependent$'
 
 # ...and the budget must still DO something where whole blocks can be skipped.
 # The guard above is satisfiable by never splitting at all; this one is not.
 run_guard "a physical gap wide enough still splits" prefix_read.go \
   '				split = blk.physStart-(prevBlk.physStart+prevBlk.physLen) > coalesce' \
-  '				split = false' \
+  '				split = blk.physStart-(prevBlk.physStart+prevBlk.physLen) > coalesce && false' \
   '^TestPrefixReadOverBlocksWithGapsStillHonoursTheBudget$'
 
 run_guard "readMessage CRC" reader.go \

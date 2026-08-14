@@ -9,6 +9,52 @@ library from that fork onward.
 
 ### Changed
 
+- A `KeyPrefix` read over a **block-compressed** segment now plans its runs in
+  physical bytes. `planRuns` ended a run wherever the *logical* byte gap to the
+  next wanted record exceeded the coalesce budget. Index positions are logical,
+  and on a raw segment the logical space *is* the file, so that gap is exactly
+  the bytes a split avoids.
+
+  A block segment is billed differently. Nothing smaller than a whole block is
+  ever transferred or decompressed (`blockCopyIntoCache`), and `fetchRuns` hands
+  every run its own single-entry `blockCache` — so a split *inside* one block
+  avoids nothing and repeats a fetch, pulling and decompressing the same block
+  once per run that touches it. Measured on a tiered log with ~50KB blocks and a
+  hit every ~6KB, at the 4KB tier default:
+
+  | budget | requests | bytes |
+  | --- | --- | --- |
+  | 4096 | 120 | 314799 |
+  | 16384 | 3 | 7827 |
+
+  Forty times the requests **and** forty times the bytes for the same 120
+  records: the setting inverted, not merely mistuned. A budget below a block's
+  compressed size cannot buy anything, and that is where the default sits —
+  `cleanBlockTarget` is 256KB uncompressed against a 4KB tier default.
+
+  The gap is now the physical distance between the block holding the previous
+  record and the block holding this one. Two records in one block have a
+  negative gap and are never split; blocks lying entirely between two hits are
+  the only thing a split can skip. The raw path is untouched, and
+  `TestPrefixReadCostProfile` reports the same numbers as before.
+
+  Why it went unmeasured: that cost profile's fixture sets no `Compression`, so
+  every number it established — including the ~4.4KB tier breakeven — was
+  measured on segments with no blocks at all. A cost test can name the path it
+  means and stand on another one.
+
+- **A guard lost its coverage to the change below it, and CI caught it.**
+  `TestKeyPrefixRefusesRecordsThatFailCRC` and its tiered sibling never cleaned,
+  so once the digest-less scan path existed they ran on *that* route while their
+  names, their doc (*"collectRun is reached for both"*) and their guard all said
+  `collectRun`. Neutering `collectRun`'s CRC check stopped failing them.
+
+  Both fixtures now run a clean, so they exercise the planned route they are
+  named for, and a third test covers the scan route with a guard of its own. The
+  old guard's `^TestKeyPrefixRefuses` selector was also tightened to name its two
+  tests: a selector matching tests that cannot see the guarded line is one bad
+  fixture away from silently reporting nothing.
+
 - A `KeyPrefix` read over a sealed segment with no key digest now scans the
   segment once and filters, instead of building a whole digest and discarding
   it. This is not an edge case: the compact cleaner is the only thing that

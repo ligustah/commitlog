@@ -1626,3 +1626,158 @@ raw" behaviour would break a supported operation today.
 
 Recorded because the grep for `compat|legacy|migrat` puts these four in one
 list, and three of them are already dead while the fourth only looks it.
+
+### The measure and the thing measured: a budget in the wrong currency
+
+The digest-less prefix read (above) made one path expensive and, by doing so,
+made a long-standing redundancy legible. Re-reading the same file for *other*
+places where a decision is priced in units the code does not actually pay in
+turned up a second, larger one — in the same function's neighbour.
+
+`planRuns` decides where one contiguous read ends and the next begins:
+
+```go
+if cursor < 0 || e.Position-cursor > coalesce {   // start a new run
+```
+
+`e.Position` is an index position, and index positions live in the **logical**
+(uncompressed) byte space (`block.go:11-14`). On a raw segment that space *is*
+the file, so the difference is exactly the bytes a split would avoid, and the
+whole economic argument at the top of `prefix_read.go` — *read a contiguous span
+and discard the frames between, or address each record and pay a request each* —
+holds as written.
+
+A block-compressed segment offers neither option:
+
+- **A record cannot be addressed.** `blockCopyIntoCache` decodes a whole block
+  on a cache miss; there is no smaller unit of transfer or of work.
+- **The bytes between two records in one block are not separately transferred.**
+  Reading through them costs nothing beyond the block already being fetched.
+
+So a split inside a block cannot save anything — and it *adds*, because
+`fetchRuns` gives every run its own single-entry `blockCache`, so the same block
+is pulled and decompressed once per run that touches it, concurrently.
+
+That is not a rounding error. `cleanBlockTarget` is 256KB uncompressed and the
+tier coalesce default is 4KB, so on a tiered block-compressed object almost every
+gap split, and each split was an extra round trip for bytes already in flight.
+Measured, ~50KB blocks with a hit every ~6KB, 120 hits:
+
+| budget | requests | bytes |
+| --- | --- | --- |
+| none | 120 | 314799 |
+| 4096 (the default) | 120 | 314799 |
+| 16384 | 3 | 7827 |
+
+Both axes forty times worse at the default. The setting was not mistuned, it was
+**inverted**: its own documentation promises fewer bytes for more requests, and
+here the small budget bought more of both.
+
+The fix is one line of arithmetic, and it collapses the special cases rather than
+adding them. Measure the gap between the *block* holding the previous record's
+last byte and the *block* holding this one's first:
+
+```go
+split = blk.physStart-(prevBlk.physStart+prevBlk.physLen) > coalesce
+```
+
+Same block gives a negative gap, so it never splits. Adjacent blocks give zero,
+so they never split — correctly, since nothing lies between them to skip. Blocks
+entirely between two hits give the sum of their physical lengths, which is
+exactly what a split avoids. No `if sameBlock` branch is needed; the right
+measure produces the right answer at every shape.
+
+**Why nothing caught it.** `TestPrefixReadCostProfile` sets no `Compression`. Its
+fixture is raw, so `Position` is physical and the model is coherent — and the
+"MEASURED" ~4.4KB tier default it established was measured somewhere the defect
+cannot occur. This is the same trap as `costLog`'s missing `Clean` earlier in
+this sweep, one layer out: there the fixture had no digests and so measured the
+wrong *route*; here it has no blocks and so measures the wrong *currency*.
+
+**The lens, stated generally.** When a knob is denominated in a unit, ask what
+the code below it actually transacts in. A byte budget above a block-structured
+layer, a record count above a batch-structured one, a time budget above something
+that only yields at checkpoints — in each case the knob can be set to a value
+finer than the layer's granularity, and there the knob does not merely stop
+helping, it starts costing. The tell is a fixture: if the cost test that
+justified the default cannot produce the granularity, the default was never
+measured against it.
+
+### A guard can lose its coverage to the fix in the next commit
+
+Worth recording separately because it is the failure guardcheck exists for and it
+fired for real. The digest-less scan path landed; CI's `guard coverage` job came
+back with:
+
+```
+prefix-read CRC   NO COVERAGE — ^TestKeyPrefixRefuses passed without it
+```
+
+`TestKeyPrefixRefusesRecordsThatFailCRC` and its tiered sibling never ran a
+clean, so their segments had no digests — and the moment a digest-less prefix
+read stopped going through `collectRun`, both tests moved to the scan path.
+Their names, their guard and their own doc comment (*"It is — collectRun is
+reached for both"*) all still said `collectRun`. The check they were named for
+could be deleted without either of them noticing.
+
+Three things came out of it:
+
+1. Both fixtures now clean, so they exercise the route they are named for.
+2. The scan route got its own test and its own guard — separate code with no
+   shared helper, so the old guard never spoke for it.
+3. The old guard's selector, `^TestKeyPrefixRefuses`, was tightened to name its
+   two tests. A prefix selector that also matches tests which *cannot* see the
+   guarded line still reports `ok` as long as one match fails — so it survives
+   exactly until the last correctly-placed fixture drifts, and then reports
+   nothing. Related: [[an-empty-test-selection-is-a-pass]], where the same
+   selector-shaped hole made a guard vacuous rather than merely loose.
+
+#### The same lens, swept: every knob against its layer's granularity
+
+Having found one budget denominated in a unit the layer below does not transact
+in, the obvious question is whether it is the only one. Walking the whole
+`Options`/`CleanSpec`/`Tier` surface, most knobs **name their own granularity in
+the doc**, which is the thing that keeps them honest:
+
+- `CleanRewriteBudget` is a duration over a segment-at-a-time rewrite, and says
+  so: *"At least one rewrite always proceeds, so even a pathologically small
+  budget drains debt."* The granularity is acknowledged and handled.
+- `LocalRetentionAge` is a duration over whole-segment descent: *"Only whole
+  sealed segments move, so a segment lives locally until its NEWEST record is
+  past the horizon."*
+- `PrefixReadConcurrency` names its unit outright: *"The unit is a RUN — a span
+  of wanted records read contiguously — not a segment."*
+- `MaxLogMessages` is a count over a segment-granular walk, which is the same
+  unit `applyTotalLimit` drops in.
+
+The byte budgets are the ones that name nothing. `MaxLogBytes` is documented as
+*"Retention by bytes"*, `Tier.MaxBytes` as bounding *"the segments whose bytes
+are in THIS tier"*, and `LocalBytes()` as *"how many bytes of log data this log
+holds on LOCAL disk — what copying it elsewhere would cost."* All three sum
+`(*segment).Position`, which is the **logical, uncompressed** extent — see #285.
+`physPosition` is the real one, is tracked, and is carried through
+`offloadMeta.PhysPosition` from a size the upload measured.
+
+Two directions of wrongness, not one:
+
+- **Large batches compress**, so the file is smaller than the logical extent and
+  the budgets over-retain. Measured in this session's block fixture: 52KB
+  logical per block against ~2.5KB on disk, a factor of twenty.
+- **Small appends do not compress** — `compressMinBlock` stores anything under
+  4KB raw — but each still carries an 11-byte block header, so the file is
+  *larger* than the logical extent and `LocalBytes` under-reports.
+
+`TestALogsLocalBytesAreTheBytesOnDisk` already asserts exactly the right thing
+(`LocalBytes() == diskLogBytes(dir)`, measured independently by walking the
+files) and cannot see either case, because its fixture sets no `Compression`.
+The assertion was never wrong; the fixture could not reach the states that
+falsify it. That is the third time in this sweep — after `costLog`'s missing
+`Clean` and the CRC tests' missing digests — that the defect was not a missing
+test but a test standing somewhere the defect cannot occur.
+
+Also worth recording against the standing question *"why do we always need
+high-intensity soak tests to find issues?"*: neither of today's two findings came
+from a soak. Both came from reading one function against the layer beneath it and
+then writing a direct, seconds-long cost assertion. The soak was never going to
+find them — a soak measures throughput, and both defects are invisible in
+throughput terms while being forty times off in requests and bytes.
