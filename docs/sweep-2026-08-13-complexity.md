@@ -2253,3 +2253,27 @@ round trip through a manifest this build wrote is fine, and only a manifest from
 the release before goes wrong. Deliberately not anchored on the reader's
 comparison: that check was already correct. The number it defends is what failed
 to move.
+
+#### The same question asked of every other format
+
+A defect found in one format is a question owed to the rest. The repo has four
+things it writes and reads back, and each was checked for the shape #300 had —
+a reader that accepts a file written before a field existed and reads the
+absence as a value:
+
+- **Block header / block table.** Both refuse anything that is not the version
+  this build writes. Both bumped for `records`.
+- **Descriptor.** One version, equality check, and `set()` refuses an unknown
+  key by default — so a file from a newer writer is refused rather than
+  half-read. The other direction cannot bite either: every field absent from an
+  older descriptor lands as a zero that `describeDifference` reports as a
+  mismatch, which is `ErrDescriptorMismatch` and loud. `Identity` is the one
+  optional field, and its absence is reported as `Stored: false`, which is the
+  honest answer rather than a laundered one.
+- **Leader epoch checkpoint.** Versioned with an equality check, and the comment
+  at the check records that the "reject anything newer, silently accept anything
+  older" trap was already found and closed here.
+
+So the manifest was the only one, and it is closed. Worth stating as a negative
+rather than leaving unsaid: the next person to add a field to a format has three
+worked examples of the bump being mandatory and none of it being optional.
