@@ -1,6 +1,7 @@
 package commitlog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -335,24 +336,32 @@ func TestDescriptorCorruptionIsNotTreatedAsMissing(t *testing.T) {
 // nobody configured. The version line is what makes a real format change
 // detectable, and it stays.
 //
-// The fixtures carry version 1 deliberately. They read "0" until v0.82.0 dropped
-// V0, and leaving them there would have kept this test GREEN for the wrong
-// reason: every body would fail on the version check without ever reaching the
-// key parsing the test exists to exercise, and require.Error cannot tell those
-// apart.
+// The fixtures carry the CURRENT version, and take it from the constant. They
+// read "0" until v0.82.0 dropped V0 and were hand-edited to "1", which left this
+// test one format bump from being green for the wrong reason: every body would
+// fail on the version check without reaching the key parsing the test exists to
+// exercise, and require.Error cannot tell those apart. descriptorFileV2 is that
+// bump. Interpolating the constant is what makes the fixture follow the format
+// instead of recording one moment of it — and the assertion below closes the
+// other half, so a body that fails for the wrong reason is now a failure rather
+// than a pass.
 func TestDescriptorRefusesUnknownKeysAndBadValues(t *testing.T) {
 	dir := tempDir(t)
 
+	v := fmt.Sprintf("%d\n", descriptorFileV2)
 	for name, body := range map[string]string{
-		"an unknown key":       "1\ncompact=true\nsomething_new=42\n",
-		"a typo'd key":         "1\ncompact_min_ag=1h\n",
-		"an unparseable value": "1\ncompact_min_age=not-a-duration\n",
+		"an unknown key":       v + "compact=true\nsomething_new=42\n",
+		"a typo'd key":         v + "compact_min_ag=1h\n",
+		"an unparseable value": v + "compact_min_age=not-a-duration\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(dir, descriptorFileName),
 				[]byte(body), 0666))
 			_, err := readDescriptor(dir)
 			require.Error(t, err)
+			require.NotContains(t, err.Error(), "unsupported descriptor version",
+				"the body was refused by the version check, so the key parsing under "+
+					"test was never reached")
 		})
 	}
 
