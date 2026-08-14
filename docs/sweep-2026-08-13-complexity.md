@@ -875,6 +875,42 @@ different ordering): `compact`, `mergeDigests`, `open`, `cleanSegment`,
 pass and found to be carrying their reasons. Two independent rankings reaching
 the same functions and the same verdict is the signal that this lens is spent.
 
+Two more, from lenses that looked promising and were not:
+
+- **Nothing exported is unreferenced.** Every exported function, type, var and
+  const in the module has at least one use outside its own definition.
+- **The `compress` package needs nothing.** Its four switches over the codec set
+  are already closed by `TestEveryValidCodecRoundTripsItsDataAndItsName`, which
+  derives its cases from `Valid()` — the function that *defines* the set — rather
+  than from a literal list, floors the count so a broken bound cannot empty the
+  loop, and names the three failures it reaches worst-first. It is the model for
+  a test over a hand-written set.
+
+### The `Locked` suffix: a real inconsistency, deliberately left alone
+
+Nineteen functions document a lock the caller must already hold. Six carry the
+`Locked` suffix (`adoptTierManifestLocked`, `offloadMetaLocked`,
+`attachOffloadedLocked`, `shutErrorLocked`, `objectKeysLocked`, `evictLocked`);
+thirteen do not (`isOffloaded`, `withIndex`, `fetchBlockTable`, `scanForward`,
+`closeSegments`, `anchorPositionFor*`, …). The suffix's whole value is that the
+requirement is visible at the CALL site, which is where the mistake happens —
+and this repo has paid for a lock mistake before, when a lock-taking call added
+under `setupIndex` hung the suite for its full 30-minute timeout.
+
+Not taken, and the reason is worth recording so the next pass does not re-open it:
+the information is not missing, only placed differently — all nineteen say it in
+the doc — and renaming thirteen functions touches every call site to restate a
+rule the enclosing function's own body already establishes. More to the point,
+the suffix would not have caught the incident it is supposed to prevent:
+`setupIndex` requires no lock at all. What bit was a callee that TAKES one, and
+Go has no convention that marks those.
+
+One thing did come out of it. `notifyHWChange` says *"This must be called within
+the log mutex"* where the other eighteen say *"the caller holds …"*. A rule
+written a second way is the shape a mechanical check misses — the same finding as
+the dissimilar copy in `project_a_transcribed_rule_grows_a_dissimilar_copy`, in a
+place where nothing mechanical is looking yet.
+
 ## Follow-ups this pass opened
 
 - ~~**`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that
