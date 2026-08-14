@@ -1599,3 +1599,30 @@ bounds — `compact_cleaner.go:671` (`buildConc`, the digest builds) and
 under discussion, and there is no third expensive operation with a semaphore in
 one caller and none in another. The asymmetry found above was the only instance,
 not the first of a family.
+
+### Back-compat sweep, re-run over the format layers
+
+The standing brief says migrations and backwards compatibility should not exist
+before v1. Re-run over the format-carrying code, the answer is that they mostly
+already do not:
+
+- `block.go` and `block_table.go` both refuse an unrecognised version outright
+  — *"Clean cutover: pre-version segments are not supported"* — and
+  `blockformat_test.go` pins the refusal in both directions (a newer version and
+  a pre-version byte). Nothing to remove.
+- `block_table_local.go:80` explicitly retired its own compatibility argument
+  already, saying so in place.
+- The descriptor's v0 read support went earlier in this sweep.
+
+The one that reads like a survivor and is not: `Options.Compression`'s
+*"byte-for-byte compatible with logs written before compression existed;
+existing segments keep whatever format they were written in."* That is a live
+capability, not a migration path. `compress.None` is the zero value and a
+perfectly ordinary current setting, and a mixed-format log arises from a caller
+**changing** the option on a running log, not from history —
+`TestTurningCompressionOnLeavesExistingSegmentsRaw` names the distinction
+exactly: *a retune, not a migration*. Deleting the "detected as raw and stay
+raw" behaviour would break a supported operation today.
+
+Recorded because the grep for `compat|legacy|migrat` puts these four in one
+list, and three of them are already dead while the fourth only looks it.
