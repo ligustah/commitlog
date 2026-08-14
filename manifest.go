@@ -548,14 +548,24 @@ func (l *commitLog) adoptTierManifestLocked(objs []TierObject) (adopted int, err
 			continue
 		}
 		// A segment whose index was offloaded too is complete in the store. One
-		// that kept its index LOCAL is not: this directory has never held that
-		// index, so the segment would open with an empty one and read back as
+		// that kept its index LOCAL is not, when this directory has never held
+		// that index: the segment would open with an empty one and read back as
 		// though it had no records — present, described, and silently empty.
 		//
-		// Rebuild it from the object instead. That costs one pass over the
-		// segment, which is a single request now that a sweep streams, and it is
-		// what makes the tier genuinely self-contained rather than
-		// self-contained only when the index happened to be offloaded as well.
+		// Rebuild it from the object. That costs one pass over the segment, which
+		// is a single request now that a sweep streams, and it is what makes the
+		// tier genuinely self-contained rather than self-contained only when the
+		// index happened to be offloaded as well.
+		//
+		// Unconditional on purpose, and it is not the cost it looks like. The
+		// walk starts at the last indexed frame's end and runs while that is
+		// below the segment's size, so an index that already describes the object
+		// — which is every segment of an ordinary reopen, since offloading
+		// removes the local .log and keeps the .index — executes the loop body
+		// zero times and reads nothing. Guarding it on "does the local index
+		// match the manifest" was tried and reverted: it bought no I/O, and it
+		// added a second, weaker answer to a question this walk already answers
+		// exactly.
 		if o.IndexKey == "" {
 			// No floor: an offloaded segment is sealed and its backing is
 			// remote, so there is no torn tail to discard here — the walk only

@@ -9,6 +9,30 @@ library from that fork onward.
 
 ### Fixed
 
+- **Opening a block-compressed tier without a `RemoteIndexCache` made a remote
+  round trip per segment.** With the index kept local (option 1, which
+  durable_streams reports is their default tiered mode) `setupIndex` derives the
+  segment's last record from its index — and a block index anchors *blocks*, not
+  records, so the last anchor is a block's first message and finding the segment's
+  end means reading that final block back. For an offloaded segment that block is
+  in the store. Measured on an ordinary reopen of a 90k-record snappy tier:
+  40,947 bytes across 8 requests, one per segment, before serving anything.
+
+  Every manifest entry already carries `LastOffset` and `LastWriteTime`.
+  `setupIndexKnownEnd` takes them from the caller, so an open of a cache-less
+  tier now reads **zero** bytes of segment objects — the same promise the cached
+  configuration has kept since v0.71.0. Only the block branch is overridden: a
+  raw index has one entry per record, its last entry *is* the answer, and reading
+  it costs nothing, so overriding there would only hide a disagreement between
+  index and manifest.
+
+  The reason nothing caught it: the test asserting that an open reads no log
+  objects only ever ran with a cache configured, which is the configuration that
+  cannot reach this path. It has a cache-less sibling now, covering both boot
+  paths — including an assertion that adopting into a *fresh* directory still
+  downloads, because that rebuild is real and necessary and a test that only
+  checks for zeros would certify a version that skipped it everywhere.
+
 - **The manifest adopt sorted the live segment array in place.**
   `segmentsSnapshot`'s doc states the obligation on everyone who changes the
   segment set — readers index a snapshot *without* holding `l.mu`, so writing an

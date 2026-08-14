@@ -775,6 +775,74 @@ outcome check is only a check if the outcome is unreachable without the
 operation.** Falsify the counter, not just the assertion — a floor over a count
 that a vacuous run also produces is exactly the thing this whole section is about.
 
+## The same lens, pointed at a cost assertion instead of a correctness one
+
+`TestOpeningAnOffloadedTierReadsNoLogObjects` is a good test. It asserts a hard
+zero — an open must download none of its offloaded segments' bytes — it covers
+both boot paths, and it ends with "the work moved, it did not vanish" so the zero
+cannot be satisfied by a tier that never opened.
+
+It configures a `RemoteIndexCache` in every case, and the code path it needed to
+guard is reachable **only without one**.
+
+Tiering has two options. Option 2 offloads the index into the store; option 1
+keeps it on local disk, and durable_streams confirms cache-less is their
+**default** tiered mode. Under option 1 `setupIndex` derives the segment's last
+record from the local index — and a block index anchors *blocks*, so the last
+anchor is a block's first message and finding the end means reading that final
+block. For an offloaded segment that block is in the store. Measured on an
+ordinary reopen of a 90k-record snappy tier: **40,947 bytes across 8 requests,
+one per segment**, for two numbers every manifest entry already carries. On a
+tier of hundreds of segments against real object storage that is hundreds of
+round trips serialised into startup.
+
+Fixed by handing the boundaries in (`setupIndexKnownEnd`), and only for the
+branch that would otherwise pay for them: a raw index has one entry per record,
+so its last entry *is* the answer, and overriding it would only hide a
+disagreement between index and manifest.
+
+### The half of this finding that was not real, and what caught it
+
+The first version of the fix also made adoption's rebuild-the-index-from-the-object
+branch conditional, on the reasoning that it ran unconditionally for every
+option-1 entry and therefore downloaded the whole tier on every ordinary reopen.
+That reasoning was wrong, and the CHANGELOG entry claiming it was written before
+it was checked.
+
+What caught it: **measuring the pre-fix code against the new test** — reverting
+the branch to its original form and running the test that was supposed to prove
+it broken. It passed. `reconcileIndexTail` starts at the last indexed frame's end
+and runs while that is below the segment's size, so an index that already
+describes its object executes the loop body zero times and reads nothing. Its own
+CHANGELOG entry says so, in the release that introduced it.
+
+So the conditional bought no I/O at all, and it was reverted along with the
+predicate written to support it, the doc explaining the predicate, and the
+guardcheck guard pinning it. Two lessons, and the first is the uncomfortable one:
+
+- **A plausible cost is not a measured one.** Every step of the argument was
+  sound except the premise, and the fix, the test, the guard and the changelog
+  entry were all built on top of it before anything measured it. The check is
+  cheap and mechanical: put the old code back, run the new test, and require it
+  to go red. Same discipline as falsifying a guard, applied to a performance
+  claim instead of a correctness one.
+- **A comment can be true of one caller and read as true of all of them** — the
+  branch says *"this directory has never held that index"*, which is true of a
+  fresh directory and false of the one the log offloaded from. That reading is
+  what produced the wrong premise. It is the disease in
+  `project_a_retry_budget_belongs_to_the_caller`, and the tell is the same: ask
+  how many situations reach the code and whether the justification covers them
+  all. Here the answer happened not to matter, because the code was cheap in both
+  — but a justification that only covers one caller is worth rewriting even when
+  the behaviour it defends turns out to be right.
+
+What survived is the genuinely missing thing: the cache-less configuration had
+**no cost coverage whatsoever**, and the block-tail round trip was sitting in it.
+The new test covers both boot paths, and asserts the fresh-directory adopt still
+downloads — deleting a cost is not the same as deleting the work, and a test that
+only checks for zeros would certify a version that skipped the rebuild
+everywhere and opened every segment with an empty index.
+
 ## Follow-ups this pass opened
 
 - ~~**`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that

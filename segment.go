@@ -644,7 +644,16 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 		// and setupIndex validating it against the log is exactly the recovery
 		// that catches it. Option 2's index is in the store, written once, and
 		// has nothing to recover — which is why that path reads nothing at all.
-		return s, s.setupIndex()
+		//
+		// What IS avoidable is re-deriving the last record. A block segment's
+		// index anchors blocks, not records, so setupIndex would read the final
+		// block back out of the store to find where the segment ends — a remote
+		// round trip per segment, during open, for a number the manifest entry is
+		// already carrying.
+		return s, s.setupIndexKnownEnd(&segmentEnd{
+			Offset:    meta.LastOffset,
+			WriteTime: meta.LastWriteTime,
+		})
 	}
 
 	// Option 2: index offloaded. The boundaries setupIndex would recover come
@@ -887,12 +896,38 @@ func (s *segment) discardTornTail(keep, size int64) error {
 	return lb.f.Sync()
 }
 
+// segmentEnd is a segment's last record, for a caller that already knows it and
+// can spare setupIndex the work of finding it again.
+type segmentEnd struct {
+	Offset    int64
+	WriteTime int64
+}
+
 // setupIndex creates and initializes an index.
 // Initialization is:
 // - Initialize index position
 // - Initialize firstOffset/lastOffset
 // - Initialize firstWriteTime/lastWriteTime
-func (s *segment) setupIndex() (err error) {
+func (s *segment) setupIndex() error { return s.setupIndexKnownEnd(nil) }
+
+// setupIndexKnownEnd is setupIndex for a caller holding the segment's last
+// record already. end is advisory and is used in exactly one place: the block
+// branch below, where deriving the last offset means READING THE FINAL BLOCK —
+// out of the store, for an offloaded segment, once per segment before the log
+// serves anything. A tier manifest records LastOffset and LastWriteTime for
+// every entry, so the adoption path knows them without asking the object.
+//
+// It is a separate entry point rather than a field on the segment because the
+// other callers must keep deriving, and a boundary that is sometimes an input
+// and sometimes an output is the shape that eventually gets read the wrong way
+// round: swapReplacement assigns the rewrite's boundaries and THEN calls
+// setupIndex precisely so the index gets the last word.
+//
+// It does not touch the raw branch, and that is deliberate rather than an
+// oversight — a raw index carries one entry per record, so its last entry IS
+// the answer and reading it costs nothing. Overriding there would only mean a
+// disagreement between the index and the manifest could no longer surface.
+func (s *segment) setupIndexKnownEnd(end *segmentEnd) (err error) {
 	// Everything below maps a logical position onto the file — lastFrameInBlock
 	// and indexDescribesLog both do — so a deferred block table has to be
 	// fetched first.
@@ -957,6 +992,15 @@ func (s *segment) setupIndex() (err error) {
 		// through to its last message. The log (blocks, rebuilt by scanBlocks) is
 		// the source of truth for the physical extent; the last anchor's position
 		// marks the final block's logical start.
+		//
+		// Unless the caller already knows where the segment ends — see the doc.
+		// The scan is a read of the object, which for an offloaded segment is a
+		// remote round trip taken during open.
+		if end != nil {
+			s.lastOffset = end.Offset
+			s.lastWriteTime = end.WriteTime
+			return nil
+		}
 		last, err := s.lastFrameInBlock(lastEntry.Position)
 		if err != nil {
 			return errors.Wrap(err, "recover last offset failed")

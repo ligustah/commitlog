@@ -1250,6 +1250,14 @@ run_guard "a one-tier publish names a real tier" manifest.go   '	t, err := l.tie
 run_guard "a placement's tier must be configured" tier_move.go   '		t, err := l.tierByName(name)
 		if err != nil {'   '		t, _ := l.tierByName(name)
 		if false {'   '^TestAPlacementNamingAnUnconfiguredTierIsRefused$'
+
+# A block segment opened from a manifest takes its last record from that
+# manifest. Neutralized by deriving it instead, which reads the final block back
+# out of the store — once per segment, during open, for a number the entry is
+# already carrying. Caught by the cache-less open-cost test, which is the only
+# configuration that reaches this branch: with a RemoteIndexCache the index is
+# offloaded too and the boundaries never come from an index at all.
+run_guard "an offloaded block segment takes its end from the manifest" segment.go   '		if end != nil {'   '		if false {'   '^TestReopeningACacheLessOffloadedTierReadsNoLogObjects$'
 # DeleteStoreObjects checks every object's tier before deleting any of them.
 # Neutralized by folding the check back into the delete loop, which is the
 # order-dependent version this replaced: the batch runs until it REACHES an
