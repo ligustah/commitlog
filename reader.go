@@ -177,12 +177,38 @@ func (l *commitLog) newSourceReader(spec readSpec) (contextReader, error) {
 		} else {
 			cr, err = l.newReaderCommitted(spec.offset, !spec.follow)
 		}
-		// Each attempt takes its own segmentsSnapshot(), so a retry is
-		// resolving against the post-swap log rather than repeating the same
-		// lookup. A log that is closing or gone reports that instead: there is
-		// no replacement coming, and spinning would turn a clean shutdown into a
-		// hang.
-		if err == nil || !segmentSwapped(err) || l.IsClosed() || l.IsDeleted() {
+		if err == nil {
+			return cr, nil
+		}
+		// Each attempt takes its own segmentsSnapshot(), so a retry is resolving
+		// against the post-swap log rather than repeating the same lookup.
+		//
+		// A log that is closing or gone reports THAT, in the log's own spelling,
+		// which is the half this used to get wrong. The predicates were here
+		// already but only to stop the loop: the raw error went back unchanged,
+		// so a caller was handed ErrSegmentClosed — the sentinel segmentSwapped
+		// defines as the retryable one, and the very error the comment above
+		// describes as the thing retrying exists to absorb. A permanent state
+		// wore a transient error, and sqlcdc's operator retried a dead handle
+		// four times in under a millisecond before dying on it.
+		//
+		// Mirrors ReadMessage, deliberately and in the same order: the log's own
+		// state is tested BEFORE the swap sentinels, because "the log is gone"
+		// explains any error the resolve produced, and a caller that cannot tell
+		// it from a compaction swap has to guess whether to retry. One path
+		// translating and the other not is worse than either rule applied
+		// consistently.
+		//
+		// ReadMessage's third arm, ErrCommitLogReadonly, has no counterpart
+		// here: it re-returns a sentinel the error must already carry, and the
+		// pass-through below does exactly that.
+		if l.IsDeleted() {
+			return nil, ErrCommitLogDeleted
+		}
+		if l.IsClosed() {
+			return nil, ErrCommitLogClosed
+		}
+		if !segmentSwapped(err) {
 			return cr, err
 		}
 	}
