@@ -155,20 +155,40 @@ func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec)
 		last := int64(0)
 		lastOffset := int64(-1)
 		for life := 0; !stopped(); life++ {
-			// Stall now and then, long enough that retention runs past where the
-			// follower stopped. A consumer that pauses — for a slow handler, a
-			// rebalance, a GC — and comes back to find its position collected is
-			// the ordinary case, not an exotic one.
-			// Long enough that the writer lands more records than retention
-			// keeps, so the follower's position is certainly collected rather
-			// than nearly collected. At 250ms it came back ten offsets short of
-			// being overtaken, run after run — close enough to look covered and
-			// never actually be.
-			if life%6 == 5 {
-				select {
-				case <-stop:
-					return
-				case <-time.After(800 * time.Millisecond):
+			// Stall now and then, until retention has run past where the follower
+			// stopped. A consumer that pauses — for a slow handler, a rebalance,
+			// a GC — and comes back to find its position collected is the
+			// ordinary case, not an exotic one.
+			//
+			// Waiting for the CONDITION, not for a stretch of wall clock. This
+			// was 800ms, chosen because 250ms came back ten offsets short of
+			// being overtaken run after run — close enough to look covered and
+			// never actually be. But an interval picked that way describes one
+			// machine: the writer it has to outpace slows down under -race and
+			// under load exactly as everything else does, so on a busy box 800ms
+			// stopped buying enough records and `overtaken` stayed at zero. That
+			// is the LAST condition in `unmet`, so the run burned its whole
+			// 120-second deadline with every other one already met and failed on
+			// its own precondition — a red suite saying nothing about the log.
+			// The same shape as the 3000-write count described below, left
+			// behind by the same rewrite that removed it.
+			//
+			// `l.OldestOffset() > lastOffset` is not an approximation of being
+			// overtaken; it is the exact test the resume below makes. Waiting on
+			// it is bounded by the writer landing about MaxLogMessages more
+			// records whatever the machine's speed, and on an idle box it
+			// returns well inside the 800ms it replaces.
+			if life%6 == 1 {
+				// life 1 rather than life 5: the first five lifetimes bought
+				// nothing the assertions need, and 1-in-6 stalls thereafter is
+				// unchanged — most lifetimes must still resume where they left
+				// off, which is the other half of what this covers.
+				for l.OldestOffset() <= lastOffset {
+					select {
+					case <-stop:
+						return
+					case <-time.After(time.Millisecond):
+					}
 				}
 			}
 			// Resume where we got to, or at the oldest surviving record if
@@ -261,6 +281,12 @@ func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec)
 	// Waiting for the conditions the assertions below need makes the run
 	// self-pacing on any machine at any speed, and turns the deadline into the
 	// only thing that can be wrong — with a message naming what never happened.
+	//
+	// Which only holds while nothing INSIDE the run is paced by a constant. One
+	// was missed the first time — the follower's stall was a fixed 800ms — and
+	// it produced this failure again, one condition further along: a red run
+	// naming `overtaken` with every other condition met. The message did its
+	// job; see the stall for what it pointed at.
 	//
 	// Which is why the write count below must NOT be one of those conditions. It
 	// was 3000 and it was the last one met on every run, so it — not danger —
