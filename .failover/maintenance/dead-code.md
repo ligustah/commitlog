@@ -1,6 +1,6 @@
 ---
 name: Dead code detection
-interval: 5d
+interval: 7d
 after: 3
 paths: *.go, compress/*.go
 ---

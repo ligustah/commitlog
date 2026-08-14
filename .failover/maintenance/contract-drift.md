@@ -1,6 +1,6 @@
 ---
 name: Contract drift
-interval: 3d
+interval: 7d
 after: 2
 paths: interface.go, commitlog.go, CHANGELOG.md, README.md
 ---

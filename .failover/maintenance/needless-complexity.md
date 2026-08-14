@@ -1,6 +1,6 @@
 ---
 name: Needless complexity
-interval: 3d
+interval: 7d
 after: 2
 paths: *.go, compress/*.go, hack/*.sh
 ---

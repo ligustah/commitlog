@@ -1,6 +1,6 @@
 ---
 name: Dependency drift
-interval: 5d
+interval: 7d
 after: 3
 paths: go.mod, go.sum
 ---

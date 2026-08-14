@@ -1,6 +1,6 @@
 ---
 name: Assertion strength audit
-interval: 3d
+interval: 7d
 after: 2
 paths: *_test.go, compress/*_test.go
 ---

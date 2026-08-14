@@ -1,6 +1,6 @@
 ---
 name: Concurrency invariant sweep
-interval: 4d
+interval: 7d
 after: 2
 paths: commitlog.go, segment.go, index.go, compact_cleaner.go, delete_cleaner.go, reader.go
 ---
