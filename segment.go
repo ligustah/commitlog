@@ -1929,6 +1929,32 @@ func (s *segment) findBlock(logical int64) *blockRef {
 	return &s.blocks[i]
 }
 
+// blockAt returns the block containing a logical position, and whether the
+// segment has a block layout to answer with at all.
+//
+// It exists for PLANNERS rather than readers. findBlock runs under the read lock
+// and returns a pointer into s.blocks, which a caller outside the lock must not
+// keep; this copies the ref out under the lock instead.
+//
+// A raw segment answers false, and so does a block segment whose table has not
+// been fetched. Both send the caller to the logical measure, and for the block
+// case that is safe rather than merely tolerable: every caller reaches this
+// after findEntry, which calls ensureBlocksLoaded, so a table still pending here
+// would mean the segment had no locatable record to plan from in the first
+// place.
+func (s *segment) blockAt(logical int64) (blockRef, bool) {
+	s.RLock()
+	defer s.RUnlock()
+	if !s.blockMode || s.blocksPending {
+		return blockRef{}, false
+	}
+	b := s.findBlock(logical)
+	if b == nil {
+		return blockRef{}, false
+	}
+	return *b, true
+}
+
 // blockCopyIntoCache copies the block's decompressed bytes from srcOff into
 // dst, decoding at most once per block visit via a single-entry cache. The
 // cache OWNS its buffers and recycles them on displacement — callers only ever

@@ -332,10 +332,23 @@ else
   echo "guardcheck: removing each guard and requiring its test to fail"
 fi
 
+# Named tests rather than the ^TestKeyPrefixRefuses prefix it used to carry. The
+# prefix now also matches the digest-LESS test, which is on the other route
+# entirely and would keep passing -- a guard whose selection includes tests that
+# cannot see it is one bad fixture away from reporting NO COVERAGE, which is
+# exactly how this pair was found running on the scan path under collectRun's name.
 run_guard "prefix-read CRC" prefix_read.go \
   'if want, got := cp.Crc(), crc32.Checksum(cp[4:], crc32cTable); want != got {' \
   'if want, got := cp.Crc(), crc32.Checksum(cp[4:], crc32cTable); want != got && false {' \
-  '^TestKeyPrefixRefuses'
+  '^TestKeyPrefixRefusesRecordsThatFailCRC$|^TestKeyPrefixRefusesTieredRecordsThatFailCRC$'
+
+# The digest-LESS route's own check. Separate code with no shared helper, so the
+# guard above says nothing about it -- and this is the route every log with
+# Compact disabled is permanently on.
+run_guard "digest-less prefix-read CRC" prefix_source.go \
+  'if want, got := cp.Crc(), crc32.Checksum(cp[4:], crc32cTable); want != got {' \
+  'if want, got := cp.Crc(), crc32.Checksum(cp[4:], crc32cTable); want != got && false {' \
+  '^TestKeyPrefixRefusesRecordsThatFailCRCWithoutADigest$'
 
 run_guard "stripFrame CRC (no laundering)" compact_cleaner.go \
   'if want, got := msg.Crc(), crc32.Checksum(msg[4:], crc32cTable); want != got {' \
@@ -407,6 +420,27 @@ run_guard "a digest-less segment is scanned, not rebuilt" prefix_source.go \
 		}
 		return p.fetch(seg, hits)' \
   '^TestPrefixReadWithoutDigestsScansEachSegmentOnce$'
+
+# A block segment's runs must be planned in physical bytes. Reverting to the
+# logical measure returns exactly the same records -- the only thing that changes
+# is that the same block is fetched and decompressed once per hit inside it, so
+# nothing but a cost assertion can see it. Measured at the 4KB tier default: 120
+# requests where 3 suffice.
+run_guard "a block segment's runs are planned in physical bytes" prefix_read.go \
+  '			if blk, ok := seg.blockAt(e.Position); ok && prevOK {
+				split = blk.physStart-(prevBlk.physStart+prevBlk.physLen) > coalesce
+			} else {
+				split = e.Position-prevEnd > coalesce
+			}' \
+  '			split = e.Position-prevEnd > coalesce' \
+  '^TestPrefixReadOverBlocksThatAllHoldHitsIsBudgetIndependent$'
+
+# ...and the budget must still DO something where whole blocks can be skipped.
+# The guard above is satisfiable by never splitting at all; this one is not.
+run_guard "a physical gap wide enough still splits" prefix_read.go \
+  '				split = blk.physStart-(prevBlk.physStart+prevBlk.physLen) > coalesce' \
+  '				split = false' \
+  '^TestPrefixReadOverBlocksWithGapsStillHonoursTheBudget$'
 
 run_guard "readMessage CRC" reader.go \
   'if c := crc32.Checksum(m[4:], crc32cTable); crc != c {' \

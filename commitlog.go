@@ -309,6 +309,15 @@ type Options struct {
 	// PrefixReadTierConcurrency is what keeps them in flight, so the two work
 	// together: a smaller gap means more requests, and the fan-out is what makes
 	// that cheap in time.
+	//
+	// On a BLOCK-COMPRESSED segment (Compression set) the gap is measured in
+	// PHYSICAL bytes between the blocks holding the two records, not in the
+	// logical bytes between the records themselves — because nothing smaller
+	// than a block is ever transferred, so those are the only bytes a split can
+	// avoid. Two records in one block are therefore never split however far apart
+	// they are, and a budget below the compressed size of a block decides
+	// nothing. Set it against the block sizes a clean produces (~256KB
+	// uncompressed), not against the record spacing.
 	PrefixReadCoalesceBytes     int64
 	PrefixReadTierCoalesceBytes int64
 	// PrefixReadConcurrency and PrefixReadTierConcurrency are how many record

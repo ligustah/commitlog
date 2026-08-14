@@ -21,6 +21,11 @@ import (
 // what that tier charges for. So both the coalescing budget and the fan-out are
 // configured per tier and chosen per SEGMENT, since a log mid-offload holds
 // both kinds at once.
+//
+// A block-compressed segment is a THIRD case, and it is not a variation on
+// either: a record there cannot be addressed at all, only its whole block can,
+// so the second option does not exist and the first is priced in blocks rather
+// than in bytes. planRuns is where that difference lives.
 
 // How wide a gap between wanted records is read THROUGH rather than split into a
 // second request. Per tier, because that is where the setting can be attached —
@@ -40,6 +45,14 @@ import (
 // shape tested — coalescing everything — so a default justified on price was
 // sitting an order of magnitude above the price breakeven. A deployment reading
 // from inside the same region, where bytes really are free, should raise it.
+//
+// That measurement's fixture is UNCOMPRESSED, which is not a gap in it — the
+// price argument above is about bytes on the wire and needs no blocks — but it
+// does mean the number says nothing about a block-compressed tier. There the
+// budget is compared against physical inter-block distances (planRuns), and
+// 4.4KB is below the compressed size of a single clean-produced block, so it
+// coalesces within a block always and across blocks almost never.
+// TestPrefixReadOverBlocksThatAllHoldHitsIsBudgetIndependent covers that side.
 const (
 	defaultPrefixReadCoalesceBytes     = 4 << 20
 	defaultPrefixReadTierCoalesceBytes = 4 << 10
@@ -106,26 +119,60 @@ type prefixRun struct {
 }
 
 // planRuns groups one segment's wanted offsets (ascending) into runs, splitting
-// wherever the byte gap to the next record exceeds coalesce.
+// wherever the gap to the next record exceeds coalesce.
+//
+// The gap is measured in the currency the SEGMENT is actually billed in, and the
+// two kinds do not share one. On a raw segment the logical byte space is the
+// file, so the bytes between two records are exactly the bytes a split avoids.
+// On a block-compressed segment index positions are still logical, but nothing
+// smaller than a whole block is ever transferred or decompressed
+// (blockCopyIntoCache), so what a split can avoid is only the PHYSICAL bytes of
+// the blocks lying entirely between the two records.
+//
+// Measuring a block segment logically is not a rounding error, it inverts the
+// setting. Two records in one block have a NEGATIVE physical gap and can never
+// be worth splitting — yet a logical gap between them can be arbitrarily large,
+// and fetchRuns hands every run its own blockCache, so the split fetches and
+// decompresses that one block twice rather than skipping anything. Measured on a
+// tiered log with ~50KB blocks and a hit every ~6KB, the 4KB tier default cost
+// 120 requests and 315KB where a 16KB budget cost 3 and 7.8KB: forty times the
+// requests AND forty times the bytes, for the same records
+// (TestPrefixReadOverBlocksThatAllHoldHitsIsBudgetIndependent).
 func planRuns(seg *segment, offs []int64, coalesce int64) ([]prefixRun, error) {
 	var (
-		runs   []prefixRun
-		cur    prefixRun
-		cursor int64 = -1
+		runs    []prefixRun
+		cur     prefixRun
+		started bool
+		// Where the previous record ended, in both currencies: the logical byte
+		// just past it, and the block that byte falls in. Exactly one is
+		// consulted, decided by whether the segment has a block layout.
+		prevEnd int64
+		prevBlk blockRef
+		prevOK  bool
 	)
 	for _, off := range offs {
 		e, err := seg.findEntry(off)
 		if err != nil {
 			return nil, errors.Wrapf(err, "locate prefix-read record at offset %d", off)
 		}
-		if cursor < 0 || e.Position-cursor > coalesce {
+		split := true
+		if started {
+			if blk, ok := seg.blockAt(e.Position); ok && prevOK {
+				split = blk.physStart-(prevBlk.physStart+prevBlk.physLen) > coalesce
+			} else {
+				split = e.Position-prevEnd > coalesce
+			}
+		}
+		if split {
 			if len(cur.offs) > 0 {
 				runs = append(runs, cur)
 			}
 			cur = prefixRun{start: e.Position}
 		}
 		cur.offs = append(cur.offs, off)
-		cursor = e.Position + int64(e.Size)
+		started = true
+		prevEnd = e.Position + int64(e.Size)
+		prevBlk, prevOK = seg.blockAt(prevEnd - 1)
 	}
 	if len(cur.offs) > 0 {
 		runs = append(runs, cur)
