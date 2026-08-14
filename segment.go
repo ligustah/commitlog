@@ -505,7 +505,30 @@ func emptySegment(path string, baseOffset, maxBytes int64, codec compress.Codec)
 	}
 }
 
-func newSegment(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec) (*segment, error) {
+// newSegment creates a segment at baseOffset and refuses one that is already
+// there. Every caller that means "this is a new segment" — a roll, an empty
+// log, the local head after a tier adoption — wants that refusal: reaching an
+// existing file means two segments believe they own one base offset, and the
+// second would append into the first's records.
+func newSegment(path string, baseOffset, maxBytes int64, codec compress.Codec) (*segment, error) {
+	return newSegmentWith(path, baseOffset, maxBytes, true, "", codec)
+}
+
+// openSegment adopts the segment already at baseOffset, and creates one if the
+// file is absent. Its caller is open(), which found the .log in a directory
+// listing — so absence here is a file that vanished between the listing and
+// this call, and an empty segment is the same thing the directory would have
+// produced a moment earlier.
+func openSegment(path string, baseOffset, maxBytes int64, codec compress.Codec) (*segment, error) {
+	return newSegmentWith(path, baseOffset, maxBytes, false, "", codec)
+}
+
+// newSegmentWith is the shared body. The two booleans-worth of choice stay
+// here rather than at the call sites, which used to spell out both: the one
+// decision that matters — refuse an existing file, or adopt it — sat behind a
+// bare `true` that read as noise at all 25 of them, next to an empty string
+// that never varied except through newWorkingSegment.
+func newSegmentWith(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec) (*segment, error) {
 	s := emptySegment(path, baseOffset, maxBytes, codec)
 	s.suffix = suffix
 	s.dirtyData = true
@@ -2171,7 +2194,7 @@ func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, c
 			return nil, errors.Wrap(err, "remove stale rewrite working copy")
 		}
 	}
-	return newSegment(path, baseOffset, maxBytes, false, suffix, codec)
+	return newSegmentWith(path, baseOffset, maxBytes, false, suffix, codec)
 }
 
 // objectKeysLocked returns the store objects this segment currently consists

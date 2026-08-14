@@ -28,7 +28,7 @@ import (
 // the same reason a disk error would — the flush did not happen.
 func TestSealKeepsTheDirtyMarkWhenTheFlushFails(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Snappy)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Snappy)
 	require.NoError(t, err)
 	t.Cleanup(func() { seg.Close() })
 
@@ -55,7 +55,7 @@ func TestSealKeepsTheDirtyMarkWhenTheFlushFails(t *testing.T) {
 // never be able to say "already durable".
 func TestSealClearsTheDirtyMarkWhenTheFlushSucceeds(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Snappy)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Snappy)
 	require.NoError(t, err)
 	t.Cleanup(func() { seg.Close() })
 

@@ -128,6 +128,15 @@ library from that fork onward.
   `commitLog.init()` went with it: a `MkdirAll` on a directory `New` had
   created forty lines earlier, with no other caller.
 
+- `newSegment` no longer takes a bool and an empty string at every call site.
+  Its signature ended `..., isNew bool, suffix string, codec` and all 25 callers
+  spelled out `true, ""` or `false, ""` — putting the one decision that matters,
+  refuse an existing file or adopt it, behind a bare `true` that reads as noise,
+  beside a string that never varied except through `newWorkingSegment`. It is
+  `newSegment` (create, refuse an existing file) and `openSegment` (adopt what
+  the directory listing found) now, over a shared `newSegmentWith` that keeps
+  both parameters for `newWorkingSegment`. No behaviour change.
+
 ## v0.84.0 — 2026-08-14
 
 ### Breaking

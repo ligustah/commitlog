@@ -22,7 +22,7 @@ func indexFileSize(t *testing.T, seg *segment) int64 {
 // the index is dramatically smaller than the dense per-record index.
 func TestSparseIndexOneEntryPerBlock(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Zstd)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Zstd)
 	require.NoError(t, err)
 
 	const blocks = 5
@@ -46,7 +46,7 @@ func TestSparseIndexOneEntryPerBlock(t *testing.T) {
 	// Compare against a dense (raw) segment with the same messages: its index
 	// is ~1000x larger (one entry per record).
 	dirRaw := tempDir(t)
-	segRaw, err := newSegment(dirRaw, 0, 1<<30, true, "", compress.None)
+	segRaw, err := newSegment(dirRaw, 0, 1<<30, compress.None)
 	require.NoError(t, err)
 	for b := 0; b < blocks; b++ {
 		writeSet(t, segRaw, compressibleMsgs(perBlock))
@@ -64,7 +64,7 @@ func TestSparseIndexOneEntryPerBlock(t *testing.T) {
 // one-entry-per-message index unchanged.
 func TestSparseIndexRawStillDense(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.None)
+	seg, err := newSegment(dir, 0, 1<<30, compress.None)
 	require.NoError(t, err)
 	t.Cleanup(func() { seg.Close() })
 
@@ -190,7 +190,7 @@ func TestSparseRecoverySeek(t *testing.T) {
 // with per-block granularity plus forward scan on compressed segments.
 func TestSparseTimestampSeek(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Zstd)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Zstd)
 	require.NoError(t, err)
 	t.Cleanup(func() { seg.Close() })
 

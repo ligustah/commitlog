@@ -24,7 +24,7 @@ import (
 // to go red against is not a guard.
 func TestACleanIndexIsClosedWithoutAFlush(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Snappy)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Snappy)
 	require.NoError(t, err)
 
 	writeSet(t, seg, compressibleMsgs(10))
@@ -54,7 +54,7 @@ func TestACleanIndexIsClosedWithoutAFlush(t *testing.T) {
 // out. This is the active segment at every clean shutdown.
 func TestADirtyIndexIsStillFlushedAtClose(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Snappy)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Snappy)
 	require.NoError(t, err)
 
 	writeSet(t, seg, compressibleMsgs(10))
@@ -75,7 +75,7 @@ func TestADirtyIndexIsStillFlushedAtClose(t *testing.T) {
 // case CloseDiscarding was added for.
 func TestADiscardedCloseFlushesNothing(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Snappy)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Snappy)
 	require.NoError(t, err)
 
 	writeSet(t, seg, compressibleMsgs(10))

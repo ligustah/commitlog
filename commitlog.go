@@ -822,7 +822,7 @@ func (l *commitLog) open() error {
 			if err != nil {
 				return err
 			}
-			segment, err := newSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, false, "", l.Compression)
+			segment, err := openSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, l.Compression)
 			if err != nil {
 				return err
 			}
@@ -910,14 +910,14 @@ func (l *commitLog) open() error {
 	// directory, so give it one starting where the tier ends.
 	if n := len(l.segments); n > 0 && l.segments[n-1].isOffloaded() {
 		next := l.segments[n-1].NextOffset()
-		segment, err := newSegment(l.Path, next, l.MaxSegmentBytes, true, "", l.Compression)
+		segment, err := newSegment(l.Path, next, l.MaxSegmentBytes, l.Compression)
 		if err != nil {
 			return err
 		}
 		l.segments = append(l.segments, segment)
 	}
 	if len(l.segments) == 0 {
-		segment, err := newSegment(l.Path, 0, l.MaxSegmentBytes, true, "", l.Compression)
+		segment, err := newSegment(l.Path, 0, l.MaxSegmentBytes, l.Compression)
 		if err != nil {
 			return err
 		}
@@ -2511,7 +2511,7 @@ func (l *commitLog) checkAndPerformSplit() (bool, error) {
 
 func (l *commitLog) split(oldActiveSegment *segment) error {
 	offset := l.NewestOffset() + 1
-	segment, err := newSegment(l.Path, offset, l.MaxSegmentBytes, true, "", l.Compression)
+	segment, err := newSegment(l.Path, offset, l.MaxSegmentBytes, l.Compression)
 	if err != nil {
 		return err
 	}

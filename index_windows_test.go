@@ -146,7 +146,7 @@ func TestIndexExpandWindows(t *testing.T) {
 func TestSegmentCloseWindows(t *testing.T) {
 	dir := tempDir(t)
 
-	s, err := newSegment(dir, 0, 512, true, "", compress.None)
+	s, err := newSegment(dir, 0, 512, compress.None)
 	require.NoError(t, err)
 
 	ms, entries, err := newMessageSetFromProto(0, 0,

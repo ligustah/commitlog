@@ -28,7 +28,7 @@ import (
 func TestAFailedReplaceLeavesTheSourceReadable(t *testing.T) {
 	dir := tempDir(t)
 
-	source, err := newSegment(dir, 0, 1<<20, true, "", compress.None)
+	source, err := newSegment(dir, 0, 1<<20, compress.None)
 	require.NoError(t, err)
 	ms, entries, err := newMessageSetFromProto(0, 0,
 		[]*Message{{Value: []byte("original")}})

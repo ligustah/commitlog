@@ -9,7 +9,7 @@ import (
 )
 
 func createSegment(t *testing.T, dir string, baseOffset, maxBytes int64) *segment {
-	s, err := newSegment(dir, baseOffset, maxBytes, false, "", compress.None)
+	s, err := openSegment(dir, baseOffset, maxBytes, compress.None)
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
 	return s

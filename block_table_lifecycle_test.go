@@ -77,7 +77,7 @@ func TestOffloadingASegmentRemovesItsLocalBlockTable(t *testing.T) {
 func TestInstallingARewriteDropsTheReplacedBlockTable(t *testing.T) {
 	dir := tempDir(t)
 
-	source, err := newSegment(dir, 0, 1<<20, true, "", compress.Snappy)
+	source, err := newSegment(dir, 0, 1<<20, compress.Snappy)
 	require.NoError(t, err)
 	ms, entries, err := newMessageSetFromProto(0, 0,
 		[]*Message{{Value: []byte("original")}})

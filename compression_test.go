@@ -73,7 +73,7 @@ func TestSegmentBlockTransparency(t *testing.T) {
 		for _, chunk := range []int{1, 7, 64, 1000, 65536} {
 			t.Run(codec.String()+"/chunk="+strconv.Itoa(chunk), func(t *testing.T) {
 				dir := tempDir(t)
-				seg, err := newSegment(dir, 0, 1<<30, true, "", codec)
+				seg, err := newSegment(dir, 0, 1<<30, codec)
 				require.NoError(t, err)
 				t.Cleanup(func() { seg.Close() })
 
@@ -99,7 +99,7 @@ func TestSegmentBlockRecovery(t *testing.T) {
 	for _, codec := range allCodecs {
 		t.Run(codec.String(), func(t *testing.T) {
 			dir := tempDir(t)
-			seg, err := newSegment(dir, 0, 1<<30, true, "", codec)
+			seg, err := newSegment(dir, 0, 1<<30, codec)
 			require.NoError(t, err)
 
 			var want []byte
@@ -110,7 +110,7 @@ func TestSegmentBlockRecovery(t *testing.T) {
 			require.NoError(t, seg.Close())
 
 			// Reopen (isNew=false) — triggers format detection + scanBlocks.
-			seg2, err := newSegment(dir, 0, 1<<30, false, "", codec)
+			seg2, err := openSegment(dir, 0, 1<<30, codec)
 			require.NoError(t, err)
 			t.Cleanup(func() { seg2.Close() })
 
@@ -127,7 +127,7 @@ func TestSegmentBlockRecovery(t *testing.T) {
 // roundtrips.
 func TestSegmentIncompressibleStoredRaw(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Zstd)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Zstd)
 	require.NoError(t, err)
 	t.Cleanup(func() { seg.Close() })
 
@@ -148,7 +148,7 @@ func TestSegmentIncompressibleStoredRaw(t *testing.T) {
 // incompressible blocks reads back correctly (per-block codec).
 func TestSegmentMixedBlocks(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Zstd)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Zstd)
 	require.NoError(t, err)
 	t.Cleanup(func() { seg.Close() })
 
@@ -170,7 +170,7 @@ func TestSegmentMixedBlocks(t *testing.T) {
 // and spanning blocks) return the right slice, matching a raw-mode segment.
 func TestSegmentReadAtOffsets(t *testing.T) {
 	dir := tempDir(t)
-	seg, err := newSegment(dir, 0, 1<<30, true, "", compress.Zstd)
+	seg, err := newSegment(dir, 0, 1<<30, compress.Zstd)
 	require.NoError(t, err)
 	t.Cleanup(func() { seg.Close() })
 
@@ -365,13 +365,13 @@ func TestCompressionSavesSpace(t *testing.T) {
 	msgs := compressibleMsgs(2000)
 
 	dirRaw := tempDir(t)
-	segRaw, err := newSegment(dirRaw, 0, 1<<30, true, "", compress.None)
+	segRaw, err := newSegment(dirRaw, 0, 1<<30, compress.None)
 	require.NoError(t, err)
 	t.Cleanup(func() { segRaw.Close() })
 	writeSet(t, segRaw, msgs)
 
 	dirZ := tempDir(t)
-	segZ, err := newSegment(dirZ, 0, 1<<30, true, "", compress.Zstd)
+	segZ, err := newSegment(dirZ, 0, 1<<30, compress.Zstd)
 	require.NoError(t, err)
 	t.Cleanup(func() { segZ.Close() })
 	writeSet(t, segZ, msgs)
