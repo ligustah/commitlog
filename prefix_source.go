@@ -2,6 +2,9 @@ package commitlog
 
 import (
 	"bytes"
+	"fmt"
+	"hash/crc32"
+	"io"
 	"sort"
 
 	"github.com/pkg/errors"
@@ -10,15 +13,30 @@ import (
 // A KeyPrefix read is served two different ways, and the seam between them is
 // where the digests stop existing.
 //
-// Over SEALED segments, prefixSource plans from the key digest: it learns which
-// offsets in a segment carry matching keys without reading a record, then reads
-// only those. That is the acceleration — cost tracks the records returned
-// rather than the records the log holds.
+// Over a SEALED segment that HAS a digest, prefixSource plans from it: it learns
+// which offsets carry matching keys without reading a record, then reads only
+// those. That is the acceleration — cost tracks the records returned rather than
+// the records the log holds.
 //
-// Over the ACTIVE segment there is no digest, so there is nothing to plan from
-// and the Reader falls back to reading records and testing them. Once it does,
-// it stays there: it has caught up with the live tail, where records arrive one
-// at a time and per-record filtering is the only thing available anyway.
+// Everywhere else there is nothing to plan from, and the answer is to read
+// records and test them. That covers two cases, not one:
+//
+//   - The ACTIVE segment, which never has a digest. Once the Reader reaches it
+//     it stays there: it has caught up with the live tail, where records arrive
+//     one at a time and per-record filtering is the only thing available anyway.
+//   - A SEALED segment with no usable digest — absent, corrupt, or stale. This
+//     is the permanent state of every sealed segment on a log with Compact
+//     disabled, because the compact cleaner is the only thing that ever writes a
+//     sidecar, so it is a steady state and not a transient one.
+//
+// The second case used to BUILD a digest and throw it away. That was strictly
+// more work than the scan it was avoiding: buildKeyDigest reads every record in
+// the segment AND holds a map over every distinct key in it, and the offsets it
+// produced were then read a second time. It is the same allocation the compact
+// cleaner caps at two concurrent builds, having measured ten of them over
+// ~40MB segments at >1GB — and on this path nothing capped it at all, since the
+// number in flight is however many readers happen to be doing prefix reads.
+// scanSegmentFiltered replaces it with one pass that keeps only what matches.
 //
 // Planning is LAZY, one segment at a time, so a filtered read starts returning
 // records immediately and holds at most one segment's matching records in
@@ -42,6 +60,18 @@ type prefixSource struct {
 
 	// next is the offset planning resumes from.
 	next int64
+	// servedThrough is NextOffset of the last segment whose records were
+	// queued: the point the SEARCH has reached, as distinct from next, which
+	// is the point a resumed READ must continue from.
+	//
+	// They differ because pop walks next back to the last record it served, so
+	// a segment whose records have all been handed out still looks unfinished
+	// to the loop below — its NextOffset is above next. Without this the loop
+	// visits every segment a second time to discover it has nothing left. With
+	// a digest that second visit is nearly free, which is why it survived; with
+	// no digest it is an entire extra pass over the segment, and it doubled the
+	// cost of exactly the reads scanSegmentFiltered exists to make cheaper.
+	servedThrough int64
 	// done is set once there are no sealed segments left to plan: the caller
 	// switches to reading the tail sequentially.
 	done bool
@@ -86,6 +116,11 @@ func (p *prefixSource) pop() (prefixQueued, bool, error) {
 // matching records, leaving them in the queue.
 func (p *prefixSource) fillFromNextSegment() error {
 	p.queue, p.qi = p.queue[:0], 0
+	// Resume the search past the segment that was just drained. See
+	// servedThrough: pop left next pointing at the last record it served.
+	if p.servedThrough > p.next {
+		p.next = p.servedThrough
+	}
 
 	segments := p.log.segmentsSnapshot()
 	if len(segments) == 0 {
@@ -103,41 +138,144 @@ func (p *prefixSource) fillFromNextSegment() error {
 			p.done = true
 			return nil
 		}
-		hits, err := p.planSegment(seg, bound)
+		recs, err := p.serveSegment(seg, bound)
 		if err != nil {
 			return err
 		}
-		if len(hits) == 0 {
-			// Nothing here — skip the whole segment without reading a record.
-			// This is the case a scan cannot do and the digest can.
-			p.next = seg.NextOffset()
+		p.next = seg.NextOffset()
+		if len(recs) == 0 {
+			// Nothing here. With a digest this cost no reads at all — skipping a
+			// whole segment unread is the thing a scan cannot do and the digest
+			// can. Without one it cost a scan, which is the price of not having
+			// the digest rather than a price this branch adds.
 			continue
 		}
-		recs, err := p.fetch(seg, hits)
-		if err != nil {
-			return err
-		}
+		p.servedThrough = seg.NextOffset()
 		p.queue = recs
-		p.next = seg.NextOffset()
 		return nil
 	}
 	p.done = true
 	return nil
 }
 
-// planSegment returns the offsets in seg to read, ascending.
-func (p *prefixSource) planSegment(seg *segment, bound int64) ([]int64, error) {
+// serveSegment returns the matching records of one sealed segment, in offset
+// order, by whichever of the two routes the segment's digest allows.
+//
+// The digest stays an OPTIMISATION rather than the definition: both routes
+// return the same records, and only the cost differs. That is what
+// TestReaderKeyPrefixMatchesScan pins by running its whole comparison three
+// times — freshly built digests, persisted sidecars, and none at all.
+func (p *prefixSource) serveSegment(seg *segment, bound int64) ([]prefixQueued, error) {
 	d := loadKeyDigest(seg)
 	if d == nil {
-		// No usable sidecar. Rebuilding by scanning keeps the digest an
-		// OPTIMISATION rather than the definition: the records returned are
-		// the same either way, and only the cost differs.
-		var err error
-		if d, err = buildKeyDigest(seg, newBlockCache()); err != nil {
-			return nil, errors.Wrap(err, "build key digest for prefix read")
+		return p.scanSegmentFiltered(seg, bound)
+	}
+	hits, err := digestHits(d, p.spec, p.next, bound)
+	if err != nil {
+		return nil, err
+	}
+	if len(hits) == 0 {
+		return nil, nil
+	}
+	return p.fetch(seg, hits)
+}
+
+// scanSegmentFiltered reads one segment start to finish and keeps the records
+// the read wants, for a segment whose digest is missing, corrupt or stale.
+//
+// It is the same filtering the Reader applies to the active segment, and it
+// answers in ONE pass: the alternative it replaced built a whole key digest
+// just to learn the offsets, then read those offsets again. The map here is
+// keyed by MATCHING keys only, where a digest build holds every distinct key in
+// the segment — so the memory the compact cleaner bounds so carefully is not
+// merely bounded on this path, it is not allocated.
+//
+// io.EOF is how this stops, the ordinary meaning: unlike collectRun, which is
+// hunting specific offsets a digest named and so treats reaching the end as
+// damage, this one has no promise to fall short of. It reads what is there.
+func (p *prefixSource) scanSegmentFiltered(seg *segment, bound int64) ([]prefixQueued, error) {
+	// newSegmentScannerCache, not a literal: it registers the reader's claim on
+	// the backing under one lock, and a tiered object read without that claim can
+	// be reclaimed underneath the scan. collectRun says the same thing.
+	ss := newSegmentScannerCache(seg, newBlockCache())
+	defer ss.Close() // nolint: errcheck — read-only
+
+	var (
+		out  []prefixQueued
+		dead []bool
+		// skipSuperseded: index into out of the newest copy of each key seen so
+		// far. Decided WITHIN this segment, exactly as digestHits decides it —
+		// which is what makes the two routes agree.
+		latest map[string]int
+	)
+	if p.spec.skipSuperseded {
+		latest = make(map[string]int)
+	}
+	for {
+		ms, _, err := ss.Scan()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("%w: prefix scan of segment %d: %w",
+				ErrSegmentUnreadable, seg.BaseOffset, err)
+		}
+		off := ms.Offset()
+		if off < p.next || (bound >= 0 && off > bound) {
+			continue
+		}
+		var (
+			msg     = ms.Message()
+			attrs   = msg.Attributes()
+			control = attrs&AttrControl != 0
+			key     = msg.Key()
+		)
+		switch {
+		case control:
+			// No key at all, so the prefix cannot speak to it; IncludeControl is
+			// the only thing that admits one. Checked BEFORE the key test below,
+			// which would otherwise drop it as unkeyed.
+			if !p.spec.includeControl {
+				continue
+			}
+		case key == nil || !bytes.HasPrefix(key, p.spec.keyPrefix):
+			// Unkeyed records cannot match a prefix, and non-matching ones are
+			// the whole point of the filter.
+			continue
+		}
+		cp := make(SerializedMessage, len(msg))
+		copy(cp, msg)
+		// The CRC, for the reason collectRun gives at length: every route that
+		// hands a record to a caller checks it, and a corrupt record served
+		// because a digest happened not to exist would be the one route that
+		// did not. The copy above already touched every byte.
+		if want, got := cp.Crc(), crc32.Checksum(cp[4:], crc32cTable); want != got {
+			return nil, errors.Wrapf(ErrCorruptRecord,
+				"record at offset %d: expected CRC 0x%08x, got 0x%08x", off, want, got)
+		}
+		rec := prefixQueued{msg: cp, offset: off, ts: ms.Timestamp(), epoch: ms.LeaderEpoch()}
+		if latest != nil && !control {
+			if i, ok := latest[string(key)]; ok {
+				// Retire the earlier copy in place rather than overwriting it
+				// with this one: out is built in offset order, and reusing the
+				// old slot would put this record back at the old one's position.
+				dead[i] = true
+			}
+			latest[string(key)] = len(out)
+		}
+		out = append(out, rec)
+		dead = append(dead, false)
+	}
+	if latest == nil {
+		return out, nil
+	}
+	kept := out[:0]
+	for i, rec := range out {
+		if !dead[i] {
+			kept = append(kept, rec)
 		}
 	}
-	return digestHits(d, p.spec, p.next, bound)
+	return kept, nil
 }
 
 // digestHits walks a digest's keyed section and returns the offsets whose keys

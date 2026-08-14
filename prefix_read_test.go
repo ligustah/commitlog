@@ -591,6 +591,14 @@ func offloadedPrefixLog(t *testing.T) (*commitLog, int64) {
 		app(&Message{Key: []byte(fmt.Sprintf("pad:%03d", i)), Value: []byte("pad padding here")})
 	}
 
+	// The digests these per-tier assertions are about. DisableAutoClean means
+	// nothing runs a pass by itself, and the compact cleaner is the only thing
+	// that persists a sidecar — without this every sealed segment is digest-less,
+	// and a digest-less segment is served by scanning and filtering, where no
+	// coalesce budget applies and no run splitting happens. The budget assertions
+	// below would compare a number against itself. See costLog for the same note.
+	requireCleanOK(t, l, CleanSpec{Ceiling: At(l.HighWatermark())})
+
 	bound := l.ActiveSegmentBase() - 1
 	// ActiveSegmentBase, not bound: a segment ending at bound has NextOffset
 	// == ActiveSegmentBase, so offloading "before bound" leaves that last

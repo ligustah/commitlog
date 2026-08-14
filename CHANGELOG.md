@@ -9,6 +9,41 @@ library from that fork onward.
 
 ### Changed
 
+- A `KeyPrefix` read over a sealed segment with no key digest now scans the
+  segment once and filters, instead of building a whole digest and discarding
+  it. This is not an edge case: the compact cleaner is the only thing that
+  persists a `.keys` sidecar, so on a log that never compacts *no* sealed
+  segment has one and *none ever will* — every prefix read paid this, forever.
+
+  The old fallback was strictly more expensive than the scan it was avoiding.
+  `buildKeyDigest` reads every record in the segment **and** holds a map over
+  every distinct key in it; the digest was then thrown away and the offsets it
+  named were read a second time. The map is the part that matters:
+  `loadOrBuildDigests` caps itself at two concurrent builds because ten of them
+  over ~40MB segments measured >1GB, and nothing capped this path at all —
+  `PrefixReadConcurrency` bounds record *reads*, not digest builds, so the
+  number in flight was however many readers happened to be doing prefix reads.
+
+  Records returned are unchanged, which `TestReaderKeyPrefixMatchesScan` has
+  always pinned by running its whole comparison with no sidecars present. The
+  new path keeps the same CRC refusal `collectRun` performs (verified by
+  mutation: `FuzzCorruptedRecordIsNeverServedSilently` catches its removal on
+  the keyprefix route) and the same within-segment `SkipSuperseded` rule
+  `digestHits` applies.
+
+  A second, older inefficiency fell out of it: the search loop visited every
+  segment **twice**, because `pop` walks the resume offset back to the last
+  record it served, leaving a fully drained segment still looking unfinished.
+  With a digest that second visit was nearly free, which is why it survived
+  unnoticed; it is now skipped outright via `servedThrough`, so the digest path
+  saves a redundant plan per segment as well.
+
+  Two cost tests were measuring the wrong path and are corrected: `costLog` and
+  `offloadedPrefixLog` both set `Compact: true` with `DisableAutoClean: true`
+  and never cleaned, so their segments had no digests and every measured run
+  silently paid a full rebuild scan underneath the numbers it was comparing.
+  Both now clean before offloading.
+
 - Dropped the `github.com/dustin/go-humanize` dependency. It was in `go.mod`
   for exactly one call — `english.Plural` in a leader-epoch parse error, so
   that a count could say "entries" instead of "entrys". The count there is

@@ -124,6 +124,21 @@ func costLog(t *testing.T, records, every int) (*commitLog, *costStore, int64) {
 		app(&Message{Key: []byte(fmt.Sprintf("pad:%03d", i)), Value: make([]byte, 200)})
 	}
 
+	// Give the sealed segments their digests, which is what makes this a
+	// measurement of the coalesce budget rather than of something else.
+	//
+	// DisableAutoClean above means nothing runs a pass on its own, and the
+	// compact cleaner is the ONLY thing that persists a digest sidecar. Without
+	// this call every segment here is digest-less, and a prefix read over a
+	// digest-less segment does not plan-and-fetch at all — it scans the segment
+	// and filters, where no coalesce budget applies. The numbers below would then
+	// be identical at every budget, which is exactly what they became when the
+	// scan path replaced the old build-a-digest-and-discard-it fallback.
+	//
+	// Nothing is dropped (every key here is distinct); the pass is run for the
+	// sidecars it leaves behind.
+	requireCleanOK(t, l, CleanSpec{Ceiling: At(l.HighWatermark())})
+
 	bound := l.ActiveSegmentBase() - 1
 	n, err := l.OffloadBefore(l.ActiveSegmentBase())
 	require.NoError(t, err)

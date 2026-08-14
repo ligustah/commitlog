@@ -73,10 +73,16 @@ func Uncommitted() ReadOption {
 // non-nil) prefix matches every KEYED record; not calling this at all returns
 // every record, keyed or not.
 //
-// Over sealed segments this is served from the key digests, so only matching
-// records are read rather than every record being read and tested. The active
-// segment holds no digest, so its records are scanned and filtered one at a
-// time — the acceleration is a property of having a digest, not of the API.
+// Over a sealed segment that has a key digest this is served from it, so only
+// matching records are read rather than every record being read and tested.
+// Without one the segment is scanned and filtered in a single pass, which is
+// what the active segment always gets — the acceleration is a property of
+// having a digest, not of the API.
+//
+// Worth knowing which logs have them: the compact cleaner is the only thing
+// that writes a digest, so on a log with Compact disabled NO sealed segment has
+// one and a prefix read costs a scan per segment, every time. That is a correct
+// read and a permanent cost, not a warm-up.
 //
 // Unkeyed records cannot match and are dropped. So are control markers, which
 // have no key at all; see IncludeControl.
