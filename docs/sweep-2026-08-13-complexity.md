@@ -691,6 +691,45 @@ of passing forever while enforcing a rule that has ceased to exist. Both halves
 falsified before landing, the offender half against a throwaway `.go` file made
 visible to `git ls-files` with `git add -N`.
 
+## A fourth: the fixed sleep in front of a negative assertion
+
+`TestDisableAutoClean` is the same silent-zero shape as the two chaos-test finds,
+in the plainest possible form — three lines:
+
+```go
+l.SetHighWatermark(last)
+time.Sleep(400 * time.Millisecond) // several cleaner intervals
+require.Equal(t, int64(0), l.OldestOffset(), "auto-clean ran despite DisableAutoClean")
+```
+
+The claim is a NEGATIVE — *the loop did not clean* — and the only way to give a
+loop the chance to misbehave is to let wall clock pass. So "nothing was cleaned"
+has two readings: the flag worked, or the loop never got a tick's worth of work
+done at all. `CleanerInterval` is 50 ms and the sleep is 400 ms, which reads like
+eight intervals of margin; on a runner where a tick's actual work — roll check,
+retention scan, segment delete — does not finish inside 400 ms, the second
+reading is the true one and the test passes having proved nothing. A margin
+racing real work, for the fourth time this pass, and this one predates all three.
+
+The fix is the same as the chaos tests': **price the provocation instead of
+guessing at it.** An identical log with the flag OFF is built first and waited on
+via `require.Eventually` until it actually cleans; that measurement, `loopTakes`,
+sets the disabled log's wait at `2*loopTakes + 200ms`. The `Eventually` is the
+provocation made into a condition — it fails loudly, naming the fixture, in
+exactly the state that would otherwise have made the real assertion vacuous.
+
+Both halves falsified before landing, by mutating `cleanOnce`:
+`if false && l.DisableAutoClean` (the flag ignored) fails the real assertion;
+`if true || l.DisableAutoClean` (nothing ever cleans) fails the priced
+`Eventually` with its own message rather than passing the test. The old body
+survives the second mutation.
+
+Worth noting what this costs: the priced wait is *self-scaling*, so on this box
+the test now runs in 0.46 s where the fixed sleep took 0.4 s of pure sleeping,
+and on a loaded runner it grows instead of lying. A priced wait is usually
+faster than the conservative constant it replaces, because the constant has to be
+large enough for the worst machine anyone will ever run it on.
+
 ## Follow-ups this pass opened
 
 - ~~**`r.br.pos = r.pos` in `committedReader.readLoop`.** The one place left that

@@ -53,6 +53,20 @@ library from that fork onward.
   it *were* the safety, which is how the rule above stops looking obligatory to
   whoever writes the fourth one. All three call the function now.
 
+### Testing
+
+- `TestDisableAutoClean` waited a fixed 400 ms before asserting that nothing had
+  been cleaned. Its claim is a negative — *the loop did not clean* — so that
+  assertion holds equally when the flag works and when the cleaner never got a
+  tick's work done inside the sleep, and on a runner slow enough for the second
+  reading the test passed having proved nothing. `CleanerInterval` is 50 ms, so
+  400 ms reads like eight intervals of margin; a tick is a roll check, a
+  retention scan and a segment delete, and a margin is a constant racing real
+  work. The wait is priced now: an identical log with the flag OFF is waited on
+  via `require.Eventually` until it actually cleans, and that measurement sets
+  the disabled log's wait. The `Eventually` fails loudly, naming the fixture, in
+  precisely the state that used to make the real assertion vacuous.
+
 ## v0.86.0 — 2026-08-14
 
 ### Changed

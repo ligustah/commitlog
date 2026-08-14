@@ -534,23 +534,60 @@ func TestCleanSpecBudgetedPassCannotOrphanRecords(t *testing.T) {
 
 // DisableAutoClean: the internal loop must stop cleaning (retention would
 // otherwise delete the old prefix) while explicit Clean still works.
+//
+// The awkward part of this test is that its central claim is a NEGATIVE — the
+// loop did not clean — and the only way to give a loop the chance to misbehave
+// is to let wall clock pass. That makes "nothing was cleaned" carry two
+// readings: the flag worked, or the loop never ran at all. A fixed sleep of
+// several CleanerIntervals cannot tell them apart, and on a machine slow enough
+// to swallow the intervals the second reading is the true one and the test
+// passes having proved nothing.
+//
+// So the wait is PRICED against an identical log with the flag off, waited on
+// until it actually cleans. That measurement is the provocation made into a
+// condition: it fails loudly, naming the fixture, if the loop cannot be made to
+// clean at all — which is the state that would otherwise make the real
+// assertion vacuous.
 func TestDisableAutoClean(t *testing.T) {
-	l, cleanup := setupWithOptions(t, Options{
-		Path:             tempDir(t),
-		MaxSegmentBytes:  64,
-		MaxLogMessages:   1, // aggressive retention: auto-clean would delete almost everything
-		CleanerInterval:  50 * time.Millisecond,
-		DisableAutoClean: true,
-	})
-	defer cleanup()
-	var last int64
-	for i := 0; i < 8; i++ {
-		offs, err := l.Append([]*Message{{Value: []byte("v")}})
-		require.NoError(t, err)
-		last = offs[0]
+	// MaxLogMessages 1 is aggressive retention: auto-clean would delete almost
+	// everything, which is what makes the difference between the two logs
+	// visible at all.
+	opts := func(disableAutoClean bool) Options {
+		return Options{
+			Path:             tempDir(t),
+			MaxSegmentBytes:  64,
+			MaxLogMessages:   1,
+			CleanerInterval:  50 * time.Millisecond,
+			DisableAutoClean: disableAutoClean,
+		}
 	}
-	l.SetHighWatermark(last)
-	time.Sleep(400 * time.Millisecond) // several cleaner intervals
+	fill := func(l *commitLog) {
+		t.Helper()
+		var last int64
+		for i := 0; i < 8; i++ {
+			offs, err := l.Append([]*Message{{Value: []byte("v")}})
+			require.NoError(t, err)
+			last = offs[0]
+		}
+		l.SetHighWatermark(last)
+	}
+
+	priced, cleanupPriced := setupWithOptions(t, opts(false))
+	defer cleanupPriced()
+	fill(priced)
+	start := time.Now()
+	require.Eventually(t, func() bool { return priced.OldestOffset() != 0 },
+		30*time.Second, time.Millisecond,
+		"the cleaner loop never cleaned with DisableAutoClean OFF, so this fixture "+
+			"cannot show that turning it on changes anything")
+	loopTakes := time.Since(start)
+
+	l, cleanup := setupWithOptions(t, opts(true))
+	defer cleanup()
+	fill(l)
+	// Twice what the same loop just needed, plus a floor so a priced run of
+	// almost nothing still waits long enough to be a wait.
+	time.Sleep(2*loopTakes + 200*time.Millisecond)
 	require.Equal(t, int64(0), l.OldestOffset(), "auto-clean ran despite DisableAutoClean")
 
 	require.NoError(t, l.Clean())
