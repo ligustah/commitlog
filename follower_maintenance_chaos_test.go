@@ -43,9 +43,19 @@ import (
 // anywhere but where it left off.
 //
 // It also handles being told to re-resolve mid-scan, which in practice does not
-// happen: the counter stays at zero on every run. Worth keeping as a fact about
-// the log rather than deleting as dead code — it says the read path answers a
-// follower without ever surfacing a maintenance error to it.
+// happen: `rebuilds` stays at zero on every run. That zero was worth nothing
+// until 2026-08-14, because the stall that was supposed to provoke a mid-scan
+// departure was a fixed 100ms and nothing established it had ever provoked one —
+// "the log never surfaces a maintenance error to a scanning follower" and "the
+// stall was too short" are the same zero. The stall now waits for the departure
+// instead of sleeping through it: it returns only once the record the follower
+// last read has been collected, while it still holds the reader that read it, so
+// the next read is made from a position that no longer exists. Every 17th step of
+// every reader lifetime, on every codec.
+//
+// It is still zero. THAT is the fact about the log — the read path resolves a
+// departed position to its successor internally and a follower scanning across
+// retention never sees an error at all.
 //
 // Run over every storage format. A block-compressed segment is a different
 // storage path end to end — records live inside compressed blocks, the index
@@ -218,11 +228,36 @@ func followerNeverSeesTheSequenceGoBackwards(t *testing.T, codec compress.Codec)
 				// case the reader answers with "re-resolve" — never happens. The
 				// period is coprime to the lifetime so the stalls do not land at
 				// the same point in every reader.
+				//
+				// The SAME condition as the stall between lifetimes, and for the
+				// same reason: this was a fixed 100ms, which had to outlast
+				// retention reaching a position an open reader is sitting on, and
+				// a constant cannot win a race against another goroutine on an
+				// arbitrary machine. Worse here than there, because the failure
+				// was silent — `rebuilds` was zero on every run and got read as a
+				// fact about the log, when "the log never surfaces a maintenance
+				// error mid-scan" and "the stall never provoked one" produce the
+				// same zero and nothing here told them apart.
+				//
+				// Waiting on the condition tells them apart. When this returns,
+				// the record this follower last read has been collected while it
+				// still holds the reader that read it, so the next ReadMessage is
+				// made from a position that no longer exists. It is still zero.
+				// That is now a fact about the log rather than an assumption
+				// about the sleep: see the count's own note above.
+				//
+				// It is also most of the run's wall clock. The fixed sleep was
+				// paid on every 17th step whether or not anything was collected
+				// during it; under -race the three codecs took 92.21s together
+				// and now take 7.20s, with overtaken, crossed and read the same
+				// or better.
 				if step%17 == 16 {
-					select {
-					case <-stop:
-						return
-					case <-time.After(100 * time.Millisecond):
+					for l.OldestOffset() <= lastOffset {
+						select {
+						case <-stop:
+							return
+						case <-time.After(time.Millisecond):
+						}
 					}
 				}
 				msg, offset, _, _, err := rd.ReadMessage(ctx, headers)
