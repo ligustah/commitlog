@@ -1251,3 +1251,122 @@ reader meets "two snappy implementations" at the import and needs the answer
 there. Recorded as a negative so the next sweep does not re-open it.
 
 `natefinch/atomic` was checked in the same pass and is legitimately used.
+
+## The interface and abstraction surface
+
+The third lens: eight interfaces in the production tree, asked one question each
+— how many implementations, and does anything need the indirection?
+
+### The one that mattered: the interface IS the reachable API
+
+`New` returns `CommitLog`, and `commitLog` is unexported. So that interface is
+not a convenience over the concrete type — it is the *entire* API reachable from
+outside the package, and it is a hand-maintained transcription of the concrete
+type's exported method set with nothing keeping the two in step.
+
+The suite cannot notice the drift, and the reason is structural rather than an
+oversight: `setup` and `setupWithOptions`, the helpers behind essentially every
+test in the repo, return `*commitLog`. Tests hold the concrete type. So
+
+- an exported method **added** to the struct and forgotten in the interface is
+  callable from every test here and reachable from nowhere outside, and
+- a method **deleted** from the interface still compiles — the struct keeps it,
+  the helpers keep calling it through the concrete type, and `go build ./...` is
+  clean.
+
+The second one is a way to break the published API of the library without
+breaking anything visible, and it was verified rather than argued: removing
+`UnreferencedObjects` from `interface.go` builds the whole module and passes
+every test that exercises it.
+
+The two sets agreed exactly, 40 and 40, when this was written. That is the
+discipline having held, not anything enforcing it — the same shape this sweep
+has deleted repeatedly elsewhere. Now checked by reflection (`NumMethod` on a
+non-interface type reports exactly the exported set), plus guard 176, whose
+mutation is the real refactor rather than a contrived one.
+
+### Was the 40-method interface itself the problem?
+
+The obvious follow-up — forty methods is too many — is answered downstream, and
+the answer is no. durable_streams defines its own `StreamLog` of seven methods
+and asks for the rest at the call site with a type assertion, reasoning in its
+own doc that `commitlog.CommitLog` "is the right size for what it is … the wrong
+size for a CONTRACT, because a contract is a bill for whoever implements it."
+
+That is the boundary in the right place: commitlog's interface is a **return
+type**, and the consumer defines the contract it wants to implement against. The
+completeness check above is therefore the correct response — keep the return
+type honest — rather than shrinking it.
+
+### Negatives from this lens, recorded
+
+- **No pure-delegation wrapper types.** A scan for types whose every method is a
+  one-line forward to an inner field found none, and none with even three such
+  methods.
+- **`contextReader.segmentBounds` is not a stub tax.** One method of the two has
+  a single implementation, which looks like the forty-stubs problem in
+  miniature; it is not, because `segmentCursor` provides it once and both
+  readers embed it.
+- **The encoder trio is live.** Per-method call-site counts (not staticcheck,
+  which calls an interface-satisfying method "used") show every `packetEncoder`
+  and `pushEncoder` method has a production caller. `encoder` itself has one
+  implementation and two call sites both passing `*Message` — a real, if small,
+  abstraction over one type.
+- **`digestByteReader` is the textbook case, not a finding.** `io.Reader` plus
+  `io.ByteReader`, named by the consumer, with two genuinely different
+  implementations behind it (a `bytes.Reader` over an in-memory keyed section, a
+  `bufio.Reader` streaming a sidecar off disk). This is what the other seven are
+  being measured against.
+- **Exported symbols with no downstream consumer are mostly not dead.** Scanning
+  1549 `.go` files across durable_streams and sqlcdc for every exported
+  commitlog symbol leaves nine unreferenced, and eight are legitimate: five
+  error sentinels (a library must export what a caller may need to test for),
+  and `CopyTier`, `IncludeControl`, `SkipSuperseded` — capabilities, and a
+  capability whose consumers have not arrived is still a capability.
+
+  The ninth, `ReadFileWithRetry`, looked like the real find: an internal
+  Windows-race file helper whose two siblings from the same unification
+  (`openWithRetry`, `renameWithRetry`) are unexported, with no downstream
+  caller. Unexporting it would have been wrong. It was exported deliberately as
+  the twin of `AtomicWriteFileWithRetry`, which durable_streams **does** use —
+  and removing the read half would recreate exactly the asymmetry commitlog
+  added it to fix ("this package already carried the knowledge on the write
+  side; the read side never got it").
+
+  Which turned the finding around and pointed it downstream: durable_streams'
+  `PutStreamSidecar` writes through the retrying writer, citing one-run-in-twelve
+  sharing violations, and `GetStreamSidecar` reads that same file with plain
+  `os.ReadFile`. commitlog's own `GetSidecar` uses the retrying read. Raised with
+  that repo's owner rather than fixed here.
+
+### Searching for coverage by NAME finds nothing when the test asserts a consequence
+
+The one thread in this lens that looked like a hole and was not, kept because
+the reason it looked like one generalises.
+
+`segmentBacking.StreamPays` is a two-arm cost predicate — `localBacking` returns
+false, `storeBacking` returns true — and it decides whether a segment scan builds
+a `scanStream`. It stood out because it is the only internal interface method
+with a production caller and **zero test calls**, and grepping the test tree for
+`StreamPays`, `scanStream` and `newScanStream` found only two tests that build a
+stream directly, bypassing the decision entirely. The one test that does drive
+the decision, `TestStreamedScanReturnsTheSameRecords`, asserts *equivalence* — a
+streamed scan returns what a local one did — which is satisfied whether or not
+streaming happened. On that evidence the decision looked uncovered.
+
+It is thoroughly covered. Mutating `storeBacking.StreamPays` to `false` turns
+**two** tests red: `TestScanningAnOffloadedSegmentCostsOneRequest`, which
+requires exactly one stream and zero ranged reads, and `TestPrefixReadCostProfile`.
+Neither names `StreamPays` or `scanStream` anywhere, because both assert on the
+**consequence** — the request count a store is billed for — rather than on the
+mechanism that produces it.
+
+That is the lesson, and it cuts against how the rest of this sweep has been
+searching: **coverage found by grepping for a symbol's name is a lower bound,
+and a bad one for anything whose whole purpose is a cost.** A test that asserts
+"this costs one request" is exactly the right test for a performance decision
+and is invisible to a name search. The falsification is the only instrument that
+answers the question — the same rule already recorded for chaos-test floors, now
+pointed at coverage claims.
+
+Recorded as a negative: the streaming decision needs nothing.

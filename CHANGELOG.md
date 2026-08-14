@@ -46,6 +46,32 @@ library from that fork onward.
 
 ### Testing
 
+- **A method could leave the public interface without anything going red.**
+  `New` returns `CommitLog` and `commitLog` is unexported, so that interface is
+  the entire API reachable from outside the package — and it is a
+  hand-maintained transcription of the concrete type's exported method set with
+  nothing keeping the two in step.
+
+  The suite could not have noticed, for a structural reason: `setup` and
+  `setupWithOptions`, the helpers behind essentially every test here, return
+  `*commitLog`. Tests hold the concrete type. So deleting a method from
+  `interface.go` still compiles — the struct keeps it, the helpers keep calling
+  it — and `go build ./...` is clean. Verified rather than argued: removing
+  `UnreferencedObjects` builds the whole module and passes every test that
+  exercises it, while no caller of `New` could reach it any more. The reverse
+  direction, a method added to the struct and forgotten in the interface, is the
+  same hole seen from the other side.
+
+  The two sets agreed exactly, 40 and 40 — the discipline having held, not
+  anything enforcing it. Now checked by reflection, so it stays true without
+  being maintained, and by guard 176, whose mutation is the real refactor.
+
+  The obvious follow-up — that forty methods is too many — is answered
+  downstream and the answer is no: durable_streams defines its own seven-method
+  `StreamLog` and asks for the rest with a type assertion. commitlog's interface
+  is a return type, not a bill for implementors, so keeping it honest is the
+  right response rather than shrinking it.
+
 - **Stripping's floor was only ever tested from below.**
   `TestCleanDigestMergeEquivalence` asserted that records below `StripBelow`
   lose their headers and never that records at or above it KEEP them, so a
