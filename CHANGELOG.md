@@ -7,6 +7,8 @@ library from that fork onward.
 
 ## Unreleased
 
+## v0.86.0 — 2026-08-14
+
 ### Changed
 
 - **Breaking.** `Options.AdoptOptions` no longer adopts `Options.Identity`. It
