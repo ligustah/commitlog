@@ -391,28 +391,38 @@ func TestCompressionSavesSpace(t *testing.T) {
 
 func TestBlockHeaderRoundtrip(t *testing.T) {
 	for _, codec := range allCodecs {
-		hdr := encodeBlockHeader(codec, 12345, 6789)
+		hdr := encodeBlockHeader(codec, 12345, 6789, 17)
 		require.Len(t, hdr, blockHeaderLen)
-		gotCodec, u, c, err := parseBlockHeader(hdr)
+		gotCodec, u, c, r, err := parseBlockHeader(hdr)
 		require.NoError(t, err)
 		require.Equal(t, codec, gotCodec)
 		require.Equal(t, uint32(12345), u)
 		require.Equal(t, uint32(6789), c)
+		require.Equal(t, uint32(17), r)
 	}
 }
 
 func TestBlockHeaderErrors(t *testing.T) {
-	_, _, _, err := parseBlockHeader(make([]byte, blockHeaderLen-1))
+	_, _, _, _, err := parseBlockHeader(make([]byte, blockHeaderLen-1))
 	require.Error(t, err, "short header")
 
-	bad := encodeBlockHeader(compress.Zstd, 1, 1)
+	bad := encodeBlockHeader(compress.Zstd, 1, 1, 1)
 	bad[0] = 0x00
-	_, _, _, err = parseBlockHeader(bad)
+	_, _, _, _, err = parseBlockHeader(bad)
 	require.Error(t, err, "bad magic")
 
-	unknown := encodeBlockHeader(compress.Zstd, 1, 1)
-	unknown[1] = 0xFF
-	_, _, _, err = parseBlockHeader(unknown)
+	// The VERSION byte, which is what index 1 is. It had been labelled
+	// "unknown codec" while poking the same byte the version case above pokes,
+	// so the codec check — the only place compress.Codec.Valid() is called from
+	// production code — had no test reaching it at all.
+	badVersion := encodeBlockHeader(compress.Zstd, 1, 1, 1)
+	badVersion[1] = 0xFF
+	_, _, _, _, err = parseBlockHeader(badVersion)
+	require.Error(t, err, "unknown version")
+
+	unknown := encodeBlockHeader(compress.Zstd, 1, 1, 1)
+	unknown[2] = 0xFF
+	_, _, _, _, err = parseBlockHeader(unknown)
 	require.Error(t, err, "unknown codec")
 }
 

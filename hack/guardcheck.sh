@@ -2060,6 +2060,51 @@ run_guard "a prefix read that cannot parse a frame says so" prefix_read.go   $'	
 				ErrSegmentUnreadable, seg.BaseOffset, run.offs[i], err)'   $'			return nil, errors.Wrapf(err, "prefix read of segment %d at offset %d",
 				seg.BaseOffset, run.offs[i])'   '^TestAPrefixReadReportsAnUnparseableFrameAsUnreadable$'
 
+# A segment's record count is READ from a stored field, never derived from the
+# distance between its first and last offset. Neutralized back to that span,
+# which is the code this replaced and which still compiles. MaxLogMessages is a
+# ceiling on a running total, so the span's overstatement on a compacted segment
+# makes the retention walk delete MORE than it was asked to.
+run_guard "a record count is stored, not derived from the offset span" segment.go   $'	if s.blockMode && !s.blocksPending {
+		return sumBlockRecords(s.blocks)
+	}'   $'	if s.lastOffset >= 0 {
+		return s.lastOffset - s.firstOffset + 1
+	}'   '^TestACompactedLogCountsItsRecordsRatherThanItsOffsetSpan$'
+
+# The block header CARRIES the count. Neutralized to a constant 1 rather than to
+# 0, because a 0 is refused by parseBlockHeader (its own guard, below) and the
+# segment would fail to open — every test would then go red for the wrong
+# reason. A 1 is a header that parses and undercounts every multi-record block.
+run_guard "a block header records how many messages it holds" block.go   '	encoding.PutUint32(hdr[11:], records)'   '	encoding.PutUint32(hdr[11:], 1)'   '^TestACompactedLogCountsItsRecordsRatherThanItsOffsetSpan$'
+
+# And so does the block table, which is what a reopen and a tiered read consult
+# instead of walking the object. Same constant, for the same reason.
+run_guard "a block table entry carries its block's record count" block_table.go   '		encoding.PutUint32(buf[at+9:], uint32(b.records))'   '		encoding.PutUint32(buf[at+9:], 1)'   '^TestABlockTableRoundTripsItsDerivedStarts$'
+
+# A count of zero is a field nobody wrote, in both formats, and is refused rather
+# than read as "this block is empty". Worth a guard at each site because the
+# direction is the opposite failure to the offset span's and just as silent: a
+# count that reads LOW makes a segment nothing can trim.
+run_guard "a block header claiming no records is refused" block.go   '	if r := encoding.Uint32(hdr[11:]); r == 0 {'   '	if r := encoding.Uint32(hdr[11:]); r == 1<<31 {'   '^TestABlockHeaderClaimingNoRecordsIsRefused$'
+
+run_guard "a block table entry claiming no records is refused" block_table.go   '		if records == 0 {'   '		if records < 0 {'   '^TestADamagedBlockTableIsRefused$'
+
+# The manifest entry and the block table must agree about the count. The fetch is
+# the moment a tiered segment stops answering from one and starts answering from
+# the other, so without the check a segment's record count would CHANGE the first
+# time anybody read it.
+run_guard "a block table must agree with the manifest about the record count" segment.go   '	if got := sumBlockRecords(blocks); got != s.records {'   '	if got := sumBlockRecords(blocks); false {'   '^TestABlockTableThatDisagreesWithTheManifestCountIsRefused$'
+
+# The manifest CARRIES the count, which is what lets retention measure a cold
+# tier without fetching a block table. The anchor takes in the two lines above it
+# because offloadMetaLocked has a byte-identical Records line, and apply_edit
+# refuses an ambiguous match rather than neutralizing whichever it finds first.
+run_guard "an offloaded segment publishes its record count" segment.go   $'		PhysPosition:   size,
+		BlockMode:      s.blockMode,
+		Records:        s.messageCountLocked(),'   $'		PhysPosition:   size,
+		BlockMode:      s.blockMode,
+		Records:        0,'   '^TestAnHonestlySizedBlockTableStillLoads$'
+
 echo
 if [ "$failures" -ne 0 ]; then
   if [ -n "$anchors_only" ]; then

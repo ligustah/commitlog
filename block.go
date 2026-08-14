@@ -31,18 +31,20 @@ const (
 	// truth and can disagree with what it describes — restore a mixed
 	// backup and it claims one version while the segments hold another.
 	// Bytes cannot lie that way.
-	BlockFormatVersion byte = 1
+	//
+	// v2 added the record count. v1 is not read: see parseBlockHeader.
+	BlockFormatVersion byte = 2
 )
 
 // blockHeaderLen is magic(1) + version(1) + codec(1) + uncompressedLen(4) +
-// compressedLen(4).
+// compressedLen(4) + records(4).
 //
 // Deliberately untyped and deliberately not in the group above: it is a LENGTH,
 // not a header field, and it is added to int64 file offsets throughout. Sitting
 // under `blockMagic byte` it read as though it inherited `byte` — it does not,
 // because it has its own value — and a reader who believed that would conclude
 // the arithmetic in payloadStart could not compile.
-const blockHeaderLen = 11
+const blockHeaderLen = 15
 
 // blockRef indexes one on-disk block: its position in the logical (uncompressed)
 // byte space and in the physical (on-disk) file.
@@ -52,43 +54,62 @@ type blockRef struct {
 	physStart    int64          // physical file offset of the block header
 	physLen      int64          // header + compressed payload length
 	codec        compress.Codec // codec of this block (None when stored raw)
+	// records is how many messages this block holds, stored rather than
+	// derived. A block's logical extent gives its BYTES and its index anchor
+	// gives its FIRST OFFSET, and neither answers how many records are inside:
+	// the offsets a block covers are contiguous only until a compaction pass
+	// drops records from it, after which the span between the first and the
+	// last counts the holes as well. See segment.MessageCount.
+	records int64
 }
 
 func (b blockRef) payloadStart() int64 { return b.physStart + blockHeaderLen }
 func (b blockRef) payloadLen() int64   { return b.physLen - blockHeaderLen }
 
-// encodeBlockHeader writes a block header for a payload with the given codec and
-// lengths.
-func encodeBlockHeader(codec compress.Codec, uncompressedLen, compressedLen uint32) []byte {
+// encodeBlockHeader writes a block header for a payload with the given codec,
+// lengths and record count.
+func encodeBlockHeader(codec compress.Codec, uncompressedLen, compressedLen, records uint32) []byte {
 	hdr := make([]byte, blockHeaderLen)
 	hdr[0] = blockMagic
 	hdr[1] = BlockFormatVersion
 	hdr[2] = byte(codec)
 	encoding.PutUint32(hdr[3:], uncompressedLen)
 	encoding.PutUint32(hdr[7:], compressedLen)
+	encoding.PutUint32(hdr[11:], records)
 	return hdr
 }
 
-// parseBlockHeader reads a block header, returning the codec and lengths.
-func parseBlockHeader(hdr []byte) (codec compress.Codec, uncompressedLen, compressedLen uint32, err error) {
+// parseBlockHeader reads a block header, returning the codec, lengths and
+// record count.
+func parseBlockHeader(hdr []byte) (codec compress.Codec, uncompressedLen, compressedLen, records uint32, err error) {
 	if len(hdr) < blockHeaderLen {
-		return 0, 0, 0, fmt.Errorf("commitlog: short block header (%d bytes)", len(hdr))
+		return 0, 0, 0, 0, fmt.Errorf("commitlog: short block header (%d bytes)", len(hdr))
 	}
 	if hdr[0] != blockMagic {
-		return 0, 0, 0, fmt.Errorf("commitlog: bad block magic 0x%02x", hdr[0])
+		return 0, 0, 0, 0, fmt.Errorf("commitlog: bad block magic 0x%02x", hdr[0])
 	}
 	// Clean cutover: pre-version segments are not supported. Refusing here
 	// is the point — the alternative is reading a layout we do not
 	// understand and corrupting state before anyone notices.
 	if v := hdr[1]; v != BlockFormatVersion {
-		return 0, 0, 0, fmt.Errorf("%w: block format version %d, this build writes %d",
+		return 0, 0, 0, 0, fmt.Errorf("%w: block format version %d, this build writes %d",
 			ErrBlockFormat, v, BlockFormatVersion)
 	}
 	codec = compress.Codec(hdr[2])
 	if !codec.Valid() {
-		return 0, 0, 0, fmt.Errorf("commitlog: unknown block codec %d", hdr[2])
+		return 0, 0, 0, 0, fmt.Errorf("commitlog: unknown block codec %d", hdr[2])
 	}
-	return codec, encoding.Uint32(hdr[3:]), encoding.Uint32(hdr[7:]), nil
+	// A block with no records cannot exist — write() refuses an empty message
+	// set before a byte is appended — so a zero here is a v1 header read
+	// through a v2 parse or a field that never got written, and both are the
+	// case this field exists to make impossible. It is refused rather than
+	// treated as "unknown" for the reason MessageCount gives: a count that
+	// silently reads low is a retention walk that deletes what it was asked to
+	// keep, and there is no value of this field that means "ask someone else".
+	if r := encoding.Uint32(hdr[11:]); r == 0 {
+		return 0, 0, 0, 0, fmt.Errorf("%w: block header claims no records", ErrBlockFormat)
+	}
+	return codec, encoding.Uint32(hdr[3:]), encoding.Uint32(hdr[7:]), encoding.Uint32(hdr[11:]), nil
 }
 
 // blockCache memoizes the most recently decompressed block so sequential reads

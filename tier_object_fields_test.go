@@ -11,10 +11,10 @@ import (
 // A fact an offloaded segment knows about itself must reach the manifest, and
 // come back from it.
 //
-// offloadMeta and TierObject carry the same ten fields — the first is what a
+// offloadMeta and TierObject carry the same fields — the first is what a
 // segment knows about its own store objects, the second is what the published
 // manifest says about them — and offloadMeta.tierObject and TierObject.meta
-// convert between them by writing all ten out by hand, twice.
+// convert between them by writing every one of them out by hand, twice.
 //
 // The existing tests cover every field that is there today: removing any one of
 // them from either converter turns several of them red, which is how the
@@ -58,7 +58,7 @@ func TestEveryOffloadMetaFieldSurvivesTheManifest(t *testing.T) {
 			"offloadMeta.tierObject or TierObject.meta is missing it")
 }
 
-// TierObject's own fields are the ten it shares with offloadMeta plus the three
+// TierObject's own fields are the ones it shares with offloadMeta plus the three
 // that only the manifest has. Naming them here is what makes the round-trip test
 // above complete: it proves offloadMeta's fields survive, and this proves there
 // is nothing else on TierObject for them to have been quietly renamed into.

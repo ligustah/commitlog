@@ -53,6 +53,13 @@ type BlockInfo struct {
 	// silently trusted.
 	UncompressedLen uint32
 	CompressedLen   uint32
+	// Records is how many messages the header says the block holds. Also a
+	// claim, and the one worth checking against the file: it is what the log
+	// answers a message-count retention limit with, so a block whose header
+	// disagrees with the frames inside it is a segment that will be trimmed by
+	// the wrong amount. Records() walks the frames, and comparing the two is
+	// how an operator tells which of them is wrong.
+	Records uint32
 }
 
 // RecordInfo is one record as it sits in the file.
@@ -230,12 +237,13 @@ func (s *SegmentFile) Blocks() ([]BlockInfo, error) {
 				"commitlog: truncated block header at %d (%d bytes left, need %d)",
 				pos, rem, blockHeaderLen)
 		}
-		codec, uLen, cLen, err := parseBlockHeader(s.raw[pos : pos+blockHeaderLen])
+		codec, uLen, cLen, records, err := parseBlockHeader(s.raw[pos : pos+blockHeaderLen])
 		if err != nil {
 			return out, errors.Wrapf(err, "%s: block at %d", s.path, pos)
 		}
 		out = append(out, BlockInfo{
 			FileOffset: pos, Codec: codec, UncompressedLen: uLen, CompressedLen: cLen,
+			Records: records,
 		})
 		// The payload has to BE there. Without this the walk simply added cLen to
 		// pos, and a header claiming more bytes than the file holds stepped clean
@@ -283,7 +291,7 @@ func (s *SegmentFile) recordsBlocked(fn func(RecordInfo) error) error {
 		if rem := int64(len(s.raw)) - pos; rem < blockHeaderLen {
 			return errors.Errorf("commitlog: truncated block header at %d", pos)
 		}
-		codec, uLen, cLen, err := parseBlockHeader(s.raw[pos : pos+blockHeaderLen])
+		codec, uLen, cLen, _, err := parseBlockHeader(s.raw[pos : pos+blockHeaderLen])
 		if err != nil {
 			return errors.Wrapf(err, "block at %d", pos)
 		}

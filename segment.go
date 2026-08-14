@@ -149,6 +149,13 @@ type segment struct {
 	blocks       []blockRef
 	physPosition int64
 	cache        *blockCache
+	// records is how many messages this segment holds, and it is read ONLY when
+	// nothing resident can answer: an offloaded segment whose index is in the
+	// store and whose block table has not been fetched. It comes from the
+	// manifest entry the segment was opened from, which is why such a segment
+	// can answer a retention walk without a single round trip. See
+	// messageCountLocked for the three states and which authority serves each.
+	records int64
 	// blocksPending means blocks has not been FETCHED yet and must be before any
 	// read maps a logical offset onto the file. Only an offloaded block segment
 	// sets it, and only until its first read: the table is a few KB in the store
@@ -293,6 +300,12 @@ type offloadMeta struct {
 	Position       int64
 	PhysPosition   int64
 	BlockMode      bool
+	// Records is how many messages the object holds. It is carried rather than
+	// derived from FirstOffset/LastOffset because that span counts the offsets
+	// compaction removed as though they were still there — see
+	// messageCountLocked. Carrying it is what lets retention measure a cold tier
+	// without fetching one index or one block table.
+	Records int64
 }
 
 // offloadMetaLocked is what this segment currently is, as an offloadMeta: the
@@ -302,9 +315,10 @@ type offloadMeta struct {
 // both callers already hold it for their own reasons and taking it here would
 // deadlock them.
 //
-// This exists because there are two callers and they had written the same ten
-// assignments out separately — tierState, publishing what the log believes, and
-// moveSegment, carrying a segment to another tier. A field added to offloadMeta
+// This exists because there are two callers and they had written the same
+// assignments out separately, field for field — tierState, publishing what the
+// log believes, and moveSegment, carrying a segment to another tier. A field
+// added to offloadMeta
 // has to reach both, and one of them silently not carrying it is a manifest
 // that describes the segment wrongly.
 //
@@ -324,6 +338,7 @@ func (s *segment) offloadMetaLocked() offloadMeta {
 		Position:       s.position,
 		PhysPosition:   s.physPosition,
 		BlockMode:      s.blockMode,
+		Records:        s.messageCountLocked(),
 	}
 }
 
@@ -404,6 +419,7 @@ func (s *segment) uploadTo(store SegmentStore, key, idxKey, blkKey string, cache
 		Position:       s.position,
 		PhysPosition:   size,
 		BlockMode:      s.blockMode,
+		Records:        s.messageCountLocked(),
 	}, nil
 }
 
@@ -490,6 +506,10 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, tier string,
 	s.position = meta.Position
 	s.physPosition = meta.PhysPosition
 	s.blockMode = meta.BlockMode
+	// Set even though this segment keeps whatever resident authority it already
+	// had: the branch below can drop the index, and a raw segment that loses its
+	// index has nothing else to count. See messageCountLocked.
+	s.records = meta.Records
 	if meta.IndexKey != "" && cache != nil {
 		s.Index = nil
 		s.indexKey = meta.IndexKey
@@ -635,6 +655,7 @@ func openOffloadedSegment(path string, baseOffset, maxBytes int64, codec compres
 	// reads go straight at the backing.
 	s.blocksKey = meta.BlocksKey
 	s.blocksPending = meta.BlockMode
+	s.records = meta.Records
 
 	if meta.IndexKey == "" {
 		// Option 1: index kept local, loaded as usual — which means setupIndex,
@@ -763,6 +784,18 @@ func (s *segment) fetchBlockTable() ([]blockRef, error) {
 				"the manifest says %d/%d", s.blocksKey, logical, phys,
 			s.position, s.physPosition)
 	}
+	// The record count is checked for the same reason the extents are, and it
+	// comes free: the table and the manifest entry were written by the same
+	// offload from the same segment, so a disagreement means one of them is
+	// describing something else. It matters more than it looks — this is the
+	// moment a segment stops answering MessageCount from the manifest and starts
+	// answering it from the table, and if the two ever disagreed the count a
+	// retention pass sees would change the first time anybody READ the segment.
+	if got := sumBlockRecords(blocks); got != s.records {
+		return nil, errors.Errorf(
+			"commitlog: block table %q accounts for %d records, the manifest says %d",
+			s.blocksKey, got, s.records)
+	}
 	return blocks, nil
 }
 
@@ -835,7 +868,7 @@ func (s *segment) scanBlocks(size int64) error {
 		if _, err := s.backing.ReadAt(hdr[:], phys); err != nil {
 			return errors.Wrap(err, "read block header failed")
 		}
-		codec, uLen, cLen, err := parseBlockHeader(hdr[:])
+		codec, uLen, cLen, records, err := parseBlockHeader(hdr[:])
 		if err != nil {
 			if errors.Is(err, ErrBlockFormat) {
 				return err
@@ -875,6 +908,7 @@ func (s *segment) scanBlocks(size int64) error {
 			physStart:    phys,
 			physLen:      physLen,
 			codec:        codec,
+			records:      int64(records),
 		})
 		phys += physLen
 		logical += int64(uLen)
@@ -1628,26 +1662,47 @@ func (s *segment) IsEmpty() bool {
 func (s *segment) MessageCount() int64 {
 	s.RLock()
 	defer s.RUnlock()
-	// For a raw segment the dense index has one entry per message, so the
-	// entry count is the message count. For a block-compressed segment the
-	// index is sparse (one entry per block), so derive the message count from
-	// the offset span instead. Offsets are contiguous within every block (a
-	// message set is assigned baseOffset+i), and appended segments are
-	// contiguous across blocks, so this is exact for normally-written logs.
-	// After compaction a compressed segment stores one message per block and
-	// may have offset gaps, in which case this is an upper bound — acceptable
-	// for the retention heuristic that consumes it.
-	// A raw segment with a resident index counts entries directly. A raw segment
-	// whose index is offloaded (Index nil) derives the count from its offset span
-	// — exact for a raw segment (one contiguous message per offset) and avoiding a
-	// store fetch for a mere retention heuristic.
+	return s.messageCountLocked()
+}
+
+// messageCountLocked is how many messages this segment holds. Every state a
+// segment can be in has exactly ONE resident authority, and the count is READ
+// from it rather than reconstructed:
+//
+//   - a raw segment with its index open — every local one, and an offloaded one
+//     that kept its index local (option 1). The dense index has one entry per
+//     message, so the entry count is the message count.
+//   - a block segment with its table resident — every local one. Each block
+//     header records how many messages it holds, so the table's counts sum to
+//     the segment's.
+//   - an offloaded segment with neither: option 2 puts the index in the store,
+//     and a block table is fetched at the first READ rather than at open. The
+//     count comes from the manifest entry the segment was opened from, so a
+//     retention walk over a cold tier costs no round trips at all.
+//
+// What it must never do is subtract the first offset from the last. That span
+// is the record count only while offsets are contiguous, which they are until a
+// compaction pass drops records — after which the span counts the holes too. A
+// compacted snappy segment measured 381 by span against 138 records actually
+// present, 2.76x over.
+//
+// The DIRECTION is what makes that a data-loss bug rather than an inaccuracy.
+// This feeds a retention budget, and a budget is a ceiling on a running total:
+// overstating each segment makes the walk reach the ceiling SOONER, so it
+// deletes MORE. A caller setting MaxLogMessages to exactly what its log held
+// would have had two thirds of it deleted for being over a limit it was under.
+//
+// The caller must hold at least s.RLock. offloadMetaLocked is the reason it is
+// split out — it publishes this count into the manifest and already holds the
+// lock for its own reasons.
+func (s *segment) messageCountLocked() int64 {
 	if !s.blockMode && s.Index != nil {
 		return s.Index.CountEntries()
 	}
-	if s.lastOffset < 0 {
-		return 0
+	if s.blockMode && !s.blocksPending {
+		return sumBlockRecords(s.blocks)
 	}
-	return s.lastOffset - s.firstOffset + 1
+	return s.records
 }
 
 func (s *segment) WriteMessageSet(ms []byte, entries []*entry) error {
@@ -1683,7 +1738,7 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 	s.dirtyData = true
 	s.dirtyIndex = true
 	if s.blockMode {
-		if err = s.appendBlock(p); err != nil {
+		if err = s.appendBlock(p, len(entries)); err != nil {
 			return 0, err
 		}
 		n = len(p)
@@ -1732,7 +1787,14 @@ const compressMinBlock = 4 << 10
 // data nor burn encoder CPU where the ratio cannot matter. position
 // advances by the logical (uncompressed) length; physPosition by the
 // physical length.
-func (s *segment) appendBlock(p []byte) error {
+//
+// records is how many messages p frames, and it is a PARAMETER rather than
+// something counted from p because the caller already knows: write() has the
+// entry slice, and re-deriving the number by walking the frames would be a
+// second parse of bytes that were just built from the entries. It reaches the
+// block header so that the segment can report a count nobody has to reconstruct
+// from offsets — see messageCountLocked.
+func (s *segment) appendBlock(p []byte, records int) error {
 	codec := s.codec
 	var payload []byte
 	if len(p) < compressMinBlock {
@@ -1742,7 +1804,7 @@ func (s *segment) appendBlock(p []byte) error {
 		codec = compress.None
 		payload = p
 	}
-	hdr := encodeBlockHeader(codec, uint32(len(p)), uint32(len(payload)))
+	hdr := encodeBlockHeader(codec, uint32(len(p)), uint32(len(payload)), uint32(records))
 	buf := make([]byte, 0, len(hdr)+len(payload))
 	buf = append(buf, hdr...)
 	buf = append(buf, payload...)
@@ -1756,6 +1818,7 @@ func (s *segment) appendBlock(p []byte) error {
 		physStart:    s.physPosition,
 		physLen:      int64(n),
 		codec:        codec,
+		records:      int64(records),
 	})
 	s.position += int64(len(p))
 	s.physPosition += int64(n)
@@ -2476,6 +2539,10 @@ func (s *segment) uploadReplacement(fresh *segment) (offloadMeta, []pendingRecla
 		Position:       fresh.position,
 		PhysPosition:   size,
 		BlockMode:      fresh.blockMode,
+		// fresh's count, not this segment's: the manifest entry about to be
+		// published describes the REWRITTEN object, and a rewrite is exactly the
+		// pass that changes how many records there are.
+		Records: fresh.messageCountLocked(),
 	}
 	return meta, superseded, nil
 }
@@ -2529,6 +2596,7 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 	s.physPosition = size
 	s.blocks = fresh.blocks
 	s.blockMode = fresh.blockMode
+	s.records = meta.Records
 
 	// Installed LAST, because setupIndex re-derives the segment's boundaries
 	// from the index and needs the new blockMode, blocks and position to read it

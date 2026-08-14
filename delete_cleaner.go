@@ -204,9 +204,9 @@ func (c *deleteCleaner) cleanLocal(segments []*segment, floor Bound) ([]*segment
 	//     the walk reached the limit early and deleted records the budget had
 	//     room for. A 20:1 log threw away 95% of what the caller asked to keep,
 	//     which is silent data loss dressed as policy.
-	//   - bytes that do not compress are stored raw and still carry an 11-byte
-	//     block header each, so Position is SMALLER than the disk, and a
-	//     small-append workload overran the limit it was given.
+	//   - bytes that do not compress are stored raw and still carry a
+	//     blockHeaderLen-byte block header each, so Position is SMALLER than the
+	//     disk, and a small-append workload overran the limit it was given.
 	if c.Retention.Bytes > 0 {
 		segments, err = c.applyTotalLimit(segments, c.Retention.Bytes,
 			(*segment).PhysicalSize, keepActiveSegment, deletablePrefix(segments, floor))

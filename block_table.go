@@ -11,13 +11,15 @@ import (
 const blocksSuffix = ".blocks"
 
 const (
-	blockTableMagic   = 0x42 // 'B'
-	blockTableVersion = 1
+	blockTableMagic = 0x42 // 'B'
+	// blockTableVersion 2 added the per-block record count, alongside
+	// BlockFormatVersion 2 adding it to the header the table summarises.
+	blockTableVersion = 2
 	// blockTableHeaderLen is magic, version, and the block count.
 	blockTableHeaderLen = 1 + 1 + 4
 	// blockTableEntryLen is one block: its uncompressed length, its physical
-	// length (header included), and its codec.
-	blockTableEntryLen = 4 + 4 + 1
+	// length (header included), its codec, and its record count.
+	blockTableEntryLen = 4 + 4 + 1 + 4
 )
 
 // ErrBlockTableFormat means the object holding a block table is not one.
@@ -72,6 +74,7 @@ func encodeBlockTable(blocks []blockRef) []byte {
 		encoding.PutUint32(buf[at:], uint32(b.logicalLen))
 		encoding.PutUint32(buf[at+4:], uint32(b.physLen))
 		buf[at+8] = byte(b.codec)
+		encoding.PutUint32(buf[at+9:], uint32(b.records))
 		at += blockTableEntryLen
 	}
 	encoding.PutUint32(buf[at:], crc32.ChecksumIEEE(buf[:at]))
@@ -115,9 +118,19 @@ func decodeBlockTable(buf []byte) ([]blockRef, error) {
 		uLen := int64(encoding.Uint32(body[at:]))
 		pLen := int64(encoding.Uint32(body[at+4:]))
 		codec := compress.Codec(body[at+8])
+		records := int64(encoding.Uint32(body[at+9:]))
 		if pLen < blockHeaderLen {
 			return nil, errors.Wrapf(ErrBlockTableFormat,
 				"block %d is %d bytes, shorter than a header", i, pLen)
+		}
+		// Zero is refused for the reason parseBlockHeader refuses it in the
+		// header this entry summarises: no block holds no records, so a zero is
+		// a field nobody wrote, and the table is the ONLY source a tiered
+		// segment consults — a zero accepted here becomes a segment that
+		// reports fewer records than it holds to the retention walk.
+		if records == 0 {
+			return nil, errors.Wrapf(ErrBlockTableFormat,
+				"block %d claims no records", i)
 		}
 		blocks = append(blocks, blockRef{
 			logicalStart: logical,
@@ -125,6 +138,7 @@ func decodeBlockTable(buf []byte) ([]blockRef, error) {
 			physStart:    phys,
 			physLen:      pLen,
 			codec:        codec,
+			records:      records,
 		})
 		logical += uLen
 		phys += pLen
@@ -143,4 +157,19 @@ func blockTableExtent(blocks []blockRef) (logical, phys int64) {
 	}
 	last := blocks[len(blocks)-1]
 	return last.logicalStart + last.logicalLen, last.physStart + last.physLen
+}
+
+// sumBlockRecords is how many messages a block table accounts for.
+//
+// A sum and not a stored total, deliberately: the table already refuses to
+// decode unless its length and CRC match exactly, so the per-block counts either
+// all arrive or none do, and a separate total could only ever disagree with
+// them. It is the same argument the format makes about start positions — an
+// inconsistency the format cannot express beats one a reader has to check for.
+func sumBlockRecords(blocks []blockRef) int64 {
+	var n int64
+	for _, b := range blocks {
+		n += b.records
+	}
+	return n
 }

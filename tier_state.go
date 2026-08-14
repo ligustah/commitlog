@@ -61,6 +61,15 @@ type TierObject struct {
 	// size, which differ under block compression.
 	Position     int64
 	PhysPosition int64
+	// Records is how many messages the object holds, for message-count
+	// retention over a tier nothing has read yet.
+	//
+	// It is stored rather than computed from FirstOffset and LastOffset because
+	// that span is the record count only until compaction drops records out of
+	// the middle of it, after which it counts the holes too. Retention is a
+	// BUDGET, so an overstated count deletes more than it was asked to — see
+	// segment.messageCountLocked.
+	Records int64
 	// BlockMode records whether the object is block-compressed, since it
 	// cannot be read correctly without knowing.
 	BlockMode bool
@@ -116,7 +125,7 @@ func nonEmpty(keys ...string) []string {
 	return out
 }
 
-// tierObject is meta's inverse: the same ten fields, plus the base offset that
+// tierObject is meta's inverse: the same fields, plus the base offset that
 // identifies which segment they describe. offloadMeta is what a segment knows
 // about its own objects and TierObject is what the manifest says about them, so
 // the two carry the same facts and only the direction differs.
@@ -134,6 +143,7 @@ func (m offloadMeta) tierObject(baseOffset int64, tier string) TierObject {
 		Position:       m.Position,
 		PhysPosition:   m.PhysPosition,
 		BlockMode:      m.BlockMode,
+		Records:        m.Records,
 	}
 }
 
@@ -149,6 +159,7 @@ func (o TierObject) meta() offloadMeta {
 		Position:       o.Position,
 		PhysPosition:   o.PhysPosition,
 		BlockMode:      o.BlockMode,
+		Records:        o.Records,
 	}
 }
 

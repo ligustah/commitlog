@@ -110,12 +110,12 @@ func TestBlocksAndRecordsAgreeOnATruncatedPayload(t *testing.T) {
 	dir := tempDir(t)
 	path := filepath.Join(dir, "00000000000000000000.log")
 
-	// A block claiming 1024 payload bytes, with three bytes behind it.
-	hdr := []byte{
-		blockMagic, BlockFormatVersion, byte(compress.Zstd),
-		0, 0, 0x04, 0x00,
-		0, 0, 0x04, 0x00,
-	}
+	// A block claiming 1024 payload bytes, with three bytes behind it. Built by
+	// the writer rather than by hand: the fixture's point is a header that is
+	// WELL FORMED and describes more than is there, so a hand-laid one stops
+	// being that the moment the layout changes — it becomes a short header, and
+	// the parse fails one check earlier than the one under test.
+	hdr := encodeBlockHeader(compress.Zstd, 1024, 1024, 4)
 	require.NoError(t, os.WriteFile(path, append(hdr, 1, 2, 3), 0666))
 
 	f, err := InspectSegment(path)

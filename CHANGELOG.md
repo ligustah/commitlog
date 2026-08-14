@@ -5,6 +5,65 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed — on-disk format, no compatibility path
+
+- **A block-compressed segment now records how many records each block holds.**
+  `BlockFormatVersion` 1 → 2 (header 11 → 15 bytes) and `blockTableVersion`
+  1 → 2 (entry 9 → 13 bytes). Both readers refuse the older layout rather than
+  guessing at it, which is what the version bytes are for — the header is not
+  merely missing a field, it is four bytes shorter, so a v1 segment read as v2
+  would put every block boundary after the first in the wrong place.
+
+  **There is no converter and no migration.** A log written by v0.88.0 or
+  earlier with `Compression` set cannot be read by this build. Agreed with
+  durable_streams, who keep no on-disk data across versions.
+
+  `TierObject` gains a `Records` field for the same reason, which is a manifest
+  change rather than a segment one: an existing manifest decodes with `Records`
+  zero, and a tiered log adopted from one reports zero records until it is
+  republished.
+
+### Fixed
+
+- **`MaxLogMessages` no longer deletes records it was asked to keep.**
+  `(*segment).MessageCount` answered `lastOffset - firstOffset + 1` for every
+  segment without a dense index — every block-compressed one, and every offloaded
+  one whose index lives in the store. That span is the record count only while
+  offsets are contiguous, and compaction is precisely the pass that stops them
+  being: the records go and their offsets stay. A compacted snappy segment
+  measured **381 by span against 138 records present, 2.76x over**.
+
+  The comment defending it called the result "an upper bound — acceptable for the
+  retention heuristic that consumes it", and neither half was true. It is not a
+  heuristic, it is a term in a **budget**: `applyTotalLimit` walks segments oldest
+  first deleting until the running total is under `MaxLogMessages`. An upper bound
+  is therefore not the safe side of anything — overstating each segment makes the
+  walk reach the ceiling sooner, so it **deletes more**. A caller setting the
+  limit to exactly what its log held would have lost roughly two thirds of it.
+
+  The count is a stored fact now, in all three places a segment can be described
+  from — the block header, the block table, and the manifest entry — because each
+  is the only description in some state the segment can be in. In particular a
+  cold tiered segment answers from the manifest without fetching its block table,
+  so retention over a tier nothing has read still costs no round trips.
+
+  This is the same shape as v0.88.0's byte-budget fix (`Position` where
+  `PhysicalSize` was meant) one measure over: a budget term that was not
+  measuring what the budget bounds.
+
+- **`compress.Codec.Valid()` is reached by a test again.** `TestBlockHeaderErrors`
+  had a case labelled "unknown codec" that poked the *version* byte, which the
+  case above it already covered — so the codec check, whose only production
+  caller is `parseBlockHeader`, had no coverage at all.
+
+### Added
+
+- **`BlockInfo.Records`** — `InspectSegment(...).Blocks()` reports each block's
+  claimed record count, so an operator can compare it against the frames
+  `Records()` walks and tell which of the two is wrong.
+
 ## v0.88.0 — 2026-08-14
 
 ### Added

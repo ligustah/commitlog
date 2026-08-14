@@ -2076,3 +2076,50 @@ reopen nor a tiered segment pays a walk for it.
 That is an on-disk format change, and it is being raised rather than taken:
 durable_streams is repinning onto v0.88.0 as this is written, and a block-format
 bump makes existing block-compressed segments unreadable to the new build.
+
+**Taken, 2026-08-14.** Both approvals came in on the same day the section above
+was written. durable_streams answered the compatibility question — they do run
+`Compression` and `Compact` on one `commitlog.Options`, their compaction and
+maintenance chaos suites cover both codecs, and they keep no on-disk data across
+versions and do no migrations: *"Bump the block format."* The user's card
+answered `bump-format`.
+
+What shipped is the design the section describes, with one addition it did not
+foresee. The count went into all three places a segment can be described from,
+because each of them is the ONLY description in some state the segment can be in:
+
+- the **block header** (11 → 15 bytes, `BlockFormatVersion` 1 → 2), which is what
+  `scanBlocks` recovers from when a crash has destroyed the sidecar;
+- the **block table** (`blockTableEntryLen` 9 → 13, `blockTableVersion` 1 → 2),
+  so a reopen and a tiered read do not walk the object for it;
+- **`offloadMeta`/`TierObject`**, which is the addition. An offloaded segment
+  fetches its block table at the first READ, not at open, and option 2 keeps its
+  index in the store — so at the moment tier retention asks a cold segment for
+  its count there is nothing resident to ask. Without the manifest field the fix
+  would have reached every local segment and none of the tiered ones, which is
+  where compacted data is most likely to be sitting.
+
+`MessageCount` is now three reads of a stored fact and no arithmetic, and the
+comment defending the span is gone rather than corrected.
+
+Two things fell out of writing it that are worth keeping:
+
+**A zero is refused, in both formats.** No block holds no records — `write`
+refuses an empty message set before a byte is appended — so a zero in that field
+is a field nobody wrote. Accepting it as "empty" would make a count read LOW,
+which is the opposite failure and just as bad: a segment reporting 0 is one a
+retention walk can never trim. There is deliberately no value meaning "ask
+someone else".
+
+**The cross-check was free.** `fetchBlockTable` already refused a table whose
+extents disagreed with the manifest entry beside it; the record count is the same
+kind of claim written by the same offload, so it is compared there too. That
+matters more than it reads: the fetch is the moment a segment stops answering
+from the manifest and starts answering from the table, and two sources that could
+disagree would make a segment's count change the first time anybody read it.
+
+**And one test was asserting the wrong half.** `TestBlockHeaderErrors`'s
+"unknown codec" case poked `hdr[1]` — the VERSION byte, which the case above it
+already covers — so `compress.Codec.Valid()`, whose only production caller is
+`parseBlockHeader`, had no test reaching it at all. It pokes `hdr[2]` now, and
+the version case it was duplicating is spelled out separately.
