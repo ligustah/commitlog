@@ -224,15 +224,26 @@ type commitLog struct {
 type Options struct {
 	Name            string        // commitLog name
 	Path            string        // Path to log directory
-	MaxSegmentBytes int64         // Max bytes a Segment can contain before creating a new one
+	MaxSegmentBytes int64         // Max UNCOMPRESSED bytes a Segment can contain before creating a new one
 	MaxSegmentAge   time.Duration // Max time before a new log segment is rolled out.
-	MaxLogBytes     int64         // Retention by bytes
+	MaxLogBytes     int64         // Retention by bytes ON DISK
 	MaxLogMessages  int64         // Retention by messages
 	MaxLogAge       time.Duration // Retention by age
 	// MaxLog* above bound LOCAL disk alone and do not count offloaded
 	// segments — counting them would delete records to reclaim space that
 	// offloading already reclaimed. Each tier carries its own budget; see
 	// Tier.MaxBytes.
+	//
+	// MaxSegmentBytes and MaxLogBytes count DIFFERENT bytes when Compression is
+	// set, and the difference is deliberate rather than an oversight in one of
+	// them. MaxSegmentBytes bounds the segment's logical extent, because what a
+	// roll is really protecting is everything sized by that extent — the offset
+	// span a segment covers, its index, the working set a compaction pass has to
+	// hold — none of which shrink when the bytes compress. MaxLogBytes bounds a
+	// RESOURCE, and a resource is consumed by the bytes that are actually there.
+	// A compressed log therefore holds more records per segment-full than an
+	// uncompressed one and the same number of BYTES per retention limit, which is
+	// what both settings are for.
 	// LocalRetentionAge is how long a record's bytes stay on local disk before
 	// the log offloads them to the tier. Zero never offloads.
 	//
@@ -1404,7 +1415,7 @@ func (l *commitLog) LocalBytes() int64 {
 		if !ok || seg.isOffloaded() {
 			continue
 		}
-		n += seg.Position()
+		n += seg.PhysicalSize()
 	}
 	return n
 }

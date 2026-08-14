@@ -194,9 +194,22 @@ func (c *deleteCleaner) cleanLocal(segments []*segment, floor Bound) ([]*segment
 	}
 
 	// Lastly limit by number of bytes.
+	//
+	// PhysicalSize, not Position: this budget bounds a RESOURCE — disk — so it
+	// has to be summed over the bytes that are on it. On a block-compressed log
+	// the two measures differ by the compression ratio, and Position was wrong in
+	// both directions at once:
+	//
+	//   - bytes that compress make Position LARGER than the disk they occupy, so
+	//     the walk reached the limit early and deleted records the budget had
+	//     room for. A 20:1 log threw away 95% of what the caller asked to keep,
+	//     which is silent data loss dressed as policy.
+	//   - bytes that do not compress are stored raw and still carry an 11-byte
+	//     block header each, so Position is SMALLER than the disk, and a
+	//     small-append workload overran the limit it was given.
 	if c.Retention.Bytes > 0 {
 		segments, err = c.applyTotalLimit(segments, c.Retention.Bytes,
-			(*segment).Position, keepActiveSegment, deletablePrefix(segments, floor))
+			(*segment).PhysicalSize, keepActiveSegment, deletablePrefix(segments, floor))
 		if err != nil {
 			return segments, errors.Wrap(err, "failed to apply bytes retention limit")
 		}
@@ -398,8 +411,11 @@ func (c *deleteCleaner) cleanTier(segments []*segment, tier Tier, maxTierDrop in
 		}
 	}
 	if tier.MaxBytes > 0 {
+		// PhysicalSize for the same reason the local byte limit uses it: this
+		// bounds what the tier STORES, and a tier bills for the object it holds,
+		// not for the extent that object decompresses to.
 		segments, err = c.applyTotalLimit(segments, tier.MaxBytes,
-			(*segment).Position, keepNoSegment, maxTierDrop)
+			(*segment).PhysicalSize, keepNoSegment, maxTierDrop)
 	}
 	return segments, err
 }

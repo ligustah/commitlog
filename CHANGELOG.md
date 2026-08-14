@@ -7,6 +7,37 @@ library from that fork onward.
 
 ## Unreleased
 
+### Fixed
+
+- **Every byte budget that bounds a RESOURCE now counts the bytes that are
+  there.** `Options.MaxLogBytes`, `Tier.MaxBytes` and `LocalBytes()` all summed
+  `(*segment).Position` — the segment's *logical* extent, which on a
+  block-compressed log is the size the bytes decompress to and not the size of
+  anything that exists. They ask `(*segment).PhysicalSize` instead, which is the
+  file (or the store object, for an offloaded segment).
+
+  The error ran **both ways**, so neither "it errs on the safe side" nor "it errs
+  on the generous side" describes it:
+
+  | fixture | `Position` vs disk | consequence |
+  | --- | --- | --- |
+  | bytes that compress | too **large** | retention hit the limit early and deleted records the budget had room for — a 20:1 log threw away most of what the caller asked to keep |
+  | bytes that do not compress | too **small** | stored raw, but still 11 bytes of block header each, so a small-append workload overran the limit it was given |
+
+  `MaxSegmentBytes` is deliberately **not** changed: it is the one byte setting
+  that is not about a resource. What a roll bounds is everything sized by the
+  segment's extent — its offset span, its index, a compaction pass's working set
+  — and none of that shrinks when the bytes compress. `Options` now documents the
+  pair, and `CheckSplit` says at the comparison which measure it wants and why.
+
+  Nothing caught this because the entire byte-retention suite runs on
+  **uncompressed** fixtures, where the two measures are equal by construction:
+  the tests stood exactly where the defect cannot occur. The third instance of
+  that shape this sweep. Four new tests set `Compression` and place the budget
+  *between* the two numbers, so the choice of measure alone decides the outcome
+  rather than the margin, and three new guards hold the three call sites — each
+  is separately removable and each fails differently.
+
 ### Changed
 
 - A `KeyPrefix` read over a **block-compressed** segment now plans its runs in

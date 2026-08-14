@@ -35,6 +35,11 @@ type Tier struct {
 	//
 	// Zero keeps everything in this tier. A log with no tiers has no offloaded
 	// segments, so none of this ever applies to it.
+	//
+	// MaxBytes is the size of the OBJECTS this tier holds, which for a
+	// block-compressed log is smaller than the extent they decompress to. That
+	// is the number a store bills and the number a bucket quota counts, so it is
+	// the one a budget against a store has to be denominated in.
 	MaxBytes    int64
 	MaxMessages int64
 	MaxAge      time.Duration

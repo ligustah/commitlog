@@ -1222,6 +1222,33 @@ run_guard "a negative option is refused" commitlog.go   '		if c.bad {' '		if fal
 # data loss, just every log in the process silently offloading itself.
 run_guard "zero local retention never offloads" clean.go   '	if l.Options.LocalRetentionAge <= 0 || !l.hasTier() {' '	if !l.hasTier() {'   '^TestAZeroLocalRetentionAgeNeverOffloads$'
 
+# The three byte budgets that bound or report a RESOURCE sum PhysicalSize, not
+# Position. Neutralized to Position, which is what each of them said before -- the
+# UNCOMPRESSED extent, which on a block-compressed log is not the size of
+# anything. Guarded at all three sites because each is separately removable and
+# each fails differently: local retention deletes records the disk had room for,
+# tier retention reclaims objects the store was still being paid to hold, and
+# LocalBytes reports a log as bigger than a copy of it would be.
+#
+# The whole byte-retention suite runs on UNCOMPRESSED fixtures, where the two
+# measures are equal by construction, so none of it can falsify any of these.
+# Each guard names a test whose fixture sets Compression and whose budget stands
+# BETWEEN the two numbers.
+run_guard "local byte retention counts the disk" delete_cleaner.go \
+  '			(*segment).PhysicalSize, keepActiveSegment, deletablePrefix(segments, floor))' \
+  '			(*segment).Position, keepActiveSegment, deletablePrefix(segments, floor))' \
+  '^TestByteRetentionOnACompressedLogCountsTheBytesOnDisk$'
+
+run_guard "a tier budget counts the store" delete_cleaner.go \
+  '			(*segment).PhysicalSize, keepNoSegment, maxTierDrop)' \
+  '			(*segment).Position, keepNoSegment, maxTierDrop)' \
+  '^TestTierByteBudgetCountsTheBytesInTheStore$'
+
+run_guard "LocalBytes counts the bytes on disk" commitlog.go \
+  '		n += seg.PhysicalSize()' \
+  '		n += seg.Position()' \
+  '^TestACompressedLogsLocalBytesAreTheBytesOnDisk$'
+
 # Removing this returns the walk to adding cLen to pos unchecked, which is what
 # let a block overrunning the file be listed as healthy while Records refused the
 # same bytes.

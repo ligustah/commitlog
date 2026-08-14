@@ -1424,6 +1424,12 @@ const maxSegmentBlocks = 16 << 10
 func (s *segment) CheckSplit(logRollTime time.Duration) bool {
 	s.RLock()
 	defer s.RUnlock()
+	// position, not physPosition: MaxSegmentBytes is deliberately LOGICAL. It is
+	// the one byte setting that is not about a resource — what a roll bounds is
+	// everything sized by the segment's extent (its offset span, its index, a
+	// compaction pass's working set), and none of that shrinks when the bytes
+	// compress. The budgets that ARE about a resource (MaxLogBytes, Tier.MaxBytes,
+	// LocalBytes) all ask PhysicalSize instead. Options documents the pair.
 	if s.position >= s.maxBytes {
 		return true
 	}
@@ -1549,6 +1555,30 @@ func (s *segment) LastOffset() int64 {
 func (s *segment) Position() int64 {
 	s.RLock()
 	defer s.RUnlock()
+	return s.position
+}
+
+// PhysicalSize is how many bytes this segment's log OCCUPIES — in its file, or
+// in its store object once offloaded. Position is the logical extent, which is
+// the same number only when the segment is not block-compressed.
+//
+// This is the one to use for anything that bounds or reports a RESOURCE: a
+// retention budget, a disk figure, a transfer cost. Position is the one to use
+// for anything about the record stream itself — where a record sits, how far a
+// scan has to go, whether a join's result would still fit MaxSegmentBytes.
+//
+// It branches rather than reading physPosition unconditionally, because the raw
+// append path does not maintain physPosition: it has no second number to track,
+// since every byte written is a byte of logical extent, so the field sits at
+// whatever the file measured when the segment was opened. Making the raw path
+// keep the two in step would be storing one fact twice; asking the right field
+// for the mode costs a branch and states the invariant where it can be read.
+func (s *segment) PhysicalSize() int64 {
+	s.RLock()
+	defer s.RUnlock()
+	if s.blockMode {
+		return s.physPosition
+	}
 	return s.position
 }
 

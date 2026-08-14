@@ -1761,11 +1761,20 @@ holds on LOCAL disk — what copying it elsewhere would cost."* All three sum
 Two directions of wrongness, not one:
 
 - **Large batches compress**, so the file is smaller than the logical extent and
-  the budgets over-retain. Measured in this session's block fixture: 52KB
-  logical per block against ~2.5KB on disk, a factor of twenty.
+  `Position` OVERSTATES the disk. Retention's backwards walk therefore reaches
+  the limit early and drops segments the budget had room for — silent data loss
+  dressed as policy — while `LocalBytes` reports the log as bigger than a copy of
+  it would be. Measured in this session's block fixture: 52KB logical per block
+  against ~2.5KB on disk, a factor of twenty.
 - **Small appends do not compress** — `compressMinBlock` stores anything under
   4KB raw — but each still carries an 11-byte block header, so the file is
-  *larger* than the logical extent and `LocalBytes` under-reports.
+  *larger* than the logical extent, `Position` UNDERSTATES the disk, and the log
+  overruns the limit it was given.
+
+Worth writing down because I got it backwards on the first pass: the intuition
+"compression means we keep more than we meant to" is the wrong way round. The
+budget is a ceiling on a running total, so overstating each term makes the total
+hit the ceiling SOONER. An overstated measure deletes more, not less.
 
 `TestALogsLocalBytesAreTheBytesOnDisk` already asserts exactly the right thing
 (`LocalBytes() == diskLogBytes(dir)`, measured independently by walking the
@@ -1781,3 +1790,45 @@ from a soak. Both came from reading one function against the layer beneath it an
 then writing a direct, seconds-long cost assertion. The soak was never going to
 find them — a soak measures throughput, and both defects are invisible in
 throughput terms while being forty times off in requests and bytes.
+
+### #285, resolved: `PhysicalSize`, and the one budget that keeps `Position`
+
+The fix is a second accessor rather than a change to `Position`, because both
+numbers are wanted and the interesting part was deciding which callers want
+which. `(*segment).PhysicalSize` returns `physPosition` in block mode and
+`position` otherwise — it has to branch, because the RAW append path never
+advances `physPosition` (it has no second number to track, every byte written
+being a byte of logical extent), so an unconditional read would return whatever
+the file measured at open.
+
+The dividing line, stated once and cited from all four sites:
+
+> **A budget over a RESOURCE is denominated in the bytes that are there. A budget
+> over the RECORD STREAM is denominated in the extent.**
+
+- `MaxLogBytes`, `Tier.MaxBytes`, `LocalBytes()` — resource. Disk, a store's
+  bill, a transfer. All three now sum `PhysicalSize`.
+- `MaxSegmentBytes` — **not** a resource, and deliberately left on `position`.
+  What a roll protects is everything sized by the segment's extent: the offset
+  span it covers, its index, the working set a compaction pass has to hold. None
+  of that shrinks when the bytes compress. `clean_join.go`'s `JoinBelow` has to
+  agree with it and so is logical too, which was checked and is correct.
+
+This is the same lens as the previous section — a budget denominated in a unit
+the layer below does not transact in — applied one layer down. There it was a
+byte budget above a block-structured *transfer*; here it is a byte budget above
+block-structured *storage*.
+
+**What made it invisible** is the recurring shape, now at four instances:
+`TestALogsLocalBytesAreTheBytesOnDisk` asserts precisely the right thing, by an
+independent measure (it walks and stats the `.log` files rather than asking the
+segments again), and could not fail, because no fixture in the byte-retention
+suite sets `Compression`. The four new tests are built the other way round: the
+budget is placed *between* the two measures, so the choice of measure is the
+whole difference between "delete nothing" and "delete most of it" rather than a
+question of margin. A budget above both numbers passes either way; one below both
+deletes either way; only a fixture standing between them has an opinion.
+
+Three guards, one per call site, because each is separately removable and each
+fails differently — and a fourth test (`...StillDeletes`) so that "never delete
+anything" cannot satisfy the first three.

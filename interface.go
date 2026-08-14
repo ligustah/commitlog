@@ -324,6 +324,10 @@ type CommitLog interface {
 	// other process reads the same way, so a copy does not move them. Indexes
 	// are excluded too, being derived rather than transferred.
 	//
+	// The bytes are the ones the files OCCUPY, so a block-compressed log reports
+	// its compressed size — the number a copy would actually move, and the one a
+	// scheduler comparing this log against an uncompressed one needs.
+	//
 	// Arithmetic over the segment list, not a filesystem walk, so it is cheap
 	// enough to ask on a timer.
 	LocalBytes() int64
