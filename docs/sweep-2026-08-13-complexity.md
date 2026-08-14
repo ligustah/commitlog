@@ -2016,3 +2016,63 @@ that second reason.
 
 It currently sees three flows and passes. The value is entirely in the fourth,
 which does not exist yet.
+
+### #294: the budget whose doc calls its own error acceptable
+
+`(*segment).MessageCount` returns `Index.CountEntries()` for a raw segment — the
+index is dense there, so that is exact — and `lastOffset - firstOffset + 1` for a
+block-compressed one, because the block index is sparse. Its doc says:
+
+> After compaction a compressed segment stores one message per block and may have
+> offset gaps, in which case this is an upper bound — acceptable for the
+> retention heuristic that consumes it.
+
+The consumer is `applyTotalLimit`, and it is not a heuristic. It is the same
+budget walk `MaxLogBytes` uses, so #285's direction rule applies unchanged:
+**overstating each term makes the running total reach the ceiling sooner, so the
+walk stops earlier and deletes MORE.** "Upper bound" and "over-deletes" are the
+same sentence, and only one of them sounds acceptable.
+
+Measured, on a log with `Compression: Snappy` and `Compact: true`, 400 records
+where a quarter use a key that appears once (survivors) and the rest churn eight
+hot keys:
+
+```
+AFTER  seg base=0   first=0   last=48  MessageCount=49   Index.CountEntries()=1  blocks=1
+AFTER  seg base=50  first=52  last=96  MessageCount=45   Index.CountEntries()=1  blocks=1
+...
+REPORTED total=381   ACTUAL surviving records=138
+```
+
+**2.76× over.** A caller setting `MaxLogMessages: 138` — asking to keep exactly
+what is there — would have the walk believe it holds 381 and delete about
+two-thirds of the log. That is #285's failure mode again: silent data loss
+dressed as policy.
+
+The fixture is worth noting because the first two attempts could not see it, both
+for reasons already recorded in this sweep. A single segment large enough not to
+roll is never compacted at all (compaction touches sealed segments). And a
+fixture where *every* key is superseded gets its segments **deleted rather than
+rewritten** — the "a rewrite budget needs a survivor" shape — so no offset gap is
+ever created. The bug needs a segment that keeps some records and loses others,
+which is the only thing that produces a gap.
+
+**Why it cannot be fixed cheaply.** The probe answers that too: a rewritten
+segment came back as **one block with one index entry holding thirteen records**.
+The index cannot count them, the block table records lengths and not counts, and
+the block header — magic, version, codec, uncompressed length, compressed length,
+11 bytes — has nowhere to put one either. Nothing on disk knows how many records
+a compacted block segment holds. The offset span is not a lazy approximation of a
+number that is available; it is the only number there is.
+
+So the correct fix is a stored count, and the natural home is the block header
+itself (11 → 15 bytes, with the existing `BlockFormatVersion` bumped, which is
+already a documented clean cutover). That makes the count recoverable by
+`scanBlocks` after a crash has destroyed the sidecar, rather than only by the
+sidecar — the distinction that decides whether the fix is exact or merely usually
+exact. `blockTableEntryLen` and `offloadMeta` would carry it too, so neither a
+reopen nor a tiered segment pays a walk for it.
+
+That is an on-disk format change, and it is being raised rather than taken:
+durable_streams is repinning onto v0.88.0 as this is written, and a block-format
+bump makes existing block-compressed segments unreadable to the new build.
