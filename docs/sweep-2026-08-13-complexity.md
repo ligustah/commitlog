@@ -1370,3 +1370,56 @@ answers the question — the same rule already recorded for chaos-test floors, n
 pointed at coverage claims.
 
 Recorded as a negative: the streaming decision needs nothing.
+
+## Two lenses that came back empty, and are worth the sentence
+
+### Migrations and back-compat before v1
+
+The standing task names this explicitly, so it was re-run rather than assumed
+closed. Grepping the production tree for `backward|legacy|deprecat|migrat|for
+older|pre-v|compatibilit` returns twelve hits and **not one** is a compatibility
+branch: most are the word "backwards" describing a direction, and the rest are
+records that the branch already went —
+
+- `block.go`: "Clean cutover: pre-version segments are not supported."
+- `block_table_local.go`: "the library is pre-v1 with nothing to migrate."
+- `manifest.go`: "a store written by an older build is re-offloaded, not converted."
+- `descriptor.go`: V0 "went in v0.82.0 rather than becoming permanent."
+
+The sharper form agrees: there is exactly one `BlockFormatVersion`, exactly one
+`descriptorFileV1`, and both parses refuse anything else rather than branching on
+it. The version fields that remain are about *future* formats — a file from a
+newer writer should say "this file is newer than me" instead of naming a field
+it does not know — which does not depend on any past format staying readable.
+
+Nothing to do. Earlier passes took it all.
+
+### Sibling asymmetry: does the read side know what the write side knows?
+
+The lens that found the durable_streams sidecar defect this session, turned back
+on this repo. Pair functions by an antonym in their names (read/write, get/put,
+load/save, parse/render) and diff which safety properties each body actually
+has: retry, fsync, atomic write, validation, CRC.
+
+Every difference it reports is the correct one — `writeDescriptor` and
+`PutSidecar` write atomically and their readers do not, which is what atomicity
+*is*. On the property that matters, retry, the pairs match.
+
+The precise form confirms it. All three files written through
+`AtomicWriteFileWithRetry` are read through a retrying reader:
+
+| file | write | read |
+|---|---|---|
+| descriptor | `AtomicWriteFileWithRetry` | `openWithRetry` |
+| leader epoch checkpoint | `AtomicWriteFileWithRetry` | `ReadFileWithRetry` |
+| sidecar | `AtomicWriteFileWithRetry` | `ReadFileWithRetry` |
+
+The reads that stay plain are the DERIVED sidecars — the local block table and
+the key digest — and both callers return "not ok" on any error at all and
+rebuild. That is the right answer for a regenerable file: a sharing violation
+costs a rebuild, not a failure, and paying a five-second retry budget for a file
+you can reconstruct is the trade #236 already rejected.
+
+So the asymmetry this lens hunts exists downstream and not here. Recorded as a
+negative — and the lens itself is worth keeping, because it is mechanical and it
+found a real defect the first time it was pointed anywhere new.
