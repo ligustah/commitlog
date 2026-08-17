@@ -181,20 +181,55 @@ func TestRetentionNeverWritesIntoASliceAReaderIsHolding(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(3 * time.Second)
+	// The churn runs until the floors below are actually MET, not for a fixed
+	// three seconds.
+	//
+	// The floors are the point of this test — they are what separates "the
+	// detector found nothing" from "the operation never ran" — but pairing a count
+	// with a fixed window makes reaching it a property of the machine. The comment
+	// that used to sit here asserted the opposite, that the floors were "far below
+	// what three seconds produces here (hundreds of rewrites, millions of walks)"
+	// and "sized to catch zero, not to measure the machine". A fixed window is
+	// precisely how they came to measure it: on 2026-08-17 a loaded windows runner
+	// produced 2 rewrites against the floor of 10 and failed the job, having proved
+	// nothing in either direction. `race (windows)` passed in the same run, which
+	// is the tell — under -race each operation is SLOWER, so a systematic shortfall
+	// would hit that job harder, not spare it.
+	//
+	// Three seconds stays as a FLOOR on the window rather than the whole of it,
+	// because the detector's sensitivity comes from overlap and stopping the moment
+	// the counters clear would shorten the overlap on a fast box. What changes is
+	// the ceiling: keep going until the churn is demonstrably there, up to a
+	// deadline that still FAILS rather than passing vacuously. So a quiet machine
+	// costs the same three seconds it always did, a slow one gets as long as it
+	// needs, and neither can turn the floors into a measurement of the runner.
+	const (
+		minChurn    = 3 * time.Second
+		churnBudget = 60 * time.Second
+	)
+	churnStart := time.Now()
+	for {
+		enough := rewrites.Load() > 10 && walks.Load() > 100
+		if enough && time.Since(churnStart) >= minChurn {
+			break
+		}
+		if time.Since(churnStart) >= churnBudget {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	close(stop)
 	wg.Wait()
 
 	// Nothing to assert about VALUES: under -race the detector fails the test,
 	// and without it this is a liveness check that the log survives the churn.
-	// What is asserted is that the churn HAPPENED — see the doc. Both floors are
-	// far below what three seconds produces here (hundreds of rewrites, millions
-	// of walks) and are sized to catch zero, not to measure the machine.
+	// What is asserted is that the churn HAPPENED — see the doc.
 	require.GreaterOrEqual(t, l.NewestOffset(), int64(0), "the log wrote nothing")
 	require.Greater(t, rewrites.Load(), int64(10),
-		"retention never rewrote a boundary segment, so nothing here could have raced "+
-			"a reader's snapshot and a clean run proves nothing")
+		"retention never rewrote a boundary segment in %s, so nothing here could have "+
+			"raced a reader's snapshot and a clean run proves nothing", churnBudget)
 	require.Greater(t, walks.Load(), int64(100),
-		"no reader ever indexed a non-empty snapshot, so there was nothing to race")
+		"no reader ever indexed a non-empty snapshot in %s, so there was nothing to race",
+		churnBudget)
 	t.Logf("boundary rewrites=%d snapshot walks=%d", rewrites.Load(), walks.Load())
 }

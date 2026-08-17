@@ -146,6 +146,34 @@ library from that fork onward.
   and the operator reads "closed" about a log that was deleted. The arms' order
   is load-bearing rather than stylistic, and only a per-arm mutation says so.
 
+- **`TestRetentionNeverWritesIntoASliceAReaderIsHolding` waits for its churn
+  instead of timing it.** It ran the churn for a fixed three seconds and then
+  required more than 10 boundary rewrites — and the comment beside those floors
+  claimed they were "far below what three seconds produces here" and "sized to
+  catch zero, not to measure the machine". Pairing a count with a fixed window is
+  exactly how they came to measure it: a loaded windows runner produced **2**, and
+  failed this release's candidate having proved nothing in either direction.
+
+  `race (windows)` passed in the same run, which is the tell — under `-race` every
+  operation is slower, so a systematic shortfall would hit that job harder rather
+  than spare it. This was scheduling noise meeting a threshold that could not
+  tolerate it.
+
+  The floors stay exactly as they were, because they are the point: without them a
+  detector that finds nothing is indistinguishable from a test that never performed
+  the operation. What changed is the window — three seconds is now a FLOOR on it
+  rather than the whole of it, and the churn continues until the floors are
+  demonstrably met, up to a 60s budget that still fails rather than passing
+  vacuously. The minimum is kept because the detector's sensitivity comes from
+  overlap, so stopping the instant the counters clear would shorten it on a fast
+  box.
+
+  Verified by raising only the loop's target: the test then ran 5.24s instead of
+  3.05s and reached 102 rewrites, so the wait genuinely extends and the extra time
+  genuinely buys rewrites. Worth stating because the obvious check — starving it
+  with `GOMAXPROCS=1` — did *not* reproduce the shortfall (23 rewrites, still
+  passing), so it would have left the fix plausible rather than measured.
+
 - **The fuzz smoke budgets fit at the slow end now, because one of them decided a
   release.** `FuzzCorruptedRecordIsNeverServedSilently` was cancelled by the
   20-minute job timeout on this release's own candidate, 342 execs short of its
