@@ -1020,19 +1020,38 @@ func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byt
 		return MessageMetadata{}, payloadBuf, err
 	}
 	offset := fh.offset
-	// Chunked for the same reason as readMessage: an unchecksummed size field
-	// must not turn a torn frame into a 4GiB allocation. See maxPayloadChunk.
+	// Chunked for the same reason as readMessage. The reason is NOT that the
+	// size is unchecksummed — it is one of the four fields headerCrc covers, and
+	// readFrameHeader verifies it above precisely so it can be trusted here.
+	// This comment said "an unchecksummed size field" until 2026-08-17, which is
+	// the third time a comment in this file has outlived the header CRC landing;
+	// see #252 for the previous two.
+	//
+	// What chunking is actually for is a size that is large and HONEST: a frame
+	// the writer really did declare at 4GiB is still a 4GiB allocation, and a
+	// verified length is not a bounded one. See maxPayloadChunk.
 	buf, err := readPayload(ctx, reader, int(fh.size), payloadBuf)
 	if err != nil {
 		return MessageMetadata{}, payloadBuf, pkgErrors.Wrap(err, "failed to read message payload")
 	}
 	payloadBuf = buf
-	// Nothing has vouched for these bytes. This path skips the payload CRC by
-	// design, and the frame header's CRC covers the record's identity rather than
-	// its contents — so the length fields below are unverified, and the parse has
-	// to be the thing that refuses them. Both checks used to be absent: a short
-	// frame indexed buf[5] off the end, and a damaged key length took
-	// parseHeadersAfterValue past it.
+	// Nothing has vouched for the CONTENTS of these bytes. This path skips the
+	// payload CRC by design, and the header's CRC covers the record's identity
+	// rather than its contents — so the key and value lengths INSIDE the payload
+	// are unverified, and the parse has to be the thing that refuses them. Both
+	// checks below used to be absent: a short frame indexed buf[5] off the end,
+	// and a damaged key length took parseHeadersAfterValue past it.
+	//
+	// The two are not in the same position now, though they were when they were
+	// written together. len(buf) is fh.size, which headerCrc DOES cover, so this
+	// first check is shadowed by readFrameHeader exactly as readMessage's
+	// "too short to hold a checksum" is — reachable only by a header that
+	// verifies while declaring a size encode cannot produce, which nothing
+	// writes. It is defence in depth and has no test for the same reason that
+	// one has none.
+	//
+	// The parse check below is the live one: a key length lives in the payload,
+	// which nothing checks, so it is reachable by one flipped byte.
 	if len(buf) < 6 {
 		return MessageMetadata{}, payloadBuf, pkgErrors.Wrapf(ErrCorruptRecord,
 			"record at offset %d: frame claims %d bytes, too short to hold a record",
