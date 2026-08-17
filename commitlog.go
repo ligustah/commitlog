@@ -1340,6 +1340,26 @@ func (l *commitLog) readMessageSetOnce(offset int64, maxBytes int) ([]byte, erro
 	if seg == nil {
 		return nil, ErrSegmentNotFound
 	}
+	return readMessageSetFrom(seg, contains, offset, maxBytes)
+}
+
+// readMessageSetFrom reads one segment, already resolved.
+//
+// Split from the resolve so the read can be tested against a segment a
+// compaction pass has ALREADY replaced, which is the state the arms below
+// exist for. Fused, the only way to get that state into the read was to race
+// one in — three goroutines and a segment-departure gate for seven seconds, and
+// even then the classification arm could not be falsified, because the resolve
+// loop above re-resolves before anything observes it. With the seam a test
+// hands in the replaced segment directly and asserts what the read says about
+// it, in under a second and with no window to hit.
+//
+// contains is a parameter rather than re-derived here for the same reason: it
+// is what decides whether the index lookup runs at all, and the clamped case
+// (contains false, start at zero) reaches the scan without going through
+// findEntry first. That is the only path on which the scan's own swap arm is
+// reachable, so a test needs to be able to ask for it.
+func readMessageSetFrom(seg *segment, contains bool, offset int64, maxBytes int) ([]byte, error) {
 	// Below the oldest surviving record, clamp up to it rather than erroring:
 	// a follower resuming from a position retention has since passed should
 	// carry on from what is left, exactly as the readers do.
@@ -1411,16 +1431,22 @@ func (l *commitLog) readMessageSetOnce(offset int64, maxBytes int) ([]byte, erro
 			// damaged and to restore from a peer, which is the most expensive
 			// wrong answer this package can give.
 			//
-			// Stated as what it is: defence in depth, not the load-bearing half.
-			// Deleting this arm leaves TestReadMessageSetWhileCompactionReplaces-
-			// Segments green, because `%w: …: %w` keeps BOTH identities visible to
-			// errors.Is — measured, not assumed — so segmentSwapped still sees the
-			// swap through the wrap and ReadMessageSet's loop still re-resolves.
-			// What this arm holds is the case that survives the loop: a caller
-			// that hits readerResolveAttempts consecutive swaps must not be told
-			// its data is damaged. And it holds the fragility readOne already
-			// warns about in its own words — one changed wrap on this path "turns
-			// an ordinary compaction swap into a hard read failure".
+			// Falsified by TestAReadOfAReplacedSegmentIsNotReportedAsDamage,
+			// which is worth a note because it could not be at first. The
+			// end-to-end test cannot reach this: `%w: …: %w` keeps BOTH
+			// identities visible to errors.Is — measured, not assumed — so the
+			// resolve loop absorbs the swap through the wrap and re-resolves
+			// before anything observes what this line decided. Deleting the arm
+			// left that test green.
+			//
+			// What made it testable was splitting readMessageSetFrom out of the
+			// resolve, so a test can hand in an already-replaced segment and ask
+			// the read directly. An arm nothing can falsify is a comment with an
+			// if in front of it; the seam is the difference.
+			//
+			// It also holds the fragility readOne warns about in its own words:
+			// one changed wrap on this path "turns an ordinary compaction swap
+			// into a hard read failure".
 			if segmentSwapped(err) && len(out) == 0 {
 				return nil, err
 			}

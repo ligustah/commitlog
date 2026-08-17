@@ -19,8 +19,10 @@ import (
 //
 // It leaked that fact in two ways. This test falsifies the FIRST — restore the
 // old resolve-once body and it fails in under a second, naming the sentinel. It
-// cannot falsify the second, and the arm for that one says so in its own
-// comment rather than borrowing this test's credit:
+// cannot falsify the second, because the resolve loop re-resolves before
+// anything here observes what the read decided; that one is asked directly by
+// TestAReadOfAReplacedSegmentIsNotReportedAsDamage below, which is what the
+// readMessageSetFrom seam exists for. The two leaks:
 //
 //   - findEntry on a segment a pass had already swapped returned
 //     ErrSegmentReplaced verbatim. The interface doc then classified a commitlog
@@ -167,4 +169,66 @@ func TestReadMessageSetWhileCompactionReplacesSegments(t *testing.T) {
 	require.Greater(t, fetches.Load(), int64(1000), "not enough fetches to race anything")
 	require.GreaterOrEqual(t, departed(), int64(wantDepartures),
 		"no segment left the log, so the window under test never opened")
+}
+
+// The same two leaks, asked directly of the read instead of raced into it.
+//
+// This is the test the soak above could not be. The resolve loop re-resolves
+// before anything observes a swapped segment, so end to end there is no way to
+// see WHAT the read says about one — only that the fetch eventually succeeded.
+// That left the scan's classification arm unfalsifiable: deleting it kept the
+// soak green, because `%w: …: %w` leaves the swap visible through the wrap and
+// the loop absorbs it either way.
+//
+// readMessageSetFrom takes the resolved segment, so the replaced segment can be
+// handed in. No goroutines, no window, no departure gate — a real compaction
+// pass runs synchronously, and the segment it replaced is the one under test.
+func TestAReadOfAReplacedSegmentIsNotReportedAsDamage(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path:             tempDir(t),
+		MaxSegmentBytes:  256,
+		Compact:          true,
+		DisableAutoClean: true,
+	})
+	defer cleanup()
+
+	// One key, so the pass has every earlier record to drop and must rewrite.
+	for i := range 200 {
+		offs, err := l.Append([]*Message{{
+			Key:   []byte("k"),
+			Value: []byte(fmt.Sprintf("value padding to force segment rolls %d", i)),
+		}})
+		require.NoError(t, err)
+		l.SetHighWatermark(offs[0])
+	}
+
+	before := l.segmentsSnapshot()
+	require.Greater(t, len(before), 1, "the pass never rewrites the active segment, so one is not enough")
+	stale := before[0]
+
+	require.NoError(t, l.Clean())
+
+	after := l.segmentsSnapshot()
+	require.NotSame(t, stale, after[0],
+		"the pass left the first segment in place, so nothing here is stale and "+
+			"the test is asserting against a healthy segment")
+
+	// contains=true reaches the index lookup, which is the first leak.
+	_, err := readMessageSetFrom(stale, true, stale.BaseOffset, 4096)
+	require.Error(t, err)
+	require.True(t, segmentSwapped(err),
+		"a caller must be able to tell a swap from a real read failure: %v", err)
+	require.NotErrorIs(t, err, ErrSegmentUnreadable,
+		"the bytes are sitting intact in the replacement; calling this damage "+
+			"sends an operator to restore from a peer for a routine pass")
+
+	// contains=false skips the lookup and reaches the SCAN, which is the second
+	// leak and the one the soak test cannot reach. It is a real input — it is
+	// the clamp, taken whenever the requested offset is below what survives.
+	_, err = readMessageSetFrom(stale, false, stale.BaseOffset, 4096)
+	require.Error(t, err)
+	require.True(t, segmentSwapped(err),
+		"the scan reached a segment the pass had closed: %v", err)
+	require.NotErrorIs(t, err, ErrSegmentUnreadable,
+		"this is the arm that filed a compaction swap as replica damage")
 }

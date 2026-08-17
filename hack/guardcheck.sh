@@ -1569,15 +1569,19 @@ run_guard "a missing CopyTier store is permanent" copy_tier.go   '		return error
 # shape this path had — resolve once, read, hand the swap back to a follower
 # that has no segment list to re-resolve against.
 #
-# Only this half is guarded. The scan arm's segmentSwapped exemption is NOT
-# falsifiable by that test and its comment says so: `%w: ...: %w` keeps both
-# identities visible to errors.Is, so the loop re-resolves through the wrap
-# either way. Guarding it would report covered for a claim the test cannot make.
+# One guard per leak, and per TEST, because the two are reachable by different
+# paths and no single test covers both. The end-to-end test cannot see the scan
+# arm at all — the resolve loop absorbs the swap through the `%w: ...: %w` wrap
+# and re-resolves before anything observes what the read decided — so the arm
+# was unfalsifiable until readMessageSetFrom was split out of the resolve and a
+# test could hand in an already-replaced segment.
 run_guard "a fetch re-resolves across a swap" commitlog.go   '		if !segmentSwapped(err) {
 			return out, err
 		}' '		if true {
 			return out, err
 		}'   '^TestReadMessageSetWhileCompactionReplacesSegments$'
+
+run_guard "a swap is not replica damage" commitlog.go   '			if segmentSwapped(err) && len(out) == 0 {' '			if false && len(out) == 0 {'   '^TestAReadOfAReplacedSegmentIsNotReportedAsDamage$'
 
 # New's Options refusals are permanent, and say so. Neutralized by the bare
 # error each of these was — which reads identically to a human and is

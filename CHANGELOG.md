@@ -52,6 +52,22 @@ library from that fork onward.
   read back from disk rather than an argument, and no argument change fixes
   them.
 
+### Testing
+
+- **The swap arm in the replication read is now falsifiable, via a seam rather
+  than a race.** `readMessageSetFrom` is split out of the resolve loop so a test
+  can hand in a segment a compaction pass has ALREADY replaced and ask the read
+  directly what it says about it. Fused, the only way to reach that state was to
+  race one in — three goroutines and a segment-departure gate for seven seconds
+  — and even then the arm could not be falsified at all, because the resolve
+  loop re-resolves before anything observes what the arm decided. Deleting the
+  arm left the end-to-end test green.
+
+  `TestAReadOfAReplacedSegmentIsNotReportedAsDamage` now covers it in 1.4s with
+  no window to hit. The general point is the one the soak tests keep making the
+  expensive way: an arm nothing can falsify is a comment with an `if` in front
+  of it, and the fix is usually a seam, not a longer run.
+
 ### Documentation
 
 - **The retryability rule on `CommitLog` is stated per sentinel, and the rule it
