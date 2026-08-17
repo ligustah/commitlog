@@ -88,13 +88,32 @@ func TestConcurrentReadersAndProbesOnLiveLog(t *testing.T) {
 					now,                    // right now
 					now + int64(time.Hour), // future: past the end
 				} {
-					if _, err := l.EarliestOffsetAfterTimestamp(ts); err != nil &&
-						!errors.Is(err, ErrEntryNotFound) && !errors.Is(err, ErrSegmentNotFound) {
+					// ErrTimestampBeforeLog is the ONLY error either of these may
+					// answer with, and the narrowness is the point.
+					//
+					// Both used to also tolerate ErrEntryNotFound and
+					// ErrSegmentNotFound. Neither is reachable here: both methods
+					// route through earliestOffsetAfterTimestampLocked, which absorbs
+					// ErrEntryNotFound per segment and answers an exhausted search
+					// with the next assignable offset, and ErrSegmentNotFound has no
+					// production site on the timestamp path at all. So this loop —
+					// the only concurrent probe over these two exported methods —
+					// accepted two sentinels they cannot return.
+					//
+					// That is not merely dead: it is dead in the shape of the bug this
+					// area keeps having. A sentinel escaping an exported surface that
+					// a caller cannot sort is what v0.92.0 fixed on this very path,
+					// and ErrEntryNotFound is documented as one a caller never sees
+					// and deliberately omitted from interface.go's remedy list on that
+					// basis. Had a change started leaking it, the one test positioned
+					// to notice would have called it expected. Removing it was
+					// verified, not assumed: four plain runs and one under -race with
+					// both arms gone.
+					if _, err := l.EarliestOffsetAfterTimestamp(ts); err != nil {
 						fail("EarliestOffsetAfterTimestamp(%d): %v", ts, err)
 						return
 					}
 					if _, err := l.LatestOffsetBeforeTimestamp(ts); err != nil &&
-						!errors.Is(err, ErrEntryNotFound) && !errors.Is(err, ErrSegmentNotFound) &&
 						!errors.Is(err, ErrTimestampBeforeLog) {
 						fail("LatestOffsetBeforeTimestamp(%d): %v", ts, err)
 						return

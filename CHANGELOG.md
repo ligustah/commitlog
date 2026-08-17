@@ -5,6 +5,30 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Testing
+
+- **The concurrent timestamp probe accepted two sentinels those methods cannot
+  return.** `TestConcurrentReadersAndProbesOnLiveLog` tolerated `ErrEntryNotFound`
+  and `ErrSegmentNotFound` from `EarliestOffsetAfterTimestamp` and
+  `LatestOffsetBeforeTimestamp`. Neither is reachable: both route through
+  `earliestOffsetAfterTimestampLocked`, which absorbs `ErrEntryNotFound` per
+  segment and answers an exhausted search with the next assignable offset, and
+  `ErrSegmentNotFound` has no production site on the timestamp path at all. Only
+  `ErrTimestampBeforeLog` survives.
+
+  Dead code, but dead in the shape of the bug this area keeps having, which is why
+  it is worth a line. A sentinel escaping an exported surface that a caller cannot
+  sort is exactly what v0.92.0 fixed on this same path, and `ErrEntryNotFound` is
+  documented as one a caller never sees — omitted from the remedy list on that
+  basis. So the only concurrent probe over these two methods would have called
+  such a leak expected. Found by pulling the same thread as v0.92.1: three times
+  now, a claim about a *set* nobody checked from the other side, green throughout.
+
+  Verified rather than assumed: four plain runs and one under `-race` with both
+  arms removed.
+
 ## v0.92.1 — 2026-08-17
 
 Everything here was found by shipping v0.92.0 — not by its tests, which stayed
