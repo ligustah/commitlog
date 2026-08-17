@@ -5,7 +5,20 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.93.2 — 2026-08-17
+
+Documentation and one test — no behaviour change, no API change, no format change.
+Three more exported surfaces in the family v0.93.1 opened: docs that are accurate to
+their author and answer the wrong question for their reader.
+
+All three were found the same way — by reading a downstream debugging thread for its
+QUESTIONS rather than its answers. The bugs being chased were not in this library. Every
+hypothesis raised was still a question about this contract, and the test each doc had to
+pass was whether a caller could use it to RULE THAT HYPOTHESIS OUT. Ruling out is most of
+what a caller needs, and it is what all three failed at.
+
+`NewestOffset` is the one that was flatly wrong rather than merely unhelpful, and it
+reached a consumer: it changed how a downstream ISR admission gate is being fixed.
 
 ### Fixed
 
