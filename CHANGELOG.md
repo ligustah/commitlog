@@ -143,6 +143,26 @@ library from that fork onward.
   and the operator reads "closed" about a log that was deleted. The arms' order
   is load-bearing rather than stylistic, and only a per-arm mutation says so.
 
+- **The fuzz smoke budgets fit at the slow end now, because one of them decided a
+  release.** `FuzzCorruptedRecordIsNeverServedSilently` was cancelled by the
+  20-minute job timeout on this release's own candidate, 342 execs short of its
+  11000 — at 9/sec against the ~120/sec the count was sized from, while the other
+  five targets in the same run came in at their usual 62–164s. It was not the code
+  under test: on one box with one shared corpus and 90s each, the commit *with*
+  the fix ran 1419 execs against 1175 without it, so the release candidate is
+  faster, and the local 13–16/sec sits beside CI's bad run rather than its good
+  one. What varies is the runner.
+
+  The fix is not to the target that failed but to the rule that sized it. A
+  timeout cancellation reads as a red at a glance and it blocks a tag, so a count
+  has to fit at the SLOW end — and checking the others against 1/13th of their own
+  observed rates, `FuzzCorruptDigestNeverChangesTheAnswer` would take 22 minutes
+  and `FuzzTornLogServesOnlyAPrefix` 19 against the same ceiling. The one that
+  failed was unlucky, not uniquely exposed, so all six are now sized so the worst
+  case fits in half the timeout, leaving the timeout as the backstop it was meant
+  to be. That is smoke volume traded for a job that reports; volume belongs in the
+  nightly deep run, which is bounded by wall clock and has no tag waiting on it.
+
 ### Documentation
 
 - **The retryability rule on `CommitLog` is stated per sentinel, and the rule it
