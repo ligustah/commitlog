@@ -40,19 +40,19 @@ library from that fork onward.
 
 - **The timestamp lookups name the log too.** The fifth exported surface to hand
   back an error a caller cannot sort, counting `New`'s Options, a corrupt block
-  header, building a reader, and the replication fetch. Stated as a list rather
-  than an ordinal on purpose, and the two ordinals already in the tree are gone
-  with it: `commitlog.go` and `open_error_boundary_test.go` each called a
-  DIFFERENT path "the third", on the *same* basis — paths this defect reached —
-  each having simply omitted the other's, because they were written the same week
-  by nobody who owned the list. That is the defect this release fixes, one level
-  up: an enumeration with two authors grows a second copy, exactly as a rule
-  transcribed to two call sites does. A count in prose is only as good as the
-  enumeration beside it, so both sites now carry the list and neither carries a
-  number. Found by
-  running the standing complexity sweep against the fix above, asking the obvious
-  next question: which OTHER paths retry on `segmentSwapped` without translating
-  the terminal states first? `EarliestOffsetAfterTimestamp` and
+  header, building a reader, and the replication fetch. The number is only usable
+  with that list attached, which is this entry's second subject: the two bare
+  ordinals already in the tree are gone. `commitlog.go` and
+  `open_error_boundary_test.go` each called a DIFFERENT path "the third", on the
+  *same* basis — paths this defect reached — each having simply omitted the
+  other's, because they were written the same week by nobody who owned the list.
+  An enumeration with two authors grows a second copy, exactly as a rule
+  transcribed to two call sites does, so both sites now carry the list and neither
+  carries a number.
+
+  Found by running the standing complexity sweep against the fix above, asking the
+  obvious next question: which OTHER paths retry on `segmentSwapped` without
+  translating the terminal states first? `EarliestOffsetAfterTimestamp` and
   `LatestOffsetBeforeTimestamp` both bottom out in
   `findEntryByTimestampResolving`, which retries the swap and then returns the
   sentinel raw; the caller wrapped it and handed it out.
@@ -99,8 +99,11 @@ library from that fork onward.
   They were found by taking that doc literally and looking for a refusal that
   breaks it, which is the only reason they surfaced: neither is reachable from
   `New`, so `hack/openerrors.sh` could not see them and no Options test covered
-  them. This is the third path the same defect reached, after `New`'s Options
-  and a corrupt block header refusing an open.
+  them. The same defect as `New`'s Options and a corrupt block header refusing an
+  open — and this bullet is where the ordinal problem above came from: it read
+  "the third path" until the entry two bullets up went looking for what else the
+  tree numbered, and found `commitlog.go` calling something else by the same
+  name.
 
   `ErrInvalidOptions` is documented for the class rather than the struct — a
   value the caller supplied is wrong — with the boundary stated: descriptor,
