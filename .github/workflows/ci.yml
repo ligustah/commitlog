@@ -298,10 +298,31 @@ jobs:
   # as coverage indefinitely — this repo shipped a defect behind exactly such a
   # test. guardcheck removes each guard and requires its named test to go red.
   # Cheap: one targeted test run per guard, not the whole suite.
+  #
+  # The ceiling is 45 rather than 20 because this job's cost GROWS with the guard
+  # registry while the ceiling does not, and crossing it does not report as a
+  # failure — it reports `cancelled`, which a `!= "failure"` filter calls clean, a
+  # human reads as red, and a release cannot be tagged on. That is not
+  # hypothetical: the fuzz smoke budget below hit exactly this on the v0.92.0
+  # candidate, in the same run that prompted this measurement.
+  #
+  # Measured 2026-08-17 at 228 guards: 886s and 906s on two consecutive runs, so
+  # ~4s per guard and 75% of a 20-minute ceiling already spent. The count has gone
+  # 22 -> 144 -> 228 and this release added four, so the old ceiling was ~70 guards
+  # from deciding a release. 45 covers roughly double the current registry.
+  #
+  # Raising the ceiling rather than splitting the set, deliberately: at 15 minutes
+  # this job is not the critical path — `race (windows)` runs 11-32 minutes — so
+  # sharding would add matrix machinery to speed up something nothing waits on. If
+  # a split ever happens, do it for FEEDBACK (a failing guard reported in 2 minutes
+  # instead of 15), not for the ceiling.
+  #
+  # `guard coverage (windows)` below keeps 20: it runs only the platform subset via
+  # GUARDCHECK_SET and measured 109-122s, so it has an order of magnitude of room.
   guards:
     name: guard coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
