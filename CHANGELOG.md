@@ -18,8 +18,10 @@ written down, which is where the last three findings on this path came from too.
 
 ### Added
 
-- **`ErrCorruptFrameHeader`, for the one `ErrCorruptRecord` a sequential walk must
-  not step over.** It WRAPS `ErrCorruptRecord`, so every existing
+- **`ErrCorruptFrameHeader`, for the one `ErrCorruptRecord` a Reader must not skip
+  past.** Not "a sequential walk", which is how this line first read and is the same
+  over-broad framing the entry below corrects — a scan cannot step over its
+  length-versus-extent refusal either. It WRAPS `ErrCorruptRecord`, so every existing
   `errors.Is(err, ErrCorruptRecord)` arm keeps matching and no caller has to adopt
   the name to stay as correct as it already was.
 
