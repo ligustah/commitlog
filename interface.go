@@ -65,35 +65,56 @@ package commitlog
 // recently, written down only on New — where a caller reading this file never
 // meets it.
 //
-//	A commitlog sentinel means the condition is PERMANENT: the same call will
-//	fail the same way, and retrying spends a budget for nothing. Anything else
-//	is an OS or store error and may be transient.
+// The question a caller actually has is not "is this permanent" but "what do I
+// do now", and those are different questions. Sorting on permanence collapses
+// two unlike cases — nothing will ever help, and exactly one specific thing
+// will — into a single bucket whose name ("permanent") tells the caller to give
+// up in both. So the rule is stated as a remedy:
 //
-// Two exceptions, both narrow and both deliberate. ErrLogLocked is a commitlog
-// sentinel that IS worth retrying — another process holds the directory, which
-// is exactly the condition that clears on its own. ErrCommitLogReadonly is not
-// a failure at all; it is the end of a readonly log, in the way io.EOF is the
-// end of a file.
+//	A commitlog sentinel names its own remedy. Retrying the SAME call
+//	unchanged is the right response to only one of them; for the rest,
+//	something must happen first, and for some that something is nothing.
+//	An error that is NOT a commitlog sentinel is an OS or store error and
+//	may be transient.
 //
-// The rule is only useful if it holds for every refusal, which is what makes it
-// a property of the package rather than advice. Two rounds of fixes were needed
-// to make it true — New's own Options refusals carried no sentinel
-// (ErrInvalidOptions), and neither did a corrupt block header refusing an open
-// (ErrSegmentUnreadable) — and in both cases the symptom was a caller retrying
-// something that could never succeed. hack/openerrors.sh holds the first half;
-// the guards named for each sentinel hold the rest.
+// What each one asks of the caller:
 //
-// The sentinels a caller most often sorts on, and what each one asks of them:
-//
+//   - ErrLogLocked — another process has the directory. Back off and make the
+//     same call again; this is the one that clears on its own.
+//   - ErrSegmentClosed, ErrSegmentReplaced — compaction swapped the segment
+//     under you. Re-resolve the segment and read again. These two are one
+//     condition wearing two names (see segmentSwapped in reader.go, which is
+//     the package's own reader doing exactly this), and the data is intact.
+//   - ErrRestoreRequired — the bytes are fine and merely cold. Promote the
+//     segment with the tier's restore step, then read again.
 //   - ErrInvalidOptions — fix the value. Nothing about the environment will
 //     change the answer.
-//   - ErrSegmentUnreadable, ErrCorruptRecord — the bytes on this replica are
-//     damaged. Restore from a peer; retrying reads the same bytes.
 //   - ErrBlockFormat — another build wrote this store. Run the right binary; a
 //     peer holds the identical bytes, so restoring is the one remedy that
 //     cannot work.
 //   - ErrDescriptorMismatch — the Options disagree with the log on disk.
-//   - ErrLogLocked — another process has it. Back off and try again.
+//   - ErrSegmentUnreadable, ErrCorruptRecord — the bytes on this replica are
+//     damaged. Restore from a peer; retrying reads the same bytes.
+//   - ErrCommitLogClosed, ErrCommitLogDeleted — this handle is finished. Open
+//     the log again if you still want it.
+//   - ErrCommitLogReadonly — not a failure at all. It is the end of a readonly
+//     log, in the way io.EOF is the end of a file.
+//
+// Why the remedy and not the class: this doc previously said a commitlog
+// sentinel means PERMANENT, with two exceptions. That was wrong, and wrong in
+// the direction that costs data rather than time — ErrSegmentReplaced has
+// carried "operations should be retried" on its own declaration since long
+// before the rule was written, and ErrSegmentClosed is the same swap seen from
+// the segment side. A caller applying the rule as stated abandoned a healthy
+// segment mid-compaction. The rule was easy to state, easy to believe already
+// true, and false at the refusals nobody re-read while writing it.
+//
+// The lesson generalises past this comment: a rule about every sentinel is
+// worth only as much as the last sentinel someone checked it against.
+// hack/openerrors.sh checks that New's refusals carry a sentinel at all; the
+// guards named for each sentinel hold the identities. Neither can check that a
+// prose claim about the whole set is true, which is why this list is explicit
+// per sentinel rather than a generalisation with exceptions.
 type CommitLog interface {
 	// Delete closes the log and removes all data associated with it from the
 	// filesystem.

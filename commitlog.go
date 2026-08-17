@@ -1287,10 +1287,55 @@ func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int
 
 // ReadMessageSet returns the log's own framing verbatim, starting at offset.
 // See the interface doc for the contract.
+//
+// The resolve loop is newSourceReader's, for the reason newSourceReader gives:
+// "every caller would otherwise need to know that a storage-level swap is not a
+// read failure". This path never learned it, and the caller it hands the error
+// to is a follower replicating bytes — the one caller with no way to re-resolve
+// anything, since the segment list it would have to consult is not exported.
+//
+// Both leaks were the same window and neither was survivable. findEntry on a
+// segment a pass had already swapped returned ErrSegmentReplaced verbatim, which
+// the interface doc then classified as permanent — so a follower applying the
+// documented rule stops replicating a log that is merely compacting. Worse, a
+// swap between the resolve and the scan surfaced as ErrSegmentClosed from
+// Scan(), and the arm below files an unrecognised scan failure under
+// ErrSegmentUnreadable: a routine compaction pass told the follower its replica
+// was DAMAGED and to restore from a peer.
+//
+// Each attempt takes its own segmentsSnapshot(), so a retry resolves against the
+// post-swap log rather than repeating the same lookup. See #313; it is the third
+// path #309's defect reached, and the first where the wrong sentinel was not
+// merely missing but actively misleading.
 func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, errors.Wrap(ErrInvalidOptions, "maxBytes must be positive")
 	}
+	var err error
+	for range readerResolveAttempts {
+		var out []byte
+		out, err = l.readMessageSetOnce(offset, maxBytes)
+		if err == nil {
+			return out, nil
+		}
+		// The log's own state is tested BEFORE the swap sentinels, in
+		// newSourceReader's order and for its reason: "the log is gone" explains
+		// any error the resolve produced, and a caller that cannot tell it from a
+		// compaction swap has to guess whether to retry.
+		if l.IsDeleted() {
+			return nil, ErrCommitLogDeleted
+		}
+		if l.IsClosed() {
+			return nil, ErrCommitLogClosed
+		}
+		if !segmentSwapped(err) {
+			return out, err
+		}
+	}
+	return nil, err
+}
+
+func (l *commitLog) readMessageSetOnce(offset int64, maxBytes int) ([]byte, error) {
 	seg, contains := findSegmentContains(l.segmentsSnapshot(), offset)
 	if seg == nil {
 		return nil, ErrSegmentNotFound
@@ -1358,6 +1403,27 @@ func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
 			//
 			// Reported only when nothing was read. A partial set is real progress,
 			// and the next call starts AT the damaged frame and reports it then.
+			//
+			// A swap is exempt. Replace CLOSES the segment it rewrote, so a pass
+			// landing between the resolve above and this scan makes Scan() answer
+			// ErrSegmentClosed — a healthy condition, about bytes sitting intact
+			// in the replacement. Filing it below tells a follower its replica is
+			// damaged and to restore from a peer, which is the most expensive
+			// wrong answer this package can give.
+			//
+			// Stated as what it is: defence in depth, not the load-bearing half.
+			// Deleting this arm leaves TestReadMessageSetWhileCompactionReplaces-
+			// Segments green, because `%w: …: %w` keeps BOTH identities visible to
+			// errors.Is — measured, not assumed — so segmentSwapped still sees the
+			// swap through the wrap and ReadMessageSet's loop still re-resolves.
+			// What this arm holds is the case that survives the loop: a caller
+			// that hits readerResolveAttempts consecutive swaps must not be told
+			// its data is damaged. And it holds the fragility readOne already
+			// warns about in its own words — one changed wrap on this path "turns
+			// an ordinary compaction swap into a hard read failure".
+			if segmentSwapped(err) && len(out) == 0 {
+				return nil, err
+			}
 			if !errors.Is(err, io.EOF) && len(out) == 0 {
 				return nil, fmt.Errorf("%w: message set at offset %d: %w",
 					ErrSegmentUnreadable, offset, err)

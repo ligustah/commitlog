@@ -1564,6 +1564,21 @@ run_guard "a bad maxBytes is permanent" commitlog.go   '		return nil, errors.Wra
 run_guard "a missing CopyTier store is permanent" copy_tier.go   '		return errors.Wrap(ErrInvalidOptions,
 			"CopyTier needs both a source and a destination store")' '		return errors.New("commitlog: CopyTier needs both a source and a destination store")'   '^TestACallersBadArgumentIsAsPermanentAsABadOption$'
 
+# A replication fetch re-resolves across a compaction swap. Neutralized by
+# returning the first attempt's error unconditionally, which is exactly the
+# shape this path had — resolve once, read, hand the swap back to a follower
+# that has no segment list to re-resolve against.
+#
+# Only this half is guarded. The scan arm's segmentSwapped exemption is NOT
+# falsifiable by that test and its comment says so: `%w: ...: %w` keeps both
+# identities visible to errors.Is, so the loop re-resolves through the wrap
+# either way. Guarding it would report covered for a claim the test cannot make.
+run_guard "a fetch re-resolves across a swap" commitlog.go   '		if !segmentSwapped(err) {
+			return out, err
+		}' '		if true {
+			return out, err
+		}'   '^TestReadMessageSetWhileCompactionReplacesSegments$'
+
 # New's Options refusals are permanent, and say so. Neutralized by the bare
 # error each of these was — which reads identically to a human and is
 # indistinguishable from a busy disk to the retry loop New's callers open on.

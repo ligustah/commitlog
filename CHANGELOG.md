@@ -9,6 +9,30 @@ library from that fork onward.
 
 ### Fixed
 
+- **`ReadMessageSet` survives a compaction pass instead of failing the fetch.**
+  It resolved a segment and then read it, with no handling for the pass that
+  swapped the segment in between — the exact gap `newSourceReader` closed for the
+  reader path, whose comment gives the reason this one needed it too: "every
+  caller would otherwise need to know that a storage-level swap is not a read
+  failure." This caller especially cannot, since the segment list it would have
+  to re-resolve against is not exported.
+
+  It leaked the swap two ways. `findEntry` returned `ErrSegmentReplaced`
+  verbatim, so a follower replicating from a compacting log stopped on an error
+  the interface doc classified as permanent. Worse, a swap landing between the
+  resolve and the scan surfaced as `ErrSegmentClosed` from `Scan()`, which was
+  then filed under `ErrSegmentUnreadable` — a routine compaction pass telling a
+  follower its replica was damaged and to restore from a peer, about bytes
+  sitting intact in the replacement.
+
+  Both are fixed by `newSourceReader`'s resolve loop: each attempt takes its own
+  segment snapshot, so a retry reads the post-swap log rather than repeating the
+  lookup. `ErrCommitLogDeleted` and `ErrCommitLogClosed` are translated first, in
+  that function's order and for its stated reason. Covered by
+  `TestReadMessageSetWhileCompactionReplacesSegments`, which drives `Clean()`
+  rather than waiting on the cleaner's interval and gates on segment departures;
+  without the loop it fails in under a second.
+
 - **`ReadMessageSet` and `CopyTier` now refuse a bad argument with
   `ErrInvalidOptions`.** Both returned a bare error for a value the caller
   supplied and can only fix in their own code — a non-positive `maxBytes`, a nil
@@ -27,6 +51,37 @@ library from that fork onward.
   manifest and index parse failures stay out of it, because those refuse bytes
   read back from disk rather than an argument, and no argument change fixes
   them.
+
+### Documentation
+
+- **The retryability rule on `CommitLog` is stated per sentinel, and the rule it
+  replaces was wrong.** It previously said a commitlog sentinel means the
+  condition is PERMANENT, with two named exceptions — and it lived only on
+  `New`'s doc comment, where a caller deciding what to do with a failed `Append`
+  or `Read` never met it.
+
+  Moving it to the interface is what exposed it as false. `ErrSegmentReplaced`
+  has carried "operations should be retried in order to run against the new
+  segment" on its own declaration since long before that rule was written, and
+  `ErrSegmentClosed` is the same compaction swap seen from the segment side —
+  the package's own reader treats the pair as one condition and retries it
+  (`segmentSwapped`). So the documented rule told callers to give up on the
+  exact condition the implementation recovers from, which is what the
+  `ReadMessageSet` fix above had to work around at the call site.
+
+  The rule is now stated as a **remedy** rather than a class, because "is this
+  permanent" and "what do I do now" are different questions: sorting on
+  permanence puts *nothing will ever help* and *exactly one specific thing will*
+  in one bucket whose name tells the caller to give up in both. Each sentinel
+  now names its own remedy — retry as-is, re-resolve, restore the segment, fix
+  the value, run the right binary, restore from a peer, or reopen — including
+  `ErrRestoreRequired`, whose bytes are intact and merely cold.
+
+  The generalisable part: a prose claim about *every* sentinel is worth only as
+  much as the last sentinel someone checked it against. `hack/openerrors.sh` and
+  the per-sentinel guards can check identities; neither can check a claim about
+  the whole set, which is why the list is now explicit per sentinel instead of a
+  generalisation with exceptions.
 
 ## v0.91.0 — 2026-08-17
 
