@@ -1888,6 +1888,22 @@ run_guard "a header read stops at the header" reader.go   '	hdr := headersBuf[:m
 # vouched for.
 run_guard "a metadata header parse is bounds-checked" message_set.go   '	if n < 0 || c.n+n < c.n || c.n+n > int64(len(c.buf)) {' '	if false {'   '^TestMetadataReadRefusesACorruptRecordRatherThanPanicking$'
 
+# The one ErrCorruptRecord a caller must not skip past says which one it is.
+# Neutralized to the bare sentinel it used to share, which is not a compile error
+# and not a behaviour change to any arm asking "is this damage" -- it only removes
+# the caller's ability to tell a frame that was fully consumed from one that was
+# not. Skipping the latter lands mid-record and reports intact records as corrupt,
+# so the failure this protects against is a tool over-counting damage, not a crash.
+run_guard "a frame-header failure is distinguishable from a skippable one" reader.go   '		return frameHeader{}, pkgErrors.Wrapf(ErrCorruptFrameHeader,' '		return frameHeader{}, pkgErrors.Wrapf(ErrCorruptRecord,'   '^TestAFrameHeaderFailureIsDistinguishableAndMustNotBeSkipped$'
+
+# The same fact on the scan path, which reaches a caller through
+# ErrSegmentUnreadable. Named separately because it is a different walker with a
+# different remedy -- a scan has no next frame to find -- and because the wrap is
+# what could silently drop it: the three wrapping sites keep both sentinels only
+# by using a double %w, and a single one would swallow this without failing to
+# compile. All three of that test's subtests go red.
+run_guard "a scan's frame-header failure survives its wrap" segment.go   '		return nil, nil, errors.Wrapf(ErrCorruptFrameHeader,' '		return nil, nil, errors.Wrapf(ErrCorruptRecord,'   '^TestDamageInOneSegmentDoesNotKillTheProcess$'
+
 # ---- segment join ----
 
 # A join reads each input to its end and then DELETES it, so a walk that mistook
