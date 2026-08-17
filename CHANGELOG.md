@@ -5,7 +5,16 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.93.0 — 2026-08-17
+
+One new exported sentinel, and it is additive: `ErrCorruptFrameHeader` wraps
+`ErrCorruptRecord`, so every existing `errors.Is(err, ErrCorruptRecord)` arm keeps
+matching and no caller has to adopt the name to stay as correct as it already was.
+Nothing in this release changes behaviour for a caller that ignores it.
+
+What it fixes is a remedy this library documented and a caller could not act on —
+found by a downstream asking a direct question one release after the remedy was
+written down, which is where the last three findings on this path came from too.
 
 ### Added
 
