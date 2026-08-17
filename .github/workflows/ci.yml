@@ -375,13 +375,42 @@ jobs:
         # above is what bounds a slow runner. To re-tune, subtract the ~40s of
         # checkout, toolchain and build from a job's duration and divide — then
         # keep the lower of that and the count already here.
+        #
+        # The 5x above is understated, and a budget that only fits at the fast end
+        # spends the timeout instead of reporting. On 2026-08-17
+        # FuzzCorruptedRecordIsNeverServedSilently ran at 9/sec against the ~120/sec
+        # its 11000 was sized from — a 13x spread — and was CANCELLED by the job
+        # timeout 342 execs short, on the release candidate for v0.92.0, while the
+        # other five targets in the same run came in at their usual 62-164s. Two
+        # things follow, and the second is the one that matters.
+        #
+        # A timeout cancellation is indistinguishable at a glance from a real red,
+        # and it blocks a tag. So the count must fit at the SLOW end, or the job's
+        # verdict is a coin flip on runner speed.
+        #
+        # And the target that blew up was not the only one exposed — it was the one
+        # that got unlucky. Sizing each remaining count against 1/13th of its own
+        # observed fast rate, three of six could exceed the 20-minute timeout:
+        # CorruptedRecord 24min, CorruptDigest 22min, TornLog 19min. Fixing only
+        # the one that happened to fail would have left the identical fault in two
+        # siblings for the next release to find, so the rule is applied to all of
+        # them: worst case at 1/13th of the fast rate must fit in HALF the timeout,
+        # which leaves the timeout as the backstop it is meant to be rather than
+        # the thing that decides the result. That is what moved CorruptedRecord
+        # 11000 -> 3000, CorruptDigest 20000 -> 8000, TornLog 23000 -> 10000 and
+        # CompactionRecovery 3000 -> 2500 (its 10.7min worst case was already over
+        # half). The two Offload targets are 7.4 and 6.7min and stay as they are.
+        #
+        # This trades smoke-test volume for a job that reports rather than times
+        # out; volume belongs in the nightly `Fuzz (deep)` run, which is bounded by
+        # wall clock and has no tag waiting on it.
         include:
-          - {target: FuzzCompactionRecovery, execs: 3000}
+          - {target: FuzzCompactionRecovery, execs: 2500}
           - {target: FuzzOffloadCompactionRetention, execs: 3000}
           - {target: FuzzOffloadCrashConsistency, execs: 4000}
-          - {target: FuzzCorruptedRecordIsNeverServedSilently, execs: 11000}
-          - {target: FuzzCorruptDigestNeverChangesTheAnswer, execs: 20000}
-          - {target: FuzzTornLogServesOnlyAPrefix, execs: 23000}
+          - {target: FuzzCorruptedRecordIsNeverServedSilently, execs: 3000}
+          - {target: FuzzCorruptDigestNeverChangesTheAnswer, execs: 8000}
+          - {target: FuzzTornLogServesOnlyAPrefix, execs: 10000}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
