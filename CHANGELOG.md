@@ -28,6 +28,23 @@ library from that fork onward.
   for `ErrSegmentClosed`/`ErrSegmentReplaced` — one condition wearing two names —
   and was wrong here, where two conditions were merely adjacent.
 
+- **`ErrCorruptRecord` gets its own remedy, which is not "restore from a peer".**
+  It shared a bullet with `ErrSegmentUnreadable` on the reading that both mean
+  damaged bytes. They do, but at different granularity: one bounds the damage to a
+  segment, the other to a single record — and `ErrCorruptRecord`'s own declaration
+  spells out a choice the shared bullet never offered, *skip the record and carry
+  on*, naming only the heaviest of the three responses instead. Restoring a whole
+  segment from a peer is a poor answer to one bad CRC in otherwise sound bytes,
+  and the entire reason this is a sentinel rather than the panic it used to be is
+  that a read is where the caller can choose.
+
+  Not false, unlike the bullet above — narrower than the sentinel it described,
+  which is the same failure with the volume turned down. Found by the check added
+  below, or rather by honouring it: its allowlist says each grouping has to be
+  argued, so both existing groupings were argued, and this one did not survive.
+  Two for two. The one that remains is `ErrSegmentClosed`/`ErrSegmentReplaced`,
+  which really are one event seen from two places.
+
   Worth stating plainly because the first diagnosis was wrong: the declarations
   document only *when* each sentinel is returned, so the missing remedy looked
   like the defect. It was not — `interface.go` carries the remedies deliberately,

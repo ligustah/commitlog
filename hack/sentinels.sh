@@ -125,8 +125,21 @@ fi
 # Only the bullet's FIRST line is scanned, which is where the names being given a
 # remedy sit. Continuation lines are prose and legitimately mention other
 # sentinels to contrast with — including, now, the very pair this found.
-allowed_groups="ErrCorruptRecord,ErrSegmentUnreadable
-ErrSegmentClosed,ErrSegmentReplaced"
+# One entry, and it is the only grouping in the list that survived being argued.
+# ErrSegmentClosed and ErrSegmentReplaced are the same event seen from two places
+# — which one you get depends only on where you touched the segment — so the
+# remedy sentence is true of each alone.
+#
+# ErrSegmentUnreadable and ErrCorruptRecord were the second entry here for about
+# an hour, on the reasoning that both mean "damaged bytes, restore from a peer".
+# Arguing it is what killed it: the damage is bounded by a SEGMENT in one and by
+# one RECORD in the other, and ErrCorruptRecord's declaration says the caller may
+# skip the record and carry on — a remedy the shared bullet never offered, having
+# named only the heaviest of the three. Not false, like the bullet that prompted
+# this check, but narrower than the sentinel it was describing, which is the same
+# failure with the volume turned down. Two for two: of the two groupings in the
+# list, neither survived being asked whether one sentence fit both members.
+allowed_groups="ErrSegmentClosed,ErrSegmentReplaced"
 
 grouped=$(grep -E '^//[[:space:]]+- ' interface.go | while IFS= read -r bullet; do
     names=$(printf '%s\n' "$bullet" | grep -oE 'Err[A-Za-z]+' | sort -u | paste -sd, -)

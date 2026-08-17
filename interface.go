@@ -100,8 +100,17 @@ package commitlog
 //     peer holds the identical bytes, so restoring is the one remedy that
 //     cannot work.
 //   - ErrDescriptorMismatch — the Options disagree with the log on disk.
-//   - ErrSegmentUnreadable, ErrCorruptRecord — the bytes on this replica are
-//     damaged. Restore from a peer; retrying reads the same bytes.
+//   - ErrSegmentUnreadable — this segment cannot be read to its end, so the
+//     damage bounds a whole segment. Restore from a peer; retrying reads the
+//     same bytes.
+//   - ErrCorruptRecord — ONE record failed its CRC. The damage is bounded by
+//     that record, not the segment, so the caller has a choice its declaration
+//     spells out: skip the record and carry on, fail the read, or restore from a
+//     peer. Retrying the same read returns the same bytes either way. Split from
+//     ErrSegmentUnreadable because their one shared bullet offered only the
+//     heaviest of those three, which is a poor answer to a single bad record in
+//     an otherwise sound segment — and the whole reason this is a sentinel rather
+//     than the panic it used to be is that a read is where a caller can choose.
 //   - ErrCommitLogClosed — this handle is finished, but the log is not. Open it
 //     again if you still want it. Not damage: somebody called Close.
 //   - ErrCommitLogDeleted — the log is GONE, so unlike the line above there is
