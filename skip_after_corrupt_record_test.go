@@ -204,4 +204,34 @@ func TestAFrameHeaderFailureIsDistinguishableAndMustNotBeSkipped(t *testing.T) {
 	require.ErrorIs(t, nextErr, ErrCorruptFrameHeader,
 		"reading on from a frame-header failure should land mid-record, not on a clean frame; "+
 			"if this resumes cleanly the sentinel is over-warning and the docs should say so")
+
+	// And the remedy the sentinel points at, asserted rather than described. Five
+	// records were served, so the last good offset is 4 and the damaged frame is 5.
+	//
+	// The first half of this is why the assertion exists: "resync at last good plus
+	// one" is the obvious advice and is the spin it looks like a cure for, because
+	// plus one IS the damaged frame. The declaration said exactly that until this
+	// test was written.
+	lastGood := int64(served - 1)
+	rSpin, err := cl2.NewReader(From(lastGood+1), Uncommitted())
+	require.NoError(t, err)
+	_, _, _, _, spinErr := rSpin.ReadMessage(ctx, hdr)
+	require.ErrorIs(t, spinErr, ErrCorruptFrameHeader,
+		"resyncing at last-good+1 must land back on the damaged frame; if it does not, "+
+			"the declaration's warning against that arithmetic is wrong")
+
+	// Beyond it, the index seeks straight past the damaged frame and every
+	// remaining record comes back — without the reader ever needing the length the
+	// damaged header was carrying.
+	rOK, err := cl2.NewReader(From(lastGood+2), Uncommitted())
+	require.NoError(t, err)
+	var resumed []int64
+	for i := 0; i < 14; i++ {
+		_, off, _, _, err := rOK.ReadMessage(ctx, hdr)
+		require.NoError(t, err, "resync past the damaged frame failed at %d of 14", i)
+		resumed = append(resumed, off)
+	}
+	want := []int64{6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+	require.Equal(t, want, resumed,
+		"a resync beyond the damaged frame must serve every remaining record in order")
 }

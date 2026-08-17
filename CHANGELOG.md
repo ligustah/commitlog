@@ -26,13 +26,24 @@ library from that fork onward.
   run of them, and a tool counting corruption over-counts instead of spinning.
 
   The sentinel deliberately names no single remedy, because the fact has two
-  walkers that answer it differently. A `Reader` resyncs BY OFFSET — last good
-  record plus one, resolved through the index rather than by walking frames — while
-  a whole-segment pass (compaction, `Truncate`, `TruncateBefore`, via
+  walkers that answer it differently. A `Reader` resyncs BY OFFSET with a new
+  reader, which resolves through the index rather than by walking frames, while a
+  whole-segment pass (compaction, `Truncate`, `TruncateBefore`, via
   `segmentScanner`) has no next frame to find and nothing to resync to, so it
   reports the segment and leaves it untouched. Both header-CRC sites carry the
   sentinel, and all three wrapping paths preserve it alongside
   `ErrSegmentUnreadable` because they wrap with a double `%w`.
+
+  **The resync advice was wrong in its first draft, and testing it is what caught
+  that.** It said last-good PLUS ONE, which is the obvious phrasing and is the spin
+  it purports to cure: the damaged frame is the one after the last record served, so
+  plus one lands on it and fails identically. Measured with frame 5 damaged —
+  `From(5)` reproduces the error, `From(6)` serves the remaining fourteen. The doc
+  now says step BEYOND it, and says plainly that how far is not knowable from the
+  failure, because the damaged header is exactly where that frame's offset and
+  length live. One record per frame makes it plus two; a batched frame spans more,
+  so a caller that must not guess advances and retries until a read succeeds. That
+  resync is now asserted in the test rather than described.
 
   Reported by sqlcdc one release after the remedy was written down: their walstat
   wanted precisely that skip and stopped rather than risk spinning. Nothing in the

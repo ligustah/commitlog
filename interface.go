@@ -120,9 +120,13 @@ package commitlog
 //     what failed. So exactly one of the three remedies above does not apply:
 //     skipping the record. There is no known length to skip by, and reading on
 //     begins MID-RECORD, which reports records that are perfectly intact as
-//     corrupt. Instead — a Reader resyncs BY OFFSET, last good record plus one,
-//     which resolves through the index rather than by walking frames; a
-//     whole-segment pass has nothing to resync to and reports the segment.
+//     corrupt. Instead — a Reader resyncs BY OFFSET with a new reader, which
+//     resolves through the index rather than by walking frames, and must land
+//     BEYOND the damaged frame rather than on it: last good plus one IS the
+//     damaged frame and fails identically, so that arithmetic is the spin it
+//     looks like a cure for. The declaration measures this and says why how-far
+//     is not knowable from the failure. A whole-segment pass has nothing to
+//     resync to and reports the segment.
 //     Deliberately no single remedy on this line: the fact is one thing and the
 //     two walkers answer it differently, which is the mistake the entries below
 //     record. Added because the bullet above promised a remedy for the sentinel

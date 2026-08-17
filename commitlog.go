@@ -77,9 +77,22 @@ var ErrCorruptRecord = errors.New("commitlog: record failed its CRC check")
 // The fact is the same wherever it is raised; the remedy belongs to whoever is
 // walking, so this deliberately does not name one:
 //
-//   - a Reader resyncs. Reposition by OFFSET — last record read successfully,
-//     plus one — which resolves through the index rather than by walking frames,
-//     and so steps over the damaged frame without needing its length.
+//   - a Reader resyncs. Reposition by OFFSET with a new reader, which resolves
+//     through the index rather than by walking frames and so steps over the
+//     damaged frame without needing its length.
+//
+//     Not last-good PLUS ONE, which is the obvious thing to write and is the
+//     spin it looks like a cure for: the damaged frame is the one after the last
+//     record served, so plus one lands on it and fails identically. Measured —
+//     with frame 5 damaged, From(5) reproduces the error and From(6) serves the
+//     remaining fourteen records. Step BEYOND it.
+//
+//     How far beyond is not knowable from the failure, which is the honest part:
+//     the damaged header is exactly where that frame's own offset and length
+//     live. One record per frame makes it last-good + 2; a frame holding a batch
+//     spans more. A caller that must not guess should advance and retry until a
+//     read succeeds, rather than trust an arithmetic step.
+//
 //   - a whole-segment pass (compaction, Truncate, TruncateBefore, via
 //     segmentScanner) has no next frame to find and nothing to resync to. It
 //     reports the segment and leaves it untouched.
