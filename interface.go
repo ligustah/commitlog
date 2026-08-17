@@ -522,6 +522,36 @@ type CommitLog interface {
 	OverrideHighWatermark(hw int64)
 
 	// HighWatermark returns the high watermark for the log.
+	//
+	// AFTER AN UNCLEAN SHUTDOWN THIS IS THE STALE CHECKPOINT, NOT THE TAIL, until
+	// RecoverTail runs. The watermark reaches disk on a ticker
+	// (HWCheckpointInterval, 5s by default) and again on Close, so a process that
+	// died without closing left a checkpoint behind the records it had already
+	// durably written. open() reconciles that gap in ONE direction only: a
+	// checkpoint ABOVE the newest record is clamped down, because those records
+	// demonstrably are not there. A checkpoint BELOW the tail is left exactly as
+	// found, deliberately — extending it is RecoverTail's job, and RecoverTail is
+	// not automatic.
+	//
+	// So a caller that reopens and reads this without calling RecoverTail gets a
+	// committed tail sitting below its own durable records, and it STAYS there:
+	// nothing walks it forward except RecoverTail or the caller's next
+	// SetHighWatermark. Asserted rather than described, in
+	// recover_tail_test.go — "reopen sees the stale checkpoint" is a require, not
+	// a comment.
+	//
+	// Documented here because this is the method a caller reads and the staleness
+	// is invisible from it: a clean Close writes a final checkpoint, so every
+	// graceful restart agrees with the tail and only a kill disagrees. That is the
+	// same shape as the arm-order hazard on ErrCorruptFrameHeader — the value is
+	// wrong only at the moment nobody is watching.
+	//
+	// Written after a downstream report of a committed tail 126 records below the
+	// local disk tail. That report turned out NOT to be this: the number was the
+	// caller's own replication barrier on a follower, and their restart path calls
+	// RecoverTail from every open already. Kept, and worth being clear about why —
+	// the doc as it stood could not be used to RULE THIS OUT, which is most of what
+	// a caller needs from it when a committed tail looks too low.
 	HighWatermark() int64
 
 	// NewLeaderEpoch indicates the log is entering a new leader epoch.
