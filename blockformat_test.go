@@ -101,4 +101,11 @@ func TestABlockHeaderClaimingNoRecordsIsRefused(t *testing.T) {
 			"build wrote this store; the version byte here is this build's own "+
 			"(err=%v)", err)
 	}
+	// Not merely "some other error": this refusal reaches an opener, where a
+	// caller sorts permanent from transient on the sentinel alone. Without one
+	// it reads as a busy disk and gets retried forever. See #312.
+	if !errors.Is(err, ErrSegmentUnreadable) {
+		t.Fatalf("a zero record count is damage on this replica and must say so, "+
+			"or a retrying opener cannot tell it from a transient fault (err=%v)", err)
+	}
 }

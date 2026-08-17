@@ -2197,7 +2197,8 @@ run_guard "a block header claiming no records is refused" block.go   '	if r := e
 # refusal shipped wrapping it, and the message said so: "unsupported block
 # format version: block header claims no records", which reaching the check had
 # already disproved. Neutralizing puts that back.
-run_guard "a zero record count is damage, not a format version" block.go   '		return 0, 0, 0, 0, fmt.Errorf("commitlog: block header claims no records")'   '		return 0, 0, 0, 0, fmt.Errorf("%w: block header claims no records", ErrBlockFormat)'   '^TestABlockHeaderClaimingNoRecordsIsRefused$'
+run_guard "a zero record count is damage, not a format version" block.go   '		return 0, 0, 0, 0, fmt.Errorf("%w: block header claims no records",
+			ErrSegmentUnreadable)'   '		return 0, 0, 0, 0, fmt.Errorf("%w: block header claims no records", ErrBlockFormat)'   '^TestABlockHeaderClaimingNoRecordsIsRefused$'
 
 run_guard "a block table entry claiming no records is refused" block_table.go   '		if records == 0 {'   '		if records < 0 {'   '^TestADamagedBlockTableIsRefused$'
 
