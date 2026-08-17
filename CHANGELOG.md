@@ -5,7 +5,12 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.92.1 — 2026-08-17
+
+Everything here was found by shipping v0.92.0 — not by its tests, which stayed
+green, but by two downstream consumers reading one sentence in its remedy list and
+acting on it differently. Doc and check changes only; no behaviour change, and the
+single test change is pacing.
 
 ### Fixed
 
