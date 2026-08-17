@@ -9,6 +9,25 @@ library from that fork onward.
 
 ### Fixed
 
+- **`HighWatermark()` is a snapshot, not a limit, and a scan bounded by it must record
+  where it stopped.** v0.93.1 documented the crash reason this value sits behind the
+  durable tail. That is only the loudest one. It also moves on append, on the next
+  `SetHighWatermark`, and — on a replica — whenever replication delivers a record the
+  replica did not have yet, which looks identical from here.
+
+  So a one-shot scan that stops at this value and **caches** its result is frozen at a
+  moment nothing announces has passed. The cache is not wrong when built and there is
+  no later error to notice: the record that would have changed it arrives afterwards
+  and no read goes looking. The doc now says to keep the offset the scan reached and
+  resume from it, rather than treating "I stopped at the high watermark" as "I read
+  everything".
+
+  Observed downstream as a cached view frozen one record behind — permanently, on the
+  node that had just become the authority for it, so every reader routed to the stale
+  copy. Not a commitlog defect; the library has no key-lookup read at all, so a
+  latest-value view is necessarily the caller's. Documented because the bound was
+  ours and the trap is not obvious from the one-line contract. Docs only.
+
 - **`RecoverTail`'s doc read as a promise to abort a dangling transaction, and it
   does no such thing.** The line was "a dangling open transaction is aborted by
   recovery exactly as before" — which meant only that `RecoverTail` did not *change*

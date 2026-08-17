@@ -577,6 +577,22 @@ type CommitLog interface {
 	// RecoverTail from every open already. Kept, and worth being clear about why —
 	// the doc as it stood could not be used to RULE THIS OUT, which is most of what
 	// a caller needs from it when a committed tail looks too low.
+	//
+	// AND IF YOU BOUND A SCAN WITH IT, RECORD THE BOUND. This is a snapshot, not a
+	// limit: it moves on append, on the caller's next SetHighWatermark, and — on a
+	// replica — whenever replication delivers a record the replica did not have
+	// yet. A crash is only the loudest reason it sits behind the durable tail; a
+	// replica that is simply a record behind its predecessor is the quiet one, and
+	// it looks identical from here.
+	//
+	// So a one-shot scan that stops at this value and CACHES its result is frozen
+	// at a moment nothing will announce has passed. The cache is not wrong when
+	// built and there is no later error to notice — the record that would have
+	// changed it arrives afterwards and no read goes looking. Keep the offset the
+	// scan reached and resume from it, rather than treating "I stopped at the high
+	// watermark" as "I read everything". Observed downstream as a cached view
+	// frozen one record behind, permanently, on the node that had just become the
+	// authority for it.
 	HighWatermark() int64
 
 	// NewLeaderEpoch indicates the log is entering a new leader epoch.
