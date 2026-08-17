@@ -54,13 +54,27 @@ var (
 	//     forward, so a watermark past the end looked like a way in; findSegment
 	//     answers nil at newest+1 and NewReader reports ErrSegmentNotFound, which
 	//     IS in the remedy list.
-	//   - the offsets came from the segment's OWN keydigest, so they are present
-	//     by construction: planRuns, via prefixSource.fetch.
+	//   - the offsets came from the segment's OWN keydigest, and loadKeyDigest
+	//     refuses a sidecar that is not this segment's current one: planRuns, via
+	//     prefixSource.fetch.
 	//
-	// The third is the one to re-check if this ever changes, because it is the
-	// only one holding by provenance rather than by a test in the code: a digest
-	// naming an offset the segment does not hold would carry this sentinel out
-	// through the prefix-read surface, wrapped but still matching errors.Is.
+	// That third one was written up here first as the WEAK one — holding by
+	// provenance rather than by any check — and that was wrong, which is worth
+	// leaving in because it is the opposite of true. loadKeyDigest gates on a size
+	// floor, a CRC32 over the whole sidecar, magic and version, and then base
+	// against seg.BaseOffset AND logSize against seg.Position(); any failure
+	// returns nil, the digest counts as absent, and the read falls back to a scan.
+	// So it is the most defended of the three, not the least: damage is caught by
+	// the CRC and a digest belonging to another segment or to an earlier size of
+	// this one is caught by the identity pair.
+	//
+	// What remains is narrow enough to state exactly: a sidecar whose CRC, magic,
+	// version, base and logSize all check out, but whose keyed entries name an
+	// offset the segment does not hold. That is a crafted or mis-written file
+	// rather than a corrupted one — recomputing the CRC is part of producing it —
+	// and it would carry this sentinel out through the prefix-read surface,
+	// wrapped but still matching errors.Is. Unmeasured, and recorded as the shape
+	// to look for rather than defended against.
 	ErrEntryNotFound = errors.New("entry not found")
 
 	// ErrSegmentClosed is returned on reads/writes to a closed segment.

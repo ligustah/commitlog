@@ -57,6 +57,21 @@ library from that fork onward.
   Fourth instance in two releases of a claim quantified over a set and justified
   by one member — and the first where the cited member was not in the set.
 
+  **Corrected within the same session, and the correction is the useful part.**
+  The first version of that comment called the keydigest mechanism the weak one,
+  holding "by provenance rather than by a check in the code", and named it as the
+  one to re-check first. That is the opposite of true. `loadKeyDigest` gates on a
+  size floor, a **CRC32 over the whole sidecar**, magic and version, and then
+  `base` against `seg.BaseOffset` *and* `logSize` against `seg.Position()` — any
+  failure returns nil, so the digest counts as absent and the read falls back to a
+  scan. It is the most defended of the three, not the least. So the residual risk
+  is far narrower than first written: a sidecar passing every one of those checks
+  whose keyed entries still name an absent offset, which is a crafted or
+  mis-written file rather than a damaged one, since recomputing the CRC is part of
+  producing it. Still unmeasured, and now recorded at its real size — I had
+  reasoned about a guard instead of reading it, one commit after warning against
+  exactly that.
+
 ## v0.92.1 — 2026-08-17
 
 Everything here was found by shipping v0.92.0 — not by its tests, which stayed
