@@ -166,6 +166,15 @@ library from that fork onward.
   to be. That is smoke volume traded for a job that reports; volume belongs in the
   nightly deep run, which is bounded by wall clock and has no tag waiting on it.
 
+  The same question asked of the rest of the workflow found one more: `guard
+  coverage` runs a targeted test per guard, and at 228 guards it spends 886–906s
+  of a 20-minute ceiling — ~4s each, so about 70 guards from the same
+  cancellation, against a registry that has gone 22 → 144 → 228 and grew by four
+  in this release. Its ceiling is now 45 minutes. Raised rather than sharded on
+  purpose: at 15 minutes it is not the critical path, so a split would accelerate
+  something nothing waits on. `guard coverage (windows)` keeps 20 — it runs only
+  the platform subset, at 109–122s.
+
 ### Documentation
 
 - **The retryability rule on `CommitLog` is stated per sentinel, and the rule it
