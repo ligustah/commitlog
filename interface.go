@@ -257,9 +257,34 @@ type CommitLog interface {
 	// producer-id records) runs it at open. Discarding the whole suffix instead
 	// would leave those markers overstating what the log holds.
 	//
-	// Visibility above the watermark stays gated by transaction markers: a
-	// dangling open transaction is aborted by recovery exactly as before, so
+	// Visibility above the watermark stays gated by transaction markers, so
 	// recovering a record is not the same as committing it.
+	//
+	// WHICH RECOVERY ABORTS A DANGLING TRANSACTION IS NOT THIS ONE. This method
+	// moves the watermark and truncates a torn suffix; it does not decide
+	// transactions, and the library never manufactures an abort. A transaction is
+	// decided by a marker, a marker is an ordinary record, and every record here
+	// was written by the caller — so the open-time LSO/seq/abort rebuild that
+	// decides a dangling one is the CALLER's (see CleanWithSpec's verified floor,
+	// which exists to let that rebuild skip a prefix).
+	//
+	// The distinction is the whole answer to "will this heal itself", so it is
+	// worth being blunt about: if a producer died mid-transaction and nothing
+	// ever writes the deciding marker, the records behind it stay invisible
+	// permanently — across every reopen, identically on every replica holding the
+	// same bytes, because they all rebuild from the same records. Nothing in this
+	// library will resolve that, and an earlier wording of this doc ("a dangling
+	// open transaction is aborted by recovery exactly as before") could be read
+	// as promising it would. It meant only that RecoverTail did not CHANGE the
+	// old behaviour.
+	//
+	// It also does not stay a visibility problem. A caller that derives
+	// CleanSpec.RetentionFloor from its open transactions — which is what that
+	// field is for — pins the floor at the undecided transaction's first offset
+	// while the LSO sits one below it, so the same record is both the retention
+	// floor and the compaction ceiling: nothing at or above it is readable,
+	// collectable, or compactable, and the log grows without bound until the
+	// transaction is decided.
 	RecoverTail() error
 
 	// ActiveSegmentBase returns the base offset of the active (unsealed)

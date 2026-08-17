@@ -407,6 +407,17 @@ type CleanSpec struct {
 	// retention limit had its own staged records collected out from under it,
 	// and its commit then referred to offsets that no longer existed.
 	//
+	// A floor that never ADVANCES is the cost of that protection, and it is
+	// unbounded. A transaction nobody decides — a producer that died
+	// mid-transaction, with no marker ever written — holds the floor at its first
+	// offset for as long as the log exists, while the ceiling sits one below it.
+	// The same record is then the retention floor and the compaction ceiling:
+	// nothing at or above it is readable, collectable or compactable, so the log
+	// grows without limit however small the retention settings are. That is this
+	// field working, not failing, and the library cannot break the tie — deciding
+	// the transaction is the caller's (see RecoverTail, which is where callers
+	// look for the heal that does not exist).
+	//
 	// A Bound rather than a sentinel, deliberately. Every obvious sentinel is a
 	// real floor: 0 protects the whole log, which is exactly what a transaction
 	// that began at offset 0 needs, and a caller writing `RetentionFloor: At(f)`

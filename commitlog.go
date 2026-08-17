@@ -1560,8 +1560,15 @@ func (l *commitLog) NewestOffset() int64 {
 // offset markers persisted elsewhere (state WALs) overstated the truncated
 // tail. Instead, walk the suffix above the checkpoint: every structurally
 // valid record is recovered (visibility above the HW stays gated by
-// transaction markers — a dangling open tx is aborted by recovery exactly as
-// before); only a torn suffix (power loss mid-write) is truncated.
+// transaction markers); only a torn suffix (power loss mid-write) is truncated.
+//
+// This does NOT decide transactions. It moves the watermark and truncates a
+// torn suffix; the open-time LSO/seq/abort rebuild that decides a dangling one
+// belongs to the caller, and nothing here manufactures an abort. The previous
+// wording — "a dangling open tx is aborted by recovery exactly as before" —
+// meant only that this method did not change that behaviour, and read as a
+// promise to perform it. See the interface doc for what an undecided
+// transaction costs.
 func (l *commitLog) RecoverTail() error {
 	hw := l.HighWatermark()
 	newest := l.NewestOffset()

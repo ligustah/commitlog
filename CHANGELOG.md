@@ -5,6 +5,37 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **`RecoverTail`'s doc read as a promise to abort a dangling transaction, and it
+  does no such thing.** The line was "a dangling open transaction is aborted by
+  recovery exactly as before" — which meant only that `RecoverTail` did not *change*
+  the old behaviour, and reads as a statement that recovery performs the abort. It
+  does not. `RecoverTail` moves the watermark and truncates a torn suffix; the library
+  never manufactures an abort. A transaction is decided by a marker, a marker is an
+  ordinary record, and every record is the caller's — so the open-time LSO/seq/abort
+  rebuild that decides a dangling one belongs to the caller.
+
+  The distinction is the entire answer to "will this heal itself." If a producer dies
+  mid-transaction and nothing ever writes the deciding marker, the records behind it
+  stay invisible permanently — across every reopen, identically on every replica
+  holding the same bytes, because they all rebuild from the same records.
+
+  And it does not stay a visibility problem. A caller deriving `CleanSpec.RetentionFloor`
+  from its open transactions — what the field is for — pins the floor at the undecided
+  transaction's first offset while the LSO sits one below, so **the same record is both
+  the retention floor and the compaction ceiling**: nothing at or above it is readable,
+  collectable, or compactable, and the log grows without bound however small the
+  retention limits are. That is the floor working, not failing, and the library cannot
+  break the tie. `RetentionFloor` now says so where a caller sets it, pointing at
+  `RecoverTail` rather than restating it.
+
+  Found while tracing a downstream stall through commitlog's side of the contract; the
+  stall turned out to be neither, but the doc could not be used to rule it out. Same
+  family as v0.93.1's three, and one line from one of them. Docs only.
+
 ## v0.93.1 — 2026-08-17
 
 Documentation only — no behaviour change, no API change, no format change. Three
