@@ -2337,6 +2337,24 @@ run_guard "a replication fetch on a deleted log names the log" commitlog.go   $'
 
 run_guard "a replication fetch on a closed log names the log" commitlog.go   $'		if l.IsClosed() {'   $'		if false {'   '^TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment$/^closed$'
 
+# And the timestamp door, which is the fifth path the same defect reached. Both
+# public lookups route through earliestOffsetAfterTimestampLocked, so the pair is
+# guarded once there rather than at each entry point -- the test drives both.
+#
+# NOTE the anchors are THREE tabs where the fetch's pair above is two: all four
+# lines are otherwise identical, and it is the indentation alone that keeps each
+# anchor resolving to exactly one line in this file. A reindent of either block
+# makes two guards ambiguous at once; guardcheck fails loudly on that rather than
+# silently guarding the wrong arm, but the fix is to re-anchor, not to reindent.
+#
+# Checked when these were written: neutralized ONE at a time each turns red only
+# its own subtest, across BOTH entry points -- and the deleted arm's mutation
+# makes a deleted log answer "commit log was closed", so the order is
+# load-bearing here for the same reason it is in the fetch.
+run_guard "a timestamp lookup on a deleted log names the log" commitlog.go   $'			if l.deleted {'   $'			if false {'   '^TestATimestampLookupOnADeadLogNamesTheLogNotTheSegment$/^EarliestOffsetAfterTimestamp$/^deleted$'
+
+run_guard "a timestamp lookup on a closed log names the log" commitlog.go   $'			if l.IsClosed() {'   $'			if false {'   '^TestATimestampLookupOnADeadLogNamesTheLogNotTheSegment$/^EarliestOffsetAfterTimestamp$/^closed$'
+
 
 echo
 if [ "$failures" -ne 0 ]; then

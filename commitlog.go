@@ -1696,6 +1696,44 @@ func (l *commitLog) earliestOffsetAfterTimestampLocked(timestamp int64) (int64, 
 		// answered with an offset instead of an error. errors.Is, so a wrapped
 		// not-found still reads as one.
 		if !errors.Is(err, ErrEntryNotFound) {
+			// The log's own state is tested BEFORE the error is reported, in
+			// newSourceReader's order and for its reason: "the log is gone"
+			// explains any failure the search produced, and a caller that cannot
+			// tell it from a compaction swap has to guess whether to retry.
+			//
+			// Without this the pair below escaped as ErrSegmentClosed —
+			// findEntryByTimestampResolving retries on segmentSwapped and then
+			// returns the sentinel raw — whose documented remedy is re-resolve
+			// and retry. So a closed log told a caller to fetch again, forever,
+			// and a DELETED one said "segment has been closed": the wrong cause
+			// wearing a retryable spelling. It is the same defect as #309/#313,
+			// reached through the timestamp door, and it is fixed here rather
+			// than in the two public methods because both route through this one
+			// — a rule transcribed to two call sites grows a dissimilar copy.
+			//
+			// l.deleted is read DIRECTLY rather than through IsDeleted(): this
+			// runs under l.mu.RLock() held by both public callers, and
+			// IsDeleted() takes that same lock. sync.RWMutex documents recursive
+			// read locking as not allowed for the reason that applies here —
+			// eleven sites take l.mu.Lock(), and one arriving between the outer
+			// RLock and the inner one blocks both. IsClosed() is a channel select
+			// holding no lock, so it is safe as written. Whether an accessor is
+			// callable is a property of the caller, not of the accessor.
+			//
+			// Stated as an invariant and not defended by a test on purpose:
+			// swapping the field read back for IsDeleted() passed the tests below,
+			// including the one that appends from a second goroutine, because
+			// appends take appendMu rather than l.mu and this arm is only reached
+			// on a log that is closed or deleted — where nothing else is writing.
+			// The violation is invisible to every test that can reach it, which
+			// makes it a lint rather than a guard; do not read the absence of a
+			// red run as permission to use the accessor here.
+			if l.deleted {
+				return 0, ErrCommitLogDeleted
+			}
+			if l.IsClosed() {
+				return 0, ErrCommitLogClosed
+			}
 			return 0, errors.Wrap(err, "failed to find log entry for timestamp")
 		}
 	}

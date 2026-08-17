@@ -38,6 +38,37 @@ library from that fork onward.
   needed a seam and a test of its own, and saying so here rather than letting
   one test's name stand for both is the same discipline this release is about.
 
+- **The timestamp lookups name the log too, and were the fifth path.** Found by
+  running the standing complexity sweep against the fix above, asking the obvious
+  next question: which OTHER paths retry on `segmentSwapped` without translating
+  the terminal states first? `EarliestOffsetAfterTimestamp` and
+  `LatestOffsetBeforeTimestamp` both bottom out in
+  `findEntryByTimestampResolving`, which retries the swap and then returns the
+  sentinel raw; the caller wrapped it and handed it out.
+
+  So a **closed** log answered a timestamp lookup with `ErrSegmentClosed`, whose
+  documented remedy is *re-resolve and retry* — the caller re-asks a log that is
+  never coming back, which is the loop sqlcdc reported against v0.88.0 reached
+  through a fifth door. A **deleted** log said `segment has been closed`: the
+  wrong cause as well as a retryable spelling. `EarliestOffsetAfterTimestamp` is
+  the direction durable_streams calls for seek-by-time on a subscription, so the
+  arm with a live consumer was the affected one.
+
+  Fixed once in `earliestOffsetAfterTimestampLocked`, which both exported methods
+  route through, rather than at the two call sites — a rule transcribed to two
+  places grows a dissimilar copy, and this defect is itself the fifth copy of one
+  rule. Two guards, one per arm.
+
+  Two things worth recording. `l.deleted` is read directly rather than through
+  `IsDeleted()`, because this path already holds `l.mu` and the accessor takes it
+  again; recursive read locking is documented-unsafe and eleven sites take
+  `l.mu.Lock()`. But swapping the accessor back in leaves the tests **green** —
+  appends take `appendMu`, and the arm only runs on a log where nothing else
+  writes — so that rule is stated as an invariant at the call site rather than
+  guarded, since no test that reaches it can fail on it. And the four anchors for
+  this pair and the fetch's pair are identical apart from indentation, which is
+  the only thing keeping each one resolving to a single line.
+
 - **`ReadMessageSet` and `CopyTier` now refuse a bad argument with
   `ErrInvalidOptions`.** Both returned a bare error for a value the caller
   supplied and can only fix in their own code — a non-positive `maxBytes`, a nil
