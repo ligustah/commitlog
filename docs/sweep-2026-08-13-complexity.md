@@ -2516,3 +2516,68 @@ script one constant at a time.
 The general point: **a checker gets read for what it says and mutated for what it
 does, and only the second one found these.** Six mutations, one per constant,
 took under a minute; the read-through that preceded them found nothing.
+
+## An ordered refusal needs an identity assertion, not an error assertion
+
+`parseBlockHeader` refuses in five steps: length, magic, version, codec, zero
+records. `TestBlockHeaderErrors` asserted `require.Error` five times, and that
+is not a weak test so much as a test of something else — it asks whether the
+function said no, when the question is *which step* said it.
+
+The gap already cost something, and the comment recording it was sitting right
+there in the test: a case labelled "unknown codec" poked byte 1, the **version**.
+The version check answered it, `require.Error` was satisfied, and
+`compress.Codec.Valid()` — whose only production call site is the next line —
+had no test reaching it at all. The label was the only thing claiming otherwise,
+and labels do not run. Aiming that case back at byte 1 is now red.
+
+The general shape: **in an ordered refusal, a fixture aimed at the wrong byte
+still produces AN error**, so the assertion has to name the step. What
+distinguishes them is the message, so the message is what is asserted, and the
+failure text states the consequence — a case that stops testing its own step
+reports success in exactly the same way as one that works.
+
+### The second question: should all five wrap ErrBlockFormat?
+
+**No — fewer, not more.** Two did; the right number is one.
+
+`ErrBlockFormat` is documented as a caller-facing probe run at startup before
+anything is touched: *this data was written by another build, stop*. The answer
+to it is to run the right build, not to repair anything. The zero-record check
+wrapped it, and that check is reachable **only once the version byte has been
+read and found to be this build's own** — the message said so out loud:
+`unsupported block format version: block header claims no records`.
+
+`ErrBlockTableFormat` goes the other way and every one of its six sites wraps
+it. Both are right, and the difference is in the sentinels' own words: *"not a
+block table"* is true of a bad magic and a bad CRC alike, where *"unsupported
+block format version"* is a claim about one byte. **A sentinel whose text is
+specific cannot be applied generally without lying** — and the direction that
+matters is widening, because narrowing makes a caller miss a case it handles
+while widening makes it act on a build mismatch that never happened.
+
+Both tests now assert the sentinel in **both** directions.
+
+### The arm that protected nothing
+
+`scanBlocks` ran `if errors.Is(err, ErrBlockFormat) { return err }` before the
+wrap that names the byte offset. It bought nothing: `errors.Is` sees through
+`errors.Wrapf`, so a caller matched the sentinel either way. Its only effect was
+to **delete the offset from exactly the refusals that had been given a
+sentinel** — so the next refusal filed under one silently lost its position too,
+which is precisely what happened to the zero-record check.
+
+Worth stating as a rule: **a fast path conditioned on an error's identity, whose
+only difference is the message, is a trap for the next error that gains that
+identity.** The removal is falsifiable — `versionMidSegment` in
+`TestACorruptBlockHeaderIsNotATornTail` is the only case that reaches the arm.
+
+### The same lens, one file over
+
+`decodeBlockTable` refuses in six ordered steps, all `ErrBlockTableFormat`, and
+`TestADamagedBlockTableIsRefused` had nine cases asserting only `ErrorIs`. Nine
+fixtures could have collapsed onto three checks with nothing to show for it. Two
+pairs do share a check on purpose (nil and header-only are both too short; a
+bogus count and a trailing byte are both size-vs-count) — deliberate sharing is
+fine, and accidental drift onto a shared check is what the message assertion
+catches. Aiming the wrong-magic case at the version byte is now red.

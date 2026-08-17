@@ -5,6 +5,40 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Changed
+
+- **`ErrBlockFormat` now means the version byte and nothing else.** It was also
+  returned for a block header claiming zero records — damage in one header of
+  one segment, and reachable only *after* the version byte has been read and
+  found to be this build's own. The error said so: `unsupported block format
+  version: block header claims no records`, a sentence that disproves itself.
+
+  The sentinel is documented as a whole-store fact a caller probes at startup
+  before touching anything: another build wrote this data, stop. The answer is
+  to run the right build, not to repair something. Filing damage under it sent
+  an operator hunting a mismatch that was never involved. The four non-version
+  refusals — a header the file is too short to hold, a bad magic, a codec
+  outside the set, a zero record count — now return plain errors carrying their
+  byte offset.
+
+  This is the opposite of `ErrBlockTableFormat`, which every one of its six
+  sites wraps, and both are right: "not a block table" is true of a bad magic
+  and a bad CRC alike, where "unsupported block format version" is a claim
+  about one byte. A sentinel whose text is specific cannot be applied generally
+  without lying.
+
+  No peer matches `ErrBlockFormat` today, so nothing needs changing downstream.
+
+- **A refused block header now always reports where it is.** `scanBlocks` had
+  an `errors.Is(err, ErrBlockFormat)` arm returning the error bare, ahead of
+  the wrap that names the byte offset. It protected nothing — `errors.Is` sees
+  through `errors.Wrapf`, so a caller matched the sentinel either way — and its
+  only effect was to delete the offset from exactly the refusals that had been
+  given a sentinel. A corrupt header at an unknown offset is what an operator
+  was left holding.
+
 ## v0.89.0 — 2026-08-14
 
 ### Changed — on-disk format, no compatibility path
