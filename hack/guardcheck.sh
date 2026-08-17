@@ -1527,6 +1527,19 @@ run_guard "an appended set is checked against the tail" commitlog.go   '	if err 
 		return nil, nil
 	}'   '^TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail$'
 
+# The guard above covers the CALL SITE, not the three checks inside it — one
+# guard over three ordered checks goes green if any single one of them has a
+# test. So each check is neutralized on its own below. This is only meaningful
+# because the fixture asserts each refusal's MESSAGE: with ErrorIs alone, a case
+# whose own check was removed drifts onto a neighbour and stays green. See #308.
+run_guard "a set with no whole frame is refused" commitlog.go   '	if len(entries) == 0 {
+		// entriesForMessageSet yields nothing for any input shorter than one' '	if false {
+		//' '^TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail$'
+
+run_guard "an appended set starts above the tail" commitlog.go   '	if first := entries[0].Offset; first <= tail {' '	if first := entries[0].Offset; false && first <= tail {'   '^TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail$'
+
+run_guard "an appended set ascends" commitlog.go   '		if entries[i].Offset <= entries[i-1].Offset {' '		if false && entries[i].Offset <= entries[i-1].Offset {'   '^TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail$'
+
 # The segment's tail only ever moves forward. Neutralized by the assignment it
 # used to be, which lowers the field NextOffset is derived from.
 run_guard "a segment tail only moves forward" segment.go   '	if last.Offset > s.lastOffset {

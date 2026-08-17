@@ -18,6 +18,13 @@ import (
 // follower resuming from a compacted source has to be able to append across one.
 // It is the LAST assertion here deliberately — a refusal test whose every case
 // is a refusal is satisfied by a function that refuses everything.
+//
+// Every case also asserts the MESSAGE, not just the sentinel. checkAppendedSet
+// is three ordered checks sharing one ErrMessageSetRefused, so ErrorIs cannot
+// say which of them fired — and the ascending case in particular reaches the
+// third check only because its first frame sits at tail+20 and clears the
+// second. Change that constant and the case silently becomes a duplicate of the
+// at-or-below one, still green. See #307 for the same shape in block parsing.
 func TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail(t *testing.T) {
 	l, cleanup := setup(t)
 	defer cleanup()
@@ -36,6 +43,8 @@ func TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail(t *testing.T) {
 	require.NoError(t, err)
 	_, err = l.AppendMessageSet(atTail)
 	require.ErrorIs(t, err, ErrMessageSetRefused)
+	require.Contains(t, err.Error(), "at or below the log's newest",
+		"the tail check has to be the one that fired, not the empty-set check above it")
 	require.EqualValues(t, tail, l.NewestOffset(), "a refused set was written anyway")
 
 	// And below it.
@@ -43,6 +52,7 @@ func TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail(t *testing.T) {
 	require.NoError(t, err)
 	_, err = l.AppendMessageSet(below)
 	require.ErrorIs(t, err, ErrMessageSetRefused)
+	require.Contains(t, err.Error(), "at or below the log's newest")
 
 	// Nothing at all. entriesForMessageSet yields no entries for anything
 	// shorter than one header, and segment.write indexes the last entry after
@@ -50,8 +60,10 @@ func TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail(t *testing.T) {
 	// just appended to.
 	_, err = l.AppendMessageSet(nil)
 	require.ErrorIs(t, err, ErrMessageSetRefused)
+	require.Contains(t, err.Error(), "no whole frame in the set")
 	_, err = l.AppendMessageSet(make([]byte, msgSetHeaderLen-1))
 	require.ErrorIs(t, err, ErrMessageSetRefused)
+	require.Contains(t, err.Error(), "no whole frame in the set")
 
 	// Ascending is checked across the whole set, not just at the seam: two sets
 	// concatenated out of order start above the tail and then walk backwards.
@@ -63,6 +75,10 @@ func TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail(t *testing.T) {
 	require.NoError(t, err)
 	_, err = l.AppendMessageSet(append(append([]byte{}, high...), low...))
 	require.ErrorIs(t, err, ErrMessageSetRefused)
+	require.Contains(t, err.Error(), "does not ascend from",
+		"this set starts above the tail, so the ascending check is the only one "+
+			"that can refuse it — if the tail check answered instead, the case is "+
+			"a duplicate and the ascending check has no test at all")
 	require.EqualValues(t, tail, l.NewestOffset(), "a refused set was written anyway")
 
 	// The control: a gap ABOVE the tail is legitimate and must still append.
@@ -126,7 +142,10 @@ func TestASegmentRefusesAWriteWithNoEntries(t *testing.T) {
 	seg := l.activeSegment()
 	before := seg.Position()
 
-	require.ErrorIs(t, seg.WriteMessageSet([]byte("some bytes"), nil), ErrMessageSetRefused)
+	err := seg.WriteMessageSet([]byte("some bytes"), nil)
+	require.ErrorIs(t, err, ErrMessageSetRefused)
+	require.Contains(t, err.Error(), "write with no entries",
+		"the segment's own refusal, not checkAppendedSet's — this path bypasses it")
 	require.EqualValues(t, before, seg.Position(),
 		"the payload was written before the entries were found to be empty")
 }

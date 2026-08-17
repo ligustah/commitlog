@@ -2611,3 +2611,32 @@ difference between them.
 Related but distinct from the #307 lens above, which is about a *single* path
 whose refusals cannot be told apart. This one is about *two* paths that agree
 they are answering the same question and disagree on the answer.
+
+## One guard over three ordered checks
+
+`checkAppendedSet` is three refusals sharing `ErrMessageSetRefused`: the set has
+no whole frame, it starts at or below the tail, it does not ascend. Six
+`require.ErrorIs` calls covered them, and one guard —
+*"an appended set is checked against the tail"* — neutralized the whole call.
+
+Both halves of that are the same mistake at different sizes. A guard that
+removes N checks together reports covered when **any one** of them has a test,
+and `ErrorIs` against a shared sentinel cannot say which check answered. So the
+ascending case was the one at risk: it reaches the third check only because its
+first frame sits at `tail+20` and clears the second. Lower that constant and the
+case silently becomes a second copy of the at-or-below case — still green, with
+the ascending check now untested. Setting it to `tail` proves it:
+
+```
+"set starts at offset 4, at or below the log's newest (4)" does not contain "does not ascend from"
+```
+
+The fix is both directions at once. Each case asserts its own message, and each
+check gets its own guard on top of the call-site one. Neither alone is enough:
+per-check guards without message assertions still pass by drift, and message
+assertions without per-check guards still leave "was this check ever exercised"
+unanswered.
+
+The general form: **a guard's neutralization defines the unit of coverage.** If
+it deletes more than one decision, the guard is a claim about the group, not
+about any member of it.
