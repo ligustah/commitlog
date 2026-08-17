@@ -54,6 +54,43 @@ var ErrTimestampBeforeLog = errors.New("commitlog: timestamp is before the begin
 // ReadMessage already handles an error return, and none can handle a panic.
 var ErrCorruptRecord = errors.New("commitlog: record failed its CRC check")
 
+// ErrCorruptFrameHeader reports the ErrCorruptRecord failure a sequential walk
+// must NOT step over. It WRAPS ErrCorruptRecord, so every existing
+// errors.Is(err, ErrCorruptRecord) arm keeps matching and no caller has to learn
+// this name to stay as correct as it was.
+//
+// The distinction is where the read stopped, and it is not visible in the
+// sentinel it used to share. A payload failure — a bad CRC, a frame too short to
+// hold one, an offset outside its segment — is raised after the header AND the
+// payload were consumed, so the next read begins at the next frame and "skip the
+// record and carry on" does precisely that. A frame header failing its OWN CRC is
+// raised with only the header consumed, and `size` is one of the fields that just
+// failed verification, so the payload length is unknown and cannot be stepped
+// over.
+//
+// Reading on from there begins MID-RECORD: the next msgSetHeaderLen bytes are
+// payload bytes interpreted as a header, which fails its CRC on data that is
+// perfectly intact. One damaged record is then reported as a RUN of corrupt
+// records — see readFrameHeader, which describes the same cascade arriving from
+// the too-large-buffer side.
+//
+// The fact is the same wherever it is raised; the remedy belongs to whoever is
+// walking, so this deliberately does not name one:
+//
+//   - a Reader resyncs. Reposition by OFFSET — last record read successfully,
+//     plus one — which resolves through the index rather than by walking frames,
+//     and so steps over the damaged frame without needing its length.
+//   - a whole-segment pass (compaction, Truncate, TruncateBefore, via
+//     segmentScanner) has no next frame to find and nothing to resync to. It
+//     reports the segment and leaves it untouched.
+//
+// Added because ErrCorruptRecord's remedy list offered "skip the record and carry
+// on" for the sentinel as a whole while two of its producers cannot support it,
+// and a caller holding the error had no way to tell which kind it had. Reported by
+// sqlcdc, whose walstat wanted exactly that skip and stopped rather than spin.
+var ErrCorruptFrameHeader = fmt.Errorf(
+	"%w: frame header failed its CRC, so the payload length is unknown", ErrCorruptRecord)
+
 // ErrSegmentUnreadable reports that a segment does not hold what the log says
 // it holds. Truncate, TruncateBefore and Clean wrap it, and leave the segment
 // exactly as they found it when they return it.

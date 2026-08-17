@@ -3548,11 +3548,15 @@ func (s *segmentScanner) Scan() (messageSet, *entry, error) {
 	// never did, which is why the paths that walk a segment to REWRITE it —
 	// compaction, Truncate, TruncateBefore — were the ones that could be made to
 	// crash by a caller's damaged data.
+	// ErrCorruptFrameHeader: same fact as the read path's, different walker. A scan
+	// cannot resync — it has no next frame to find, since the length that would
+	// locate one is the field that failed — so its callers report the segment and
+	// leave it as they found it. It wraps ErrCorruptRecord, so the arms that
+	// already handle this are unchanged.
 	if want, got := storedHeaderCrc(header), headerCrc(header); want != got {
 		s.stream.Close()
-		return nil, nil, errors.Wrapf(ErrCorruptRecord,
-			"frame header at %d failed CRC: expected 0x%08x, got 0x%08x",
-			s.pos, want, got)
+		return nil, nil, errors.Wrapf(ErrCorruptFrameHeader,
+			"at %d: expected 0x%08x, got 0x%08x", s.pos, want, got)
 	}
 	size := header.Size()
 	// A frame cannot be longer than what follows its own header. A size that

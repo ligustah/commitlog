@@ -111,6 +111,23 @@ package commitlog
 //     heaviest of those three, which is a poor answer to a single bad record in
 //     an otherwise sound segment — and the whole reason this is a sentinel rather
 //     than the panic it used to be is that a read is where a caller can choose.
+//     The FIRST of those three is conditional, which is what the next entry is
+//     for: check ErrCorruptFrameHeader before skipping anything.
+//   - ErrCorruptFrameHeader — the conditional half of the entry above, and the
+//     reason that entry cannot promise a skip. It WRAPS the sentinel above, so
+//     arms matching that keep matching, and adds that the payload was never read
+//     and its length never verified, because the field carrying that length is
+//     what failed. So exactly one of the three remedies above does not apply:
+//     skipping the record. There is no known length to skip by, and reading on
+//     begins MID-RECORD, which reports records that are perfectly intact as
+//     corrupt. Instead — a Reader resyncs BY OFFSET, last good record plus one,
+//     which resolves through the index rather than by walking frames; a
+//     whole-segment pass has nothing to resync to and reports the segment.
+//     Deliberately no single remedy on this line: the fact is one thing and the
+//     two walkers answer it differently, which is the mistake the entries below
+//     record. Added because the bullet above promised a remedy for the sentinel
+//     as a whole that two of its producers cannot support, and a downstream tool
+//     wanting precisely that skip had no way to tell the two apart.
 //   - ErrCommitLogClosed — this handle is finished, but the log is not. Open it
 //     again if you still want it. Not damage: somebody called Close.
 //   - ErrCommitLogDeleted — the log is GONE, so unlike the line above there is

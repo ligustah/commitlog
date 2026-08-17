@@ -7,6 +7,47 @@ library from that fork onward.
 
 ## Unreleased
 
+### Added
+
+- **`ErrCorruptFrameHeader`, for the one `ErrCorruptRecord` a sequential walk must
+  not step over.** It WRAPS `ErrCorruptRecord`, so every existing
+  `errors.Is(err, ErrCorruptRecord)` arm keeps matching and no caller has to adopt
+  the name to stay as correct as it already was.
+
+  The remedy list offered "skip the record and carry on" first. That holds for most
+  producers of the sentinel and fails for two. A payload failure — a bad CRC, a
+  frame too short to hold one, an offset outside its segment — is raised after the
+  header AND the payload were consumed, so the next read begins at the next frame
+  and skipping does exactly what it claims. A frame header failing its OWN CRC is
+  raised with only the header consumed, and `size` is one of the fields that just
+  failed verification, so the payload length is unknown and cannot be stepped over.
+  Reading on begins mid-record: payload bytes are interpreted as a header and fail
+  their CRC on data that is perfectly intact, so damage in ONE record surfaces as a
+  run of them, and a tool counting corruption over-counts instead of spinning.
+
+  The sentinel deliberately names no single remedy, because the fact has two
+  walkers that answer it differently. A `Reader` resyncs BY OFFSET — last good
+  record plus one, resolved through the index rather than by walking frames — while
+  a whole-segment pass (compaction, `Truncate`, `TruncateBefore`, via
+  `segmentScanner`) has no next frame to find and nothing to resync to, so it
+  reports the segment and leaves it untouched. Both header-CRC sites carry the
+  sentinel, and all three wrapping paths preserve it alongside
+  `ErrSegmentUnreadable` because they wrap with a double `%w`.
+
+  Reported by sqlcdc one release after the remedy was written down: their walstat
+  wanted precisely that skip and stopped rather than risk spinning. Nothing in the
+  suite had ever called `ReadMessage` AGAIN after a refusal, so the affordance the
+  docs promised was unexercised in both directions. Now covered per direction, each
+  half falsified by reverting its own site — the read path red at the distinguishing
+  assertion, the scan path red on all three of its callers.
+
+  **The fifth instance of one lens this session:** a claim quantified over a set
+  that nobody checked from the other side. v0.92.1 split a grouped bullet whose
+  sentence was false of one of its two names; this is the same shape one level down,
+  inside a single sentinel covering two conditions with different remedies.
+  `hack/sentinels.sh` caught my own replacement bullet as a grouped remedy while I
+  was writing it, which is that check earning its place rather than my noticing.
+
 ### Testing
 
 - **The concurrent timestamp probe accepted two sentinels those methods cannot

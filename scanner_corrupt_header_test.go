@@ -122,6 +122,15 @@ func TestDamageInOneSegmentDoesNotKillTheProcess(t *testing.T) {
 			require.ErrorIs(t, err, ErrSegmentUnreadable,
 				"%s met unreadable bytes and called it done", tc.name)
 
+			// The scan stopped on a frame-header CRC failure specifically, and that
+			// fact has to survive the wrap. It says the walk cannot be RESUMED past
+			// the damage — the length that would locate the next frame is the field
+			// that failed — which is a different statement from "this segment is
+			// bad" and the reason the wrapping sites use a double %w rather than
+			// replacing the cause. See ErrCorruptFrameHeader.
+			require.ErrorIs(t, err, ErrCorruptFrameHeader,
+				"%s lost the frame-header sentinel when wrapping the scan failure", tc.name)
+
 			// A rewrite that walks a segment to copy it forward and stops early
 			// installs a copy missing everything past the damage, then deletes
 			// the original. That is how a scan error becomes data loss: the pass

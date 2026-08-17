@@ -946,9 +946,15 @@ func readFrameHeader(ctx context.Context, reader contextReader, headersBuf []byt
 	// Checked before `size` is used, because size is one of the fields being
 	// verified: trusting it first is how a corrupt length becomes a bad
 	// allocation.
+	// ErrCorruptFrameHeader rather than plain ErrCorruptRecord — which it still IS,
+	// by wrapping, so existing arms are unaffected. The difference a caller needs is
+	// that this is the one corrupt-record failure raised with the payload still
+	// unread and its length unverifiable, so skipping ahead lands mid-record. Every
+	// other producer of ErrCorruptRecord on this path has already consumed the whole
+	// frame. See ErrCorruptFrameHeader.
 	if want, got := storedHeaderCrc(hdr), headerCrc(hdr); want != got {
-		return frameHeader{}, pkgErrors.Wrapf(ErrCorruptRecord,
-			"frame header failed CRC: expected 0x%08x, got 0x%08x", want, got)
+		return frameHeader{}, pkgErrors.Wrapf(ErrCorruptFrameHeader,
+			"expected 0x%08x, got 0x%08x", want, got)
 	}
 	return frameHeader{
 		offset:      int64(encoding.Uint64(hdr[offsetPos:])),
