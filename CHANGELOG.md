@@ -65,9 +65,18 @@ library from that fork onward.
   `l.mu.Lock()`. But swapping the accessor back in leaves the tests **green** —
   appends take `appendMu`, and the arm only runs on a log where nothing else
   writes — so that rule is stated as an invariant at the call site rather than
-  guarded, since no test that reaches it can fail on it. And the four anchors for
-  this pair and the fetch's pair are identical apart from indentation, which is
-  the only thing keeping each one resolving to a single line.
+  guarded, since no test that reaches it can fail on it.
+
+  And adding this pair **disarmed the fetch's guard one commit earlier**, which is
+  worth more than the fix. The two `if l.IsClosed() {` lines are identical apart
+  from depth, and guardcheck matches by SUBSTRING — so two tabs sit inside three,
+  and the older pattern suddenly matched both places. It refused (`SKIP`) instead
+  of neutralizing the wrong arm, so the loss was visible rather than silent, but a
+  filtered run would not have shown it: only the unfiltered anchor pass did. The
+  fetch's anchor is now narrowed with its return line, which differs where the
+  `if` does not — `nil` there against `0` here, one returning bytes and the other
+  an offset. Indentation is not a discriminator, and reaching for it was the wrong
+  instinct on the first try.
 
 - **`ReadMessageSet` and `CopyTier` now refuse a bad argument with
   `ErrInvalidOptions`.** Both returned a bare error for a value the caller

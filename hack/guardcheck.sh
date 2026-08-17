@@ -2335,7 +2335,17 @@ run_guard "a reader built on a closed log names the log" reader.go   $'		if l.Is
 # started refusing everything.
 run_guard "a replication fetch on a deleted log names the log" commitlog.go   $'		if l.IsDeleted() {'   $'		if false {'   '^TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment$/^deleted$'
 
-run_guard "a replication fetch on a closed log names the log" commitlog.go   $'		if l.IsClosed() {'   $'		if false {'   '^TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment$/^closed$'
+# The `if` line alone is NOT unique any more: the timestamp guard below is the
+# same text one tab deeper, and this pattern is a SUBSTRING of that one. Matching
+# is by substring, not by whole line, so two tabs sit inside three and apply_edit
+# refused with "matches more than one place" the moment the timestamp arm landed.
+# It refused rather than neutralizing the wrong arm, which is the only reason this
+# was a SKIP and not a guard quietly reporting on code it never touched.
+#
+# Narrowed with the return line, which differs where the `if` does not -- `nil`
+# here, `0` in the timestamp arm, because one returns a byte slice and the other
+# an offset. Indentation is NOT a discriminator; do not reach for it next time.
+run_guard "a replication fetch on a closed log names the log" commitlog.go   $'		if l.IsClosed() {\n			return nil, ErrCommitLogClosed'   $'		if false {\n			return nil, ErrCommitLogClosed'   '^TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment$/^closed$'
 
 # And the timestamp door, which is the fifth path the same defect reached. Both
 # public lookups route through earliestOffsetAfterTimestampLocked, so the pair is
