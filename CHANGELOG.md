@@ -47,6 +47,29 @@ library from that fork onward.
   pair named, and it passed both before and after the split, which is exactly why
   the split needed a check and not just a fix.
 
+- **`TestConcurrentReadersAndProbesOnLiveLog` churns until its floors are met.**
+  The last test in the package pairing a fixed window with a counted floor, found
+  by asking v0.92.0's question of the rest of the suite rather than by a red job:
+  five seconds of churn, then three floors of 100. Whether a count clears inside a
+  fixed window is a property of the runner, which is what took the retention
+  snapshot test from 64 rewrites to 2 on a loaded windows box and failed a release
+  candidate.
+
+  Its margins are why it had not failed and why it was still worth changing. On a
+  quiet box it produces 3729 writes, 28821 probes and 644226 reads against floors
+  of 100 — 37x at the narrowest, against the other test's 6.4x, because these
+  count cheap operations rather than contended boundary rewrites. But the same
+  runner that returned 2 of 10 there would bring the narrowest of these to about
+  the floor, so the margin is luck rather than headroom. Five seconds stays as a
+  minimum, since the overlap is what the test is for; only the ceiling moves, to a
+  60s deadline that still fails rather than passing vacuously.
+
+  Falsified the same way, because passing only shows nothing broke: raising the
+  loop's target alone took it to 17.27s and 8005 writes against 7.33s and 3729,
+  and it retired just past the target — so the wait extends and the extra time
+  buys writes. No guard names this test, so unlike the retention one there was
+  nothing to re-falsify.
+
 ## v0.92.0 — 2026-08-17
 
 ### Fixed

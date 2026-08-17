@@ -158,13 +158,44 @@ func TestConcurrentReadersAndProbesOnLiveLog(t *testing.T) {
 		}(r)
 	}
 
-	time.Sleep(5 * time.Second)
+	// Runs until the floors below are MET, not for a fixed five seconds — the same
+	// change TestRetentionNeverWritesIntoASliceAReaderIsHolding needed, made here
+	// before it costs a release rather than after. A count paired with a fixed
+	// window measures the machine: whether 100 writes land in five seconds is a
+	// fact about the runner, and that test's floor of 10 came back 2 on a loaded
+	// windows box. Five seconds stays as a MINIMUM because the overlap is the
+	// point; what changes is the ceiling.
+	//
+	// The margins here are far wider than that test's — on a quiet box this makes
+	// writes 3701, probes 29928 and reads 636144 against floors of 100, so 37x at
+	// the narrowest against its 6.4x, because these count cheap operations rather
+	// than contended boundary rewrites. Wide enough that it was not failing, not
+	// wide enough to argue with: the runner that produced 2 of 10 there would
+	// bring the narrowest of these to roughly the floor.
+	const (
+		minChurn    = 5 * time.Second
+		churnBudget = 60 * time.Second
+	)
+	churnStart := time.Now()
+	for {
+		enough := writes.Load() > 100 && probes.Load() > 100 && reads.Load() > 100
+		if enough && time.Since(churnStart) >= minChurn {
+			break
+		}
+		if time.Since(churnStart) >= churnBudget {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	close(stop)
 	wg.Wait()
 
 	require.Zero(t, failures.Load(), "concurrent readers and probes must not error")
-	require.Greater(t, writes.Load(), int64(100), "writer did not produce enough churn")
-	require.Greater(t, probes.Load(), int64(100), "probers did not run enough")
-	require.Greater(t, reads.Load(), int64(100), "readers did not read enough")
+	require.Greater(t, writes.Load(), int64(100),
+		"writer did not produce enough churn in %s", churnBudget)
+	require.Greater(t, probes.Load(), int64(100),
+		"probers did not run enough in %s", churnBudget)
+	require.Greater(t, reads.Load(), int64(100),
+		"readers did not read enough in %s", churnBudget)
 	t.Logf("writes=%d probes=%d reads=%d", writes.Load(), probes.Load(), reads.Load())
 }
