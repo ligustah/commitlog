@@ -33,11 +33,34 @@ var (
 	// ErrEntryNotFound is returned when a segment search cannot find a
 	// specific entry.
 	//
-	// not caller-sorted: it means "not in THIS segment", and the log's own
-	// search loop is what consumes it — earliestOffsetAfterTimestampLocked
-	// treats it as "try the next segment" and answers the exhausted search with
-	// the next assignable offset. A caller sees an offset or a different
-	// sentinel, never this one.
+	// not caller-sorted: it means "not in THIS segment", and every path that can
+	// produce it establishes first that the segment DOES hold the offset, so a
+	// caller sees an offset or a different sentinel rather than this one.
+	//
+	// The reason is written out per path because the previous version of this
+	// comment named only earliestOffsetAfterTimestampLocked — which reaches
+	// findEntryByTimestamp and never findEntry, so it justified the claim with a
+	// consumer that is not on most of the paths the claim covers. The six
+	// findEntry call sites pass the error straight through, and what actually
+	// holds the guarantee is three different things:
+	//
+	//   - findEntry is called only under `contains` from findSegmentContains:
+	//     newReaderUncommitted, newReaderCommitted, and readMessageSetFrom (which
+	//     takes contains as a parameter from the caller that computed it).
+	//   - findSegment resolved a non-nil segment first, and refuses an offset past
+	//     the last written record rather than returning the active segment for it:
+	//     committedReader's resync and getHWPos. Verified rather than reasoned —
+	//     SetHighWatermark takes an arbitrary int64 and only checks that it moves
+	//     forward, so a watermark past the end looked like a way in; findSegment
+	//     answers nil at newest+1 and NewReader reports ErrSegmentNotFound, which
+	//     IS in the remedy list.
+	//   - the offsets came from the segment's OWN keydigest, so they are present
+	//     by construction: planRuns, via prefixSource.fetch.
+	//
+	// The third is the one to re-check if this ever changes, because it is the
+	// only one holding by provenance rather than by a test in the code: a digest
+	// naming an offset the segment does not hold would carry this sentinel out
+	// through the prefix-read surface, wrapped but still matching errors.Is.
 	ErrEntryNotFound = errors.New("entry not found")
 
 	// ErrSegmentClosed is returned on reads/writes to a closed segment.

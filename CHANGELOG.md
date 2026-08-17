@@ -29,6 +29,34 @@ library from that fork onward.
   Verified rather than assumed: four plain runs and one under `-race` with both
   arms removed.
 
+### Fixed
+
+- **`ErrEntryNotFound`'s exemption justified itself with a function not on the
+  path.** Its declaration is what keeps it out of the remedy list — `hack/
+  sentinels.sh` accepts a `not caller-sorted:` reason in place of a listed remedy —
+  and the reason it gave was `earliestOffsetAfterTimestampLocked` consuming it.
+  That function reaches `findEntryByTimestamp` and never `findEntry`, so it spoke
+  for one path while the claim ("a caller sees an offset or a different sentinel,
+  never this one") covers all of them. The six `findEntry` call sites pass the
+  error straight through.
+
+  The claim is true; the stated reason was not the one holding it up. Three
+  different mechanisms are: `findEntry` guarded by `contains` from
+  `findSegmentContains`; a nil-checked `findSegment` that refuses an offset past
+  the last written record; and offsets taken from the segment's own keydigest, so
+  present by construction. All three are now written out per path.
+
+  One of them was measured rather than reasoned, because it looked like a way in:
+  `SetHighWatermark` accepts an arbitrary `int64` and only checks that it moves
+  forward, and `getHWPos` hands `findEntry`'s error back verbatim. But
+  `findSegment` answers nil at `newest+1`, so `NewReader` reports
+  `ErrSegmentNotFound` — which *is* in the remedy list. The comment now also names
+  which of the three to re-check first: the keydigest one, the only one holding by
+  provenance rather than by a check in the code.
+
+  Fourth instance in two releases of a claim quantified over a set and justified
+  by one member — and the first where the cited member was not in the set.
+
 ## v0.92.1 — 2026-08-17
 
 Everything here was found by shipping v0.92.0 — not by its tests, which stayed
