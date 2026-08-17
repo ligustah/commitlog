@@ -23,13 +23,25 @@ written down, which is where the last three findings on this path came from too.
   `errors.Is(err, ErrCorruptRecord)` arm keeps matching and no caller has to adopt
   the name to stay as correct as it already was.
 
-  The remedy list offered "skip the record and carry on" first. That holds for most
-  producers of the sentinel and fails for two. A payload failure — a bad CRC, a
+  The remedy list offered "skip the record and carry on" first. That remedy belongs
+  to the READ path — a `Reader` is the only walker ever offered it — and on that path
+  exactly one producer cannot support it. A payload failure there — a bad CRC, a
   frame too short to hold one, an offset outside its segment — is raised after the
   header AND the payload were consumed, so the next read begins at the next frame
   and skipping does exactly what it claims. A frame header failing its OWN CRC is
   raised with only the header consumed, and `size` is one of the fields that just
   failed verification, so the payload length is unknown and cannot be stepped over.
+
+  Stated that way on purpose, because the first draft of this entry said the remedy
+  "fails for two producers" and that conflated two different counts. The
+  frame-header-CRC FACT has two producers — one per walker, read path and scan path,
+  which is why the new sentinel appears in two files. The set of sites that leave a
+  walk unable to continue is a third thing again, and larger: the scanner's
+  length-versus-extent check (`segment.go`) also refuses before reading any payload.
+  It gets no sentinel of its own because its meaning differs — the length is known
+  and impossible, rather than unknown — and because a scan's callers are never
+  offered a skip to begin with. Three overlapping sets, one of which this release is
+  about; counting them as one is the same mistake in miniature.
   Reading on begins mid-record: payload bytes are interpreted as a header and fail
   their CRC on data that is perfectly intact, so damage in ONE record surfaces as a
   run of them, and a tool counting corruption over-counts instead of spinning.

@@ -98,9 +98,18 @@ var ErrCorruptRecord = errors.New("commitlog: record failed its CRC check")
 //     reports the segment and leaves it untouched.
 //
 // Added because ErrCorruptRecord's remedy list offered "skip the record and carry
-// on" for the sentinel as a whole while two of its producers cannot support it,
-// and a caller holding the error had no way to tell which kind it had. Reported by
-// sqlcdc, whose walstat wanted exactly that skip and stopped rather than spin.
+// on" for the sentinel as a whole while the frame-header producers cannot support
+// it, and a caller holding the error had no way to tell which kind it had. Reported
+// by sqlcdc, whose walstat wanted exactly that skip and stopped rather than spin.
+//
+// Three overlapping sets here, and they are worth keeping apart because collapsing
+// them is the same mistake this sentinel exists to correct. The SKIP remedy belongs
+// to the read path, where exactly one producer cannot honour it. The frame-header
+// CRC FACT has two producers, one per walker, which is why this sentinel appears in
+// two files. And the sites that leave a walk unable to continue are more than
+// either: segmentScanner's length-versus-extent check refuses before reading any
+// payload too. That one gets no sentinel — its length is KNOWN and impossible
+// rather than unknown, and a scan's callers are never offered a skip to begin with.
 var ErrCorruptFrameHeader = fmt.Errorf(
 	"%w: frame header failed its CRC, so the payload length is unknown", ErrCorruptRecord)
 

@@ -130,8 +130,12 @@ package commitlog
 //     Deliberately no single remedy on this line: the fact is one thing and the
 //     two walkers answer it differently, which is the mistake the entries below
 //     record. Added because the bullet above promised a remedy for the sentinel
-//     as a whole that two of its producers cannot support, and a downstream tool
-//     wanting precisely that skip had no way to tell the two apart.
+//     as a whole that its frame-header producers cannot support — one per walker,
+//     which is why the sentinel appears in two files — and a downstream tool
+//     wanting precisely that skip had no way to tell them apart. The declaration
+//     keeps three overlapping sets apart that this line would otherwise collapse:
+//     who is offered the skip, where the header-CRC fact is raised, and which
+//     sites leave a walk unable to continue at all.
 //   - ErrCommitLogClosed — this handle is finished, but the log is not. Open it
 //     again if you still want it. Not damage: somebody called Close.
 //   - ErrCommitLogDeleted — the log is GONE, so unlike the line above there is
