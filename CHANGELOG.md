@@ -9,6 +9,30 @@ library from that fork onward.
 
 ### Fixed
 
+- **`NewestOffset()` is not an emptiness test, and its doc said it was.** The line was
+  "returns the offset of the last message in the log or -1 if empty". The `-1` half is
+  true only of a log that has never been trimmed. The value is derived from the active
+  segment, and an unwritten segment's next offset is its **base** — so a log trimmed to
+  a non-zero base and then emptied returns `base-1`: a non-negative offset naming a
+  record that is gone, at the same moment `OldestOffset()` correctly answers `-1`.
+
+  The two accessors disagree about whether the log is empty, and the one a caller
+  reaches for when deriving a tail is the wrong one. `TruncateBefore` followed by
+  `Truncate(OldestOffset())` reaches it in two calls. A caller testing
+  `NewestOffset() < 0` concludes the log has records and then reads at a tail holding
+  nothing.
+
+  The doc now describes the value as one below where the next append lands, sends
+  emptiness questions to `OldestOffset` — which is `-1` in every empty case — and is
+  explicit that the *arithmetic* stays sound: `NewestOffset()+1` is the next append
+  offset in this state too, so deriving an end position from it is still correct. It
+  is only the inference from a negative value that fails. Pinned by a test, since the
+  doc now names a specific value that an obvious cleanup would otherwise "fix" back.
+
+  Found while checking a downstream claim that an empty log implies an end position of
+  zero. It does not, once the log has been trimmed. Docs and a test only; no behaviour
+  change.
+
 - **`HighWatermark()` is a snapshot, not a limit, and a scan bounded by it must record
   where it stopped.** v0.93.1 documented the crash reason this value sits behind the
   durable tail. That is only the loudest one. It also moves on append, on the next

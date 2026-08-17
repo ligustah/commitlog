@@ -1545,8 +1545,9 @@ func readMessageSetFrom(seg *segment, contains bool, offset int64, maxBytes int)
 	return out, nil
 }
 
-// NewestOffset returns the offset of the last message in the log or -1 if
-// empty.
+// NewestOffset returns the offset one below where the next append will land.
+// See CommitLog.NewestOffset: on a log trimmed to a non-zero base this is
+// base-1 rather than -1, so it is not an emptiness test.
 func (l *commitLog) NewestOffset() int64 {
 	return l.activeSegment().NextOffset() - 1
 }

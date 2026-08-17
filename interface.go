@@ -466,8 +466,25 @@ type CommitLog interface {
 	// offloaded.
 	TierManifest() ([]TierObject, error)
 
-	// NewestOffset returns the offset of the last message in the log or -1 if
-	// empty.
+	// NewestOffset returns the offset one below where the NEXT append will land.
+	// On a log that has never been trimmed that is the last message's offset, or
+	// -1 when the log is empty.
+	//
+	// IT IS NOT AN EMPTINESS TEST, because the value is derived from the active
+	// segment and an unwritten segment's next offset is its BASE. Trim a log to a
+	// non-zero base and then empty it — TruncateBefore followed by
+	// Truncate(OldestOffset()) does it in two calls — and this returns base-1: a
+	// non-negative offset naming a record that is gone, while OldestOffset
+	// correctly answers -1.
+	//
+	// Ask OldestOffset whether the log is empty. It is -1 in every empty case. A
+	// caller testing NewestOffset < 0 instead concludes "not empty" and then
+	// reads at a tail holding nothing.
+	//
+	// The arithmetic is sound in every case above — NewestOffset()+1 is always
+	// where the next append lands, so it remains the right way to derive an end
+	// position. It is the emptiness INFERENCE drawn from a negative value that
+	// fails, and it fails only after a trim.
 	NewestOffset() int64
 
 	// OldestOffset returns the offset of the first message in the log or -1 if
