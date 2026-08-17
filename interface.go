@@ -102,8 +102,18 @@ package commitlog
 //   - ErrDescriptorMismatch — the Options disagree with the log on disk.
 //   - ErrSegmentUnreadable, ErrCorruptRecord — the bytes on this replica are
 //     damaged. Restore from a peer; retrying reads the same bytes.
-//   - ErrCommitLogClosed, ErrCommitLogDeleted — this handle is finished. Open
-//     the log again if you still want it.
+//   - ErrCommitLogClosed — this handle is finished, but the log is not. Open it
+//     again if you still want it. Not damage: somebody called Close.
+//   - ErrCommitLogDeleted — the log is GONE, so unlike the line above there is
+//     nothing to reopen; opening that path creates a NEW empty log, which is
+//     almost never what the caller wanted. Also not damage: somebody called
+//     Delete. Split from ErrCommitLogClosed because the two shared one bullet
+//     and one remedy, and reopening is true of only one of them — two downstream
+//     consumers mapped this sentinel two different wrong ways in the same week,
+//     one as permanent damage and one through a default arm into an internal
+//     error. A grouped bullet asserts that the group shares a remedy; that is
+//     right for ErrSegmentClosed/ErrSegmentReplaced, which are one condition
+//     under two names, and it was wrong here.
 //   - ErrCommitLogReadonly — not a failure at all. It is the end of a readonly
 //     log, in the way io.EOF is the end of a file.
 //   - ErrSegmentNotFound — the log holds nothing at or after that offset, which

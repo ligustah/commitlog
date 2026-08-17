@@ -5,6 +5,48 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **The remedy list told callers that a deleted log could be reopened.**
+  `ErrCommitLogClosed` and `ErrCommitLogDeleted` shared one bullet and one
+  remedy — "this handle is finished. Open the log again if you still want it" —
+  which is true of the closed half and false of the other: there is nothing to
+  reopen, and opening that path creates a new empty log, which is almost never
+  what the caller wanted. Split into a bullet each, both now stating what they
+  are *not*: neither is damage, because both are states somebody asked for.
+
+  Found by shipping v0.92.0 rather than by reading, and the two reports are the
+  finding. That release routed the timestamp lookups' callers away from a
+  retryable sentinel and onto these two, and both downstream consumers then
+  classified `ErrCommitLogDeleted` wrongly, in *different* directions, in the
+  same week: one filed it as permanent in the damage sense, the other had no arm
+  for it at all and let a default carry a deliberate deletion into an internal
+  error. Two independent wrong answers to one sentinel is not two downstream
+  bugs. A grouped bullet asserts that the group shares a remedy, which is right
+  for `ErrSegmentClosed`/`ErrSegmentReplaced` — one condition wearing two names —
+  and was wrong here, where two conditions were merely adjacent.
+
+  Worth stating plainly because the first diagnosis was wrong: the declarations
+  document only *when* each sentinel is returned, so the missing remedy looked
+  like the defect. It was not — `interface.go` carries the remedies deliberately,
+  and `hack/sentinels.sh` had already closed that list from the declarations the
+  day before. The gap was one level in, in a bullet the check counted as covering
+  both names.
+
+### Testing
+
+- **`hack/sentinels.sh` rejects a grouped bullet that is not argued for.** The
+  membership of the remedy list was already closed from the declarations; this
+  closes the remedies themselves, which is where the bug above lived. Any bullet
+  naming two sentinels must appear in an allowlist of pairs, so grouping becomes a
+  claim someone made rather than one that accumulates — the two legitimate pairs
+  are the compaction swap and the two damage sentinels. Falsified against the
+  real defect: restoring the original grouped bullet takes the check red with the
+  pair named, and it passed both before and after the split, which is exactly why
+  the split needed a check and not just a fix.
+
 ## v0.92.0 — 2026-08-17
 
 ### Fixed

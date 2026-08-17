@@ -41,6 +41,13 @@ var (
 	ErrEntryNotFound = errors.New("entry not found")
 
 	// ErrSegmentClosed is returned on reads/writes to a closed segment.
+	//
+	// Retryable, with ErrSegmentReplaced's remedy: re-resolve and retry. The two
+	// are one condition wearing two names — which one surfaces depends only on
+	// where the caller happened to touch the segment — so segmentSwapped matches
+	// both and no caller should sort them apart. Neither says anything about the
+	// LOG: an ordinary compaction pass on a healthy log serving reads throughout
+	// is what produces them.
 	ErrSegmentClosed = errors.New("segment has been closed")
 
 	// ErrSegmentExists is returned when attempting to create a segment that
@@ -58,13 +65,32 @@ var (
 	// new segment.
 	ErrSegmentReplaced = errors.New("segment was replaced")
 
-	// ErrCommitLogDeleted is returned when attempting to read from a commit
-	// log that has been deleted.
+	// ErrCommitLogDeleted and ErrCommitLogClosed are returned when the operation
+	// was refused by the LOG rather than by one segment: the terminal counterparts
+	// of the retryable pair above, so no retry against this handle will succeed.
+	// Their remedies are in interface.go's list, which is the authority — and they
+	// differ, which is the whole reason this comment exists rather than deferring
+	// wholesale. A closed log can be opened again. A DELETED one cannot: there is
+	// nothing there, and opening that path creates a new empty log, which is not
+	// what the caller wanted.
+	//
+	// Neither means DAMAGED. Both are states somebody asked for, so neither is
+	// evidence of corruption or of lost records, and neither belongs on an
+	// internal-error or permanent-failure arm. ErrSegmentUnreadable and
+	// ErrCorruptRecord are the sentinels for damage.
+	//
+	// Spelled out because two independent downstream consumers classified
+	// ErrCommitLogDeleted wrongly in the same week, in two different directions:
+	// one filed it as permanent in the damage sense, the other had no arm for it
+	// and let a default turn a deliberate deletion into an internal error. What
+	// they had in common is the thing to fix — the two shared ONE bullet with ONE
+	// remedy, and "open the log again if you still want it" is only true of the
+	// closed half. Sharing a bullet is right for ErrSegmentClosed and
+	// ErrSegmentReplaced, which are one condition wearing two names; it is wrong
+	// here, where the names are two conditions that happen to be adjacent. A
+	// grouped bullet asserts the group, and nothing checked that.
 	ErrCommitLogDeleted = errors.New("commit log was deleted")
-
-	// ErrCommitLogClosed is returned when attempting to read from a commit
-	// log that has been closed.
-	ErrCommitLogClosed = errors.New("commit log was closed")
+	ErrCommitLogClosed  = errors.New("commit log was closed")
 
 	// errSegmentNotOffloaded refuses the three operations that only mean
 	// anything for a segment whose bytes live in a store: replacing its objects

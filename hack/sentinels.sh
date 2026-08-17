@@ -104,6 +104,56 @@ if [ -z "$documented" ]; then
     exit 2
 fi
 
+# A bullet naming two sentinels ASSERTS that one remedy fits both, and nothing
+# checked that assertion. Membership of the list was closed from the declarations
+# above; this closes the remedies from a third side.
+#
+# It found a real one on 2026-08-17, the day after the check was written:
+# ErrCommitLogClosed and ErrCommitLogDeleted shared "this handle is finished.
+# Open the log again if you still want it", which is true of closed and false of
+# deleted — there is nothing to reopen, and opening that path creates a NEW empty
+# log. Two downstream consumers mapped the deleted half two different wrong ways
+# in the same week, one as permanent damage and one through a default arm into an
+# internal error. Neither was reading carelessly: the list told them the two were
+# interchangeable.
+#
+# Grouping is still right where the names really are one condition, so the
+# allowlist is a set of pairs and every entry has to be argued rather than
+# accumulated. Adding to it is a claim that the remedy sentence is true of each
+# name on its own.
+#
+# Only the bullet's FIRST line is scanned, which is where the names being given a
+# remedy sit. Continuation lines are prose and legitimately mention other
+# sentinels to contrast with — including, now, the very pair this found.
+allowed_groups="ErrCorruptRecord,ErrSegmentUnreadable
+ErrSegmentClosed,ErrSegmentReplaced"
+
+grouped=$(grep -E '^//[[:space:]]+- ' interface.go | while IFS= read -r bullet; do
+    names=$(printf '%s\n' "$bullet" | grep -oE 'Err[A-Za-z]+' | sort -u | paste -sd, -)
+    case "$names" in
+    *,*) printf '%s\n' "$names" ;;
+    esac
+done | sort -u || true)
+
+# Deliberately NOT `| while ... fail=1`: a pipeline's while runs in a subshell
+# and its assignment is lost, so the check would report a pass with its findings
+# already printed. Same trap as the one noted for `|| true` above.
+while IFS= read -r names; do
+    [ -n "$names" ] || continue
+    if printf '%s\n' "$allowed_groups" | grep -qx "$names"; then
+        continue
+    fi
+    echo "GROUPED REMEDY: ${names}"
+    note "one bullet in interface.go gives these names a single remedy, which"
+    note "asserts the sentence is true of each of them separately. If it is, add"
+    note "'${names}' to allowed_groups here and say why. If it is not, split the"
+    note "bullet — a caller sorting on the weaker half acts on the stronger's"
+    note "remedy, and cannot tell from the list that it was told two things."
+    fail=1
+done <<EOF
+$grouped
+EOF
+
 while IFS=$'\t' read -r name state; do
     [ -n "$name" ] || continue
     in_list=no
