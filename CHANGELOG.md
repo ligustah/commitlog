@@ -28,10 +28,15 @@ library from that fork onward.
   Both are fixed by `newSourceReader`'s resolve loop: each attempt takes its own
   segment snapshot, so a retry reads the post-swap log rather than repeating the
   lookup. `ErrCommitLogDeleted` and `ErrCommitLogClosed` are translated first, in
-  that function's order and for its stated reason. Covered by
-  `TestReadMessageSetWhileCompactionReplacesSegments`, which drives `Clean()`
-  rather than waiting on the cleaner's interval and gates on segment departures;
-  without the loop it fails in under a second.
+  that function's order and for its stated reason.
+
+  One test per leak, because no single test covers both.
+  `TestReadMessageSetWhileCompactionReplacesSegments` covers the resolve — it
+  drives `Clean()` rather than waiting on the cleaner's interval, gates on
+  segment departures, and without the loop fails in under a second. It cannot
+  reach the scan arm at all, for the reason given under Testing below; that arm
+  needed a seam and a test of its own, and saying so here rather than letting
+  one test's name stand for both is the same discipline this release is about.
 
 - **`ReadMessageSet` and `CopyTier` now refuse a bad argument with
   `ErrInvalidOptions`.** Both returned a bare error for a value the caller
