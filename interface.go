@@ -58,6 +58,42 @@ package commitlog
 // kept because it is why they are shaped as they are.
 //
 // A log with no tiers is unaffected by any of this.
+//
+// # Which failures are worth retrying
+//
+// Stated here because it is a property of the whole interface and was, until
+// recently, written down only on New — where a caller reading this file never
+// meets it.
+//
+//	A commitlog sentinel means the condition is PERMANENT: the same call will
+//	fail the same way, and retrying spends a budget for nothing. Anything else
+//	is an OS or store error and may be transient.
+//
+// Two exceptions, both narrow and both deliberate. ErrLogLocked is a commitlog
+// sentinel that IS worth retrying — another process holds the directory, which
+// is exactly the condition that clears on its own. ErrCommitLogReadonly is not
+// a failure at all; it is the end of a readonly log, in the way io.EOF is the
+// end of a file.
+//
+// The rule is only useful if it holds for every refusal, which is what makes it
+// a property of the package rather than advice. Two rounds of fixes were needed
+// to make it true — New's own Options refusals carried no sentinel
+// (ErrInvalidOptions), and neither did a corrupt block header refusing an open
+// (ErrSegmentUnreadable) — and in both cases the symptom was a caller retrying
+// something that could never succeed. hack/openerrors.sh holds the first half;
+// the guards named for each sentinel hold the rest.
+//
+// The sentinels a caller most often sorts on, and what each one asks of them:
+//
+//   - ErrInvalidOptions — fix the value. Nothing about the environment will
+//     change the answer.
+//   - ErrSegmentUnreadable, ErrCorruptRecord — the bytes on this replica are
+//     damaged. Restore from a peer; retrying reads the same bytes.
+//   - ErrBlockFormat — another build wrote this store. Run the right binary; a
+//     peer holds the identical bytes, so restoring is the one remedy that
+//     cannot work.
+//   - ErrDescriptorMismatch — the Options disagree with the log on disk.
+//   - ErrLogLocked — another process has it. Back off and try again.
 type CommitLog interface {
 	// Delete closes the log and removes all data associated with it from the
 	// filesystem.
