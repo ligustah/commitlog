@@ -59,34 +59,53 @@ func TestADamagedBlockTableIsRefused(t *testing.T) {
 		return mut(b)
 	}
 
-	for name, body := range map[string][]byte{
-		"truncated to nothing": nil,
-		"header only":          good[:blockTableHeaderLen],
-		"wrong magic":          corrupt(func(b []byte) []byte { b[0] = 'X'; return b }),
-		"unknown version":      corrupt(func(b []byte) []byte { b[1] = 9; return b }),
-		"count says more than the object holds": corrupt(func(b []byte) []byte {
+	// `want` names WHICH refusal, and it is not decoration. decodeBlockTable
+	// refuses in six ordered steps and every one of them is ErrBlockTableFormat,
+	// so ErrorIs alone cannot tell them apart — nine cases could collapse onto
+	// three checks and this test would stay green. That is not hypothetical
+	// here: a v1 table trips the version check AND the exact-length check,
+	// because a v1 entry is 9 bytes against v2's 13, which is the whole reason
+	// TestAV1BlockTableIsRefusedByItsVersion has to assert its message too.
+	//
+	// Two pairs below deliberately share a check — a nil body and a header-only
+	// body are both too short, and a bogus count and a trailing byte are both
+	// size-vs-count. Sharing on purpose is fine; drifting onto a shared check by
+	// accident is what this catches.
+	for name, tc := range map[string]struct {
+		body []byte
+		want string
+	}{
+		"truncated to nothing": {nil, "block table is 0 bytes"},
+		"header only":          {good[:blockTableHeaderLen], "block table is 6 bytes"},
+		"wrong magic":          {corrupt(func(b []byte) []byte { b[0] = 'X'; return b }), "magic 0x58"},
+		"unknown version":      {corrupt(func(b []byte) []byte { b[1] = 9; return b }), "version 9, want"},
+		"count says more than the object holds": {corrupt(func(b []byte) []byte {
 			encoding.PutUint32(b[2:], 99)
 			return b
-		}),
-		"a flipped length, crc left alone": corrupt(func(b []byte) []byte {
+		}), "99 blocks need"},
+		"a flipped length, crc left alone": {corrupt(func(b []byte) []byte {
 			b[blockTableHeaderLen] ^= 0xff
 			return b
-		}),
-		"trailing byte": append(append([]byte{}, good...), 0),
-		"a block shorter than its own header": encodeBlockTable([]blockRef{
+		}), "crc "},
+		"trailing byte": {append(append([]byte{}, good...), 0), "object is 37"},
+		"a block shorter than its own header": {encodeBlockTable([]blockRef{
 			{logicalLen: 10, physLen: 1, codec: compress.None, records: 1},
-		}),
+		}), "shorter than a header"},
 		// No block holds no records, so a zero is a field nobody wrote — and it
 		// is the one damaged value that reads LOW, which makes a retention walk
 		// keep what it was told to drop rather than refuse to decode.
-		"a block claiming no records": encodeBlockTable([]blockRef{
+		"a block claiming no records": {encodeBlockTable([]blockRef{
 			{logicalLen: 10, physLen: blockHeaderLen, codec: compress.None},
-		}),
+		}), "claims no records"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := decodeBlockTable(body)
+			_, err := decodeBlockTable(tc.body)
 			require.ErrorIs(t, err, ErrBlockTableFormat,
 				"a damaged block table must be refused, never approximated")
+			require.Contains(t, err.Error(), tc.want,
+				"refused by a different check than this case is named for. All "+
+					"six refusals are ErrBlockTableFormat, so an earlier one "+
+					"answering this fixture looks exactly like the fixture working")
 		})
 	}
 }
