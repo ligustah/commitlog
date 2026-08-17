@@ -1304,9 +1304,12 @@ func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int
 // was DAMAGED and to restore from a peer.
 //
 // Each attempt takes its own segmentsSnapshot(), so a retry resolves against the
-// post-swap log rather than repeating the same lookup. See #313; it is the third
-// path #309's defect reached, and the first where the wrong sentinel was not
-// merely missing but actively misleading.
+// post-swap log rather than repeating the same lookup. See #313. The same defect
+// as #309's Options and #312's corrupt block header, and the first instance where
+// the wrong sentinel was not merely missing but actively misleading: a follower
+// applying ErrSegmentReplaced's documented classification stops on a log that is
+// only compacting. Deliberately not numbered — see the note in
+// open_error_boundary_test.go on why the ordinals collided.
 func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, errors.Wrap(ErrInvalidOptions, "maxBytes must be positive")

@@ -118,9 +118,15 @@ func TestAnEnvironmentFailureAtOpenCarriesNoSentinel(t *testing.T) {
 // Both did, on exported surface, and both are exactly the ErrInvalidOptions
 // class arriving through a different door than New.
 //
-// That is the third path the same defect reached, after New's Options (#309)
-// and a corrupt block header refusing an open (#312). The pattern is what makes
-// it worth a test rather than a fix: the rule is easy to state, easy to believe
+// The same defect as New's Options (#309) and a corrupt block header refusing an
+// open (#312). Deliberately not given an ordinal: this and ReadMessageSet (#313)
+// were found the same week and BOTH wrote themselves down as "the third" — on the
+// SAME basis, paths this defect reached, each simply omitting the other's. So the
+// collision was not a disagreement about how to count, which is what it looks
+// like; it was two independent authors of one list, the same shape as the fix in
+// #313 itself. A count in prose is only as good as the enumeration beside it, and
+// an enumeration nobody owns grows a second copy. The pattern is what makes it
+// worth a test rather than a fix: the rule is easy to state, easy to believe
 // already true, and false at whichever refusal nobody re-read.
 func TestACallersBadArgumentIsAsPermanentAsABadOption(t *testing.T) {
 	l, cleanup := setup(t)

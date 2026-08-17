@@ -8,14 +8,19 @@ import (
 
 // A timestamp lookup on a dead log names the LOG, not the segment.
 //
-// The fifth path #309's defect reached, after New's Options, a corrupt block
-// header, building a reader, and the replication fetch. Both public timestamp
-// lookups bottom out in findEntryByTimestampResolving, which retries on
-// segmentSwapped and then hands its caller the sentinel raw — and the caller
-// wrapped it and returned. So a CLOSED log answered with ErrSegmentClosed, whose
-// documented remedy is re-resolve and retry, and the caller re-asked a log that
-// was never coming back; a DELETED log said "segment has been closed", which is
-// the wrong cause as well as retryable.
+// The fifth exported surface to hand back an error a caller cannot sort, counting
+// New's Options, a corrupt block header, building a reader, and the replication
+// fetch. The list is the claim, not the number: commitlog.go and
+// open_error_boundary_test.go each called a DIFFERENT path "the third" on the same
+// basis, each having omitted the other's, until this release dropped both ordinals
+// for the enumeration.
+//
+// Both public timestamp lookups bottom out in findEntryByTimestampResolving,
+// which retries on segmentSwapped and then hands its caller the sentinel raw —
+// and the caller wrapped it and returned. So a CLOSED log answered with
+// ErrSegmentClosed, whose documented remedy is re-resolve and retry, and the
+// caller re-asked a log that was never coming back; a DELETED log said "segment
+// has been closed", which is the wrong cause as well as retryable.
 //
 // EarliestOffsetAfterTimestamp is the direction durable_streams calls, for
 // seek-by-time on a subscription, so this is the arm with a live consumer.

@@ -38,7 +38,18 @@ library from that fork onward.
   needed a seam and a test of its own, and saying so here rather than letting
   one test's name stand for both is the same discipline this release is about.
 
-- **The timestamp lookups name the log too, and were the fifth path.** Found by
+- **The timestamp lookups name the log too.** The fifth exported surface to hand
+  back an error a caller cannot sort, counting `New`'s Options, a corrupt block
+  header, building a reader, and the replication fetch. Stated as a list rather
+  than an ordinal on purpose, and the two ordinals already in the tree are gone
+  with it: `commitlog.go` and `open_error_boundary_test.go` each called a
+  DIFFERENT path "the third", on the *same* basis — paths this defect reached —
+  each having simply omitted the other's, because they were written the same week
+  by nobody who owned the list. That is the defect this release fixes, one level
+  up: an enumeration with two authors grows a second copy, exactly as a rule
+  transcribed to two call sites does. A count in prose is only as good as the
+  enumeration beside it, so both sites now carry the list and neither carries a
+  number. Found by
   running the standing complexity sweep against the fix above, asking the obvious
   next question: which OTHER paths retry on `segmentSwapped` without translating
   the terminal states first? `EarliestOffsetAfterTimestamp` and
