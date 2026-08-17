@@ -2732,3 +2732,95 @@ and a peer holds the identical ones. Calling it unreadable aims an operator at
 restoring a replica when the fix is running the right binary. Both directions are
 asserted and both are guarded, because widening a sentinel is always the silent
 half.
+
+## A rule with exceptions is a claim nothing can check
+
+**2026-08-17, and this one was found by a peer asking about something else.**
+
+`#309` produced a rule and `#312` spread it: *a commitlog sentinel means the
+condition is PERMANENT; anything else is an OS or store error and may be
+transient.* It was written on `New`, then moved to the `CommitLog` interface
+where callers actually meet it, with **two named exceptions** — `ErrLogLocked`
+and `ErrCommitLogReadonly`.
+
+The rule was false, and had been since before it was written.
+`ErrSegmentReplaced` carries *"operations should be retried in order to run
+against the new segment"* on its own declaration. `ErrSegmentClosed` is the same
+compaction swap seen from the segment side; `reader.go` defines
+`segmentSwapped(err)` as exactly that pair and the package's own reader
+**retries** it. So the documented rule told every caller to abandon the one
+condition the implementation recovers from.
+
+Three things generalise.
+
+**The duct-tape signature is fixing where the symptom surfaced.** `#313` fixed
+`ReadMessageSet` — correctly; the resolve loop belongs there. But its own comment
+justified itself by citing the doc: *"which the interface doc classifies as
+permanent — so a follower applying the documented rule stops replicating."* The
+work knew the doc was the cause and fixed the call site anyway. Every other
+caller of a swap-producing path kept the wrong instruction. A fix that names its
+cause in a comment and then routes around it is a fix aimed one level too low.
+
+**Nothing in the harness could have caught this.** `hack/openerrors.sh` checks
+that refusals carry a sentinel; the per-sentinel guards check identities. Neither
+can evaluate a prose claim quantified over a set — *every* sentinel means
+permanent — because the claim lives in a comment and its counterexample lives in
+a different file's comment. The tooling built during `#309`–`#312` is aimed at
+"is this error right?", and this defect was "is this sentence true of all of
+them?". That is the same shape as **The boundary, not the sentinel**, one level
+up: the earlier lesson was to audit per package instead of per sentinel, and the
+lesson here is that a claim about a whole set gets no cheaper to check by being
+written more confidently.
+
+**The fix is to stop generalising.** The doc now states a **remedy per
+sentinel** — retry as-is, re-resolve, restore the segment, fix the value, run the
+right binary, restore from a peer, reopen — with no class and no exceptions,
+because *"is this permanent"* and *"what do I do now"* are different questions.
+Sorting on permanence puts "nothing will ever help" and "exactly one specific
+thing will" in one bucket whose name tells the caller to give up in both. An
+explicit list of nine is longer than a rule with two exceptions and is the
+simpler artifact: it has no quantifier to be wrong about, and a new sentinel that
+nobody adds to it is visibly absent rather than silently miscovered.
+
+The cost of the general version was measured in the worst currency available. A
+routine compaction pass reported a healthy replica as DAMAGED and told an
+operator to restore from a peer.
+
+### A list is not a closed set
+
+The section above ends on a claim: an explicit list "has no quantifier to be
+wrong about, and a new sentinel that nobody adds to it is visibly absent rather
+than silently miscovered."
+
+The first half is true. The second was false the moment it was written. The list
+of nine was missing **seven** sentinels that exported surface returns —
+`ErrSegmentNotFound`, `ErrTimestampBeforeLog`, `ErrMessageSetRefused`,
+`ErrUnknownLeaderEpoch`, `ErrInvalidSidecarName`, `ErrNoLog`,
+`ErrBlockTableFormat` — including the one `ReadMessageSet` returns, in the very
+fix that prompted the rewrite. Nothing about their absence was visible: absence
+has no line to read.
+
+So the lens sharpens by one turn. **Replacing a general claim with an
+enumeration does not close the set; it only moves where the set is stated.** A
+rule quantified over every sentinel is checkable in principle and was wrong. A
+list is checkable in principle and was *also* wrong, for the ordinary reason
+lists are — nobody diffs a doc against the declarations.
+
+`hack/sentinels.sh` closes it from the other side. It reads the DECLARATIONS,
+not the list, and requires each exported sentinel to be either in the remedy
+list or marked `not caller-sorted: <what the caller sees instead>` at its own
+declaration. Both halves are needed: without the marker the check has to guess
+which sentinels are internal, and a check whose scope is a guess cannot tell a
+deliberate omission from an oversight. Three are marked — `ErrObjectNotFound`
+(the SegmentStore contract, pointing the other way), `ErrEntryNotFound` and
+`ErrSegmentExists` (consumed by the log's own loops, verified by tracing every
+producer to its single absorbing caller).
+
+Writing the check found one more thing, in the check itself. Its harness-error
+branch for "the doc names no sentinels at all" was unreachable: under `set -e` a
+`grep` matching nothing killed the script at the assignment, so the branch that
+would have said *why* never ran. It failed red, which is safe, with no output,
+which is useless — the same family as an empty test selection reading as a pass.
+Four probes were needed to find it, one per failure path the script claims to
+detect. **A check's own failure has to be distinguishable from the thing it
+checks**, and the only way to know it is, is to make each path fire once.

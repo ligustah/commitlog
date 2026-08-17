@@ -77,7 +77,14 @@ package commitlog
 //	An error that is NOT a commitlog sentinel is an OS or store error and
 //	may be transient.
 //
-// What each one asks of the caller:
+// What each one asks of the caller. This list is every sentinel a CommitLog
+// method can hand you, and saying so is the point — a claim quantified over a
+// set is only as good as its membership, which is the mistake described at the
+// bottom of this comment. Three exported sentinels are deliberately absent
+// because no method here returns them: ErrObjectNotFound is the SegmentStore
+// contract's way for an implementation to say "absent" and is documented at its
+// declaration, and ErrEntryNotFound and ErrSegmentExists are internal to segment
+// search and creation. If a method ever starts returning one, it belongs here.
 //
 //   - ErrLogLocked — another process has the directory. Back off and make the
 //     same call again; this is the one that clears on its own.
@@ -99,6 +106,24 @@ package commitlog
 //     the log again if you still want it.
 //   - ErrCommitLogReadonly — not a failure at all. It is the end of a readonly
 //     log, in the way io.EOF is the end of a file.
+//   - ErrSegmentNotFound — the log holds nothing at or after that offset, which
+//     on a live log means the reader is ahead of the writer. Nothing is wrong;
+//     wait, or read from a lower offset.
+//   - ErrTimestampBeforeLog — retention has already passed that timestamp.
+//     Resume from the oldest surviving record rather than the one you wanted.
+//   - ErrMessageSetRefused — the bytes handed to AppendMessageSet are not a
+//     whole, ascending message set. Fix the framing; the log wrote nothing.
+//   - ErrUnknownLeaderEpoch — the probe named an epoch this log has no record
+//     of. It is a question about a fact the log does not hold, not a failure to
+//     read one.
+//   - ErrInvalidSidecarName — fix the name. It reaches os.Remove and an atomic
+//     write, so the log refuses rather than acts on a name you did not mean.
+//   - ErrNoLog — there is no log at that path. Returned by the inspect helpers,
+//     which take a path rather than an open log.
+//   - ErrBlockTableFormat — a DERIVED sidecar is damaged, not the segment. It
+//     is the one damage remedy that is local: the table can be rebuilt from the
+//     segment's own bytes, so this does not need a peer the way
+//     ErrSegmentUnreadable does.
 //
 // Why the remedy and not the class: this doc previously said a commitlog
 // sentinel means PERMANENT, with two exceptions. That was wrong, and wrong in

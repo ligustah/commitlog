@@ -238,7 +238,17 @@ jobs:
       # and the risk is the one they did not.
       - name: openerrors
         run: bash hack/openerrors.sh
-      # The seven scripts above and guardcheck decide whether this repo is
+      # Every exported sentinel is either in the CommitLog remedy list or says
+      # at its declaration why a caller never sorts on it. openerrors.sh checks
+      # that New's refusals CARRY a sentinel; this checks that every sentinel
+      # tells a caller what to do with it. The list it guards replaced a prose
+      # rule that had drifted false, and was itself already missing six
+      # caller-facing sentinels on the day it was written — a list is not a
+      # closed set just because it is a list, so this closes it from the
+      # declarations.
+      - name: sentinels
+        run: bash hack/sentinels.sh
+      # The eight scripts above and guardcheck decide whether this repo is
       # correct, and until now nothing checked THEM. Every bug they have had was
       # shell semantics rather than logic: a `| while` setting its flag in a
       # subshell so layercheck printed every violation and exited 0; a substring

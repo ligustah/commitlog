@@ -5,7 +5,7 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.92.0 — 2026-08-17
 
 ### Fixed
 
@@ -82,6 +82,24 @@ library from that fork onward.
   the per-sentinel guards can check identities; neither can check a claim about
   the whole set, which is why the list is now explicit per sentinel instead of a
   generalisation with exceptions.
+
+- **The remedy list is now checked against the declarations
+  (`hack/sentinels.sh`), and seven missing sentinels were added.** Replacing a
+  general claim with a list moves where the set is stated; it does not close it.
+  The list was missing `ErrSegmentNotFound`, `ErrTimestampBeforeLog`,
+  `ErrMessageSetRefused`, `ErrUnknownLeaderEpoch`, `ErrInvalidSidecarName`,
+  `ErrNoLog` and `ErrBlockTableFormat` — including the one `ReadMessageSet`
+  returns, in the same change that prompted the rewrite. Absence has no line to
+  read, so nobody saw them.
+
+  The check reads the declarations rather than the list, and requires each
+  exported sentinel to be either in the remedy list or marked `not
+  caller-sorted: <what the caller sees instead>` where it is declared. Three are
+  marked: `ErrObjectNotFound` belongs to the `SegmentStore` contract and points
+  the other way, and `ErrEntryNotFound` and `ErrSegmentExists` are consumed by
+  the log's own loops. The marker is what lets the scope be stated instead of
+  guessed — a check that has to infer which sentinels are internal cannot tell a
+  deliberate omission from an oversight.
 
 ## v0.91.0 — 2026-08-17
 

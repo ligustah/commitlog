@@ -137,6 +137,12 @@ var ErrRestoreRequired = errors.New("commitlog: segment offloaded to a restore-r
 // tier means every object in the store is garbage. Both are correct conclusions
 // from a real absence and catastrophic ones from a timeout, so a caller must
 // never be able to reach them by treating any error as absence.
+//
+// not caller-sorted: it points the other way. This is part of the SegmentStore
+// contract a caller IMPLEMENTS — the store returns it and the log consumes it —
+// so it belongs on that interface rather than in the CommitLog remedy list,
+// which answers "the log told me no, what now". The log resolves an absence
+// into ErrSegmentNotFound, an empty tier, or a new log, and never forwards this.
 var ErrObjectNotFound = errors.New("commitlog: no such object in the segment store")
 
 // SegmentStore is a backing store for offloaded (sealed, read-only) segment log

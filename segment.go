@@ -32,6 +32,12 @@ const (
 var (
 	// ErrEntryNotFound is returned when a segment search cannot find a
 	// specific entry.
+	//
+	// not caller-sorted: it means "not in THIS segment", and the log's own
+	// search loop is what consumes it — earliestOffsetAfterTimestampLocked
+	// treats it as "try the next segment" and answers the exhausted search with
+	// the next assignable offset. A caller sees an offset or a different
+	// sentinel, never this one.
 	ErrEntryNotFound = errors.New("entry not found")
 
 	// ErrSegmentClosed is returned on reads/writes to a closed segment.
@@ -39,6 +45,11 @@ var (
 
 	// ErrSegmentExists is returned when attempting to create a segment that
 	// already exists.
+	//
+	// not caller-sorted: split is its only producer and has one caller, which
+	// absorbs it — a roll losing the race to another roll at the same base
+	// offset is a duplicate, not a failure, so the append carries on against the
+	// segment that won.
 	ErrSegmentExists = errors.New("segment already exists")
 
 	// ErrSegmentReplaced is returned when attempting to read from a segment
