@@ -5,6 +5,34 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **The wrapping that made `ErrCorruptFrameHeader` additive also made arm ORDER
+  load-bearing, and v0.93.0 did not say so.** `errors.Is(err, ErrCorruptRecord)` is
+  true for a frame-header failure — that is the whole point of wrapping — so a caller
+  whose broad "is this damage, then skip" arm sits ahead of the narrow one skips in
+  exactly the case that must not be skipped, and never reaches the narrow arm.
+
+  The trap is that **both orders pass on a clean stream.** There is no error to sort
+  until there is damage, so the ordering is only wrong at the moment nobody is
+  watching, and it survives review looking correct. Reported by sqlcdc immediately
+  after implementing against the new sentinel — the cost of wrapping rather than
+  replacing, worth paying, but only if it is written down.
+
+  Both declarations now lead with "check this arm FIRST", and the hazard is pinned by
+  a test rather than left as advice: two classifiers, broad-first and narrow-first,
+  run against the REAL error from a damaged frame, asserting that broad-first reaches
+  the wrong answer and narrow-first the right one. A synthesized error would only
+  have proved that `errors.Is` walks a chain the test just built.
+
+- **Skip-and-carry-on had no ceiling in the docs.** Skipping is per record, so a loop
+  without a bound turns a badly damaged segment into an unbounded walk that reports
+  success. The declarations now say to bound it, and deliberately do not pick the
+  number — it depends on what the caller does with the records. sqlcdc's walstat uses
+  1000.
+
 ## v0.93.0 — 2026-08-17
 
 One new exported sentinel, and it is additive: `ErrCorruptFrameHeader` wraps

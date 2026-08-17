@@ -102,6 +102,22 @@ var ErrCorruptRecord = errors.New("commitlog: record failed its CRC check")
 // it, and a caller holding the error had no way to tell which kind it had. Reported
 // by sqlcdc, whose walstat wanted exactly that skip and stopped rather than spin.
 //
+// CHECK THIS ARM FIRST. The wrapping that makes this additive also makes arm ORDER
+// load-bearing: errors.Is(err, ErrCorruptRecord) is TRUE for a frame-header failure,
+// so a caller whose broad "is this damage, then skip" arm comes first will skip in
+// exactly the case it must not, and never reach the narrow arm at all. The trap is
+// that BOTH ORDERS PASS ON A CLEAN STREAM — the ordering is only wrong once there is
+// damage to sort, which is the point at which nobody is watching. Reported by sqlcdc
+// after implementing against this sentinel; it is the cost of wrapping rather than
+// replacing, and worth paying, but only if it is written down.
+//
+// BOUND THE SKIP. Skip-and-carry-on is per record, and nothing here says how many
+// records a caller should be willing to lose before it stops and calls the segment
+// bad. A loop that skips without a ceiling turns a badly damaged segment into an
+// unbounded walk that reports success. sqlcdc's walstat uses maxCorruptSkips=1000.
+// This library deliberately does not pick that number — it depends on what the
+// caller is doing with the records — but it should be a number, not absent.
+//
 // Three overlapping sets here, and they are worth keeping apart because collapsing
 // them is the same mistake this sentinel exists to correct. The SKIP remedy belongs
 // to the read path, where exactly one producer cannot honour it. The frame-header

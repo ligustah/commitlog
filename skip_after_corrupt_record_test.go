@@ -3,6 +3,7 @@ package commitlog
 import (
 	"bytes"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -234,4 +235,38 @@ func TestAFrameHeaderFailureIsDistinguishableAndMustNotBeSkipped(t *testing.T) {
 	want := []int64{6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
 	require.Equal(t, want, resumed,
 		"a resync beyond the damaged frame must serve every remaining record in order")
+
+	// The ordering hazard the wrapping creates, pinned so the declaration's "CHECK
+	// THIS ARM FIRST" is falsifiable rather than advice.
+	//
+	// Both of these are what a caller plausibly writes, and on a clean stream they
+	// are indistinguishable — there is no error to sort — which is exactly why the
+	// mistake survives review. So this runs them against the REAL error obtained
+	// above rather than a synthesized one: a hand-built error would only prove that
+	// errors.Is walks a chain I just built.
+	//
+	// Reported by sqlcdc after implementing against this sentinel.
+	broadFirst := func(err error) string {
+		switch {
+		case stderrors.Is(err, ErrCorruptRecord):
+			return "skip"
+		case stderrors.Is(err, ErrCorruptFrameHeader):
+			return "stop"
+		}
+		return "neither"
+	}
+	narrowFirst := func(err error) string {
+		switch {
+		case stderrors.Is(err, ErrCorruptFrameHeader):
+			return "stop"
+		case stderrors.Is(err, ErrCorruptRecord):
+			return "skip"
+		}
+		return "neither"
+	}
+	require.Equal(t, "skip", broadFirst(readErr),
+		"a broad-first arm must reach the WRONG answer here; if it no longer does, the "+
+			"declaration's ordering warning is stale and should be rewritten")
+	require.Equal(t, "stop", narrowFirst(readErr),
+		"a narrow-first arm must stop on a frame-header failure")
 }

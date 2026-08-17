@@ -112,7 +112,13 @@ package commitlog
 //     an otherwise sound segment — and the whole reason this is a sentinel rather
 //     than the panic it used to be is that a read is where a caller can choose.
 //     The FIRST of those three is conditional, which is what the next entry is
-//     for: check ErrCorruptFrameHeader before skipping anything.
+//     for: check ErrCorruptFrameHeader before skipping anything, and check it
+//     FIRST — this sentinel matches a frame-header failure too, so a broad
+//     damage-then-skip arm placed ahead of the narrow one skips precisely the
+//     case that must not be skipped, and both orders look fine until there is
+//     damage. Bound the skip as well: skipping is per record, and a loop without
+//     a ceiling turns a badly damaged segment into an unbounded walk reporting
+//     success.
 //   - ErrCorruptFrameHeader — the conditional half of the entry above, and the
 //     reason that entry cannot promise a skip. It WRAPS the sentinel above, so
 //     arms matching that keep matching, and adds that the payload was never read
