@@ -1540,6 +1540,25 @@ run_guard "an appended set starts above the tail" commitlog.go   '	if first := e
 
 run_guard "an appended set ascends" commitlog.go   '		if entries[i].Offset <= entries[i-1].Offset {' '		if false && entries[i].Offset <= entries[i-1].Offset {'   '^TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail$'
 
+# New's Options refusals are permanent, and say so. Neutralized by the bare
+# error each of these was — which reads identically to a human and is
+# indistinguishable from a busy disk to the retry loop New's callers open on.
+run_guard "an Options refusal is permanent" commitlog.go   '		return nil, errors.Wrap(ErrInvalidOptions, "Options.Path is empty")' '		return nil, errors.New("commitlog: Options.Path is empty")'   '^TestEveryOptionsRefusalFromNewIsPermanent$'
+
+run_guard "a tier refusal is permanent" tier.go   '			return errors.Wrap(ErrInvalidOptions, "a tier in Options.Tiers has no Name")' '			return errors.New("commitlog: a tier in Options.Tiers has no Name")'   '^TestEveryOptionsRefusalFromNewIsPermanent$'
+
+# ErrLogLocked is the one refusal at open that is NOT permanent, so the lock
+# failure must leave New carrying no Options sentinel. Neutralized by filing it
+# with the rest, which is the tidy direction and the wrong one: a lock held by a
+# process about to exit is precisely what a retry loop exists for.
+run_guard "a locked directory stays retryable" commitlog.go   '	lock, err := lockLogDir(path)
+	if err != nil {
+		return nil, err
+	}' '	lock, err := lockLogDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidOptions, err)
+	}'   '^TestTheLockedDirectoryRefusalIsNotAnOptionsRefusal$'
+
 # The segment's tail only ever moves forward. Neutralized by the assignment it
 # used to be, which lowers the field NextOffset is derived from.
 run_guard "a segment tail only moves forward" segment.go   '	if last.Offset > s.lastOffset {

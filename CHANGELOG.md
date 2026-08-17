@@ -28,6 +28,29 @@ library from that fork onward.
   this mirrors `ReadMessage` rather than inventing a third spelling:
   `ErrCommitLogDeleted`, then `ErrCommitLogClosed`, then the swap check.
 
+### Added
+
+- **`ErrInvalidOptions`, so a caller retrying `New` can tell a wrong value from
+  a busy disk.** `New` has callers that open on a retry loop, and the rule they
+  sort on is: *a commitlog sentinel from `New` means the condition is permanent,
+  with `ErrLogLocked` the sole exception, and anything else is an OS or store
+  error that may be transient.* That rule was false. Seven refusals — an empty
+  `Path`, an unknown codec, a negative option, and `validateTiers`' four —
+  carried no sentinel at all, so they were indistinguishable from a disk that
+  was briefly busy.
+
+  Which way that hurt depended on the caller's default, and both defaults are
+  defensible: treat unrecognised as transient and you spin on an empty `Path`
+  until the budget runs out; treat it as permanent and you give up on a full
+  disk. The defect was that the boundary was a matter of opinion.
+
+  This is additive — every one of those refusals was already an error, and every
+  message is unchanged apart from the sentinel's own text. A caller matching on
+  message strings is unaffected; one matching on sentinels can now stop retrying
+  on purpose. `hack/openerrors.sh` fails the build on an eighth refusal added
+  without it, checked in the source rather than by a test, because a test only
+  covers the refusals someone remembered to write down.
+
 ### Changed
 
 - **`ErrBlockFormat` now means the version byte and nothing else.** It was also

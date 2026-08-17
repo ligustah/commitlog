@@ -117,6 +117,32 @@ var ErrSegmentUnreadable = errors.New("commitlog: segment could not be read to i
 // records", which reaching it had already disproved.
 var ErrBlockFormat = errors.New("unsupported block format version")
 
+// ErrInvalidOptions reports that New refused the Options it was handed. The
+// value is wrong, not the environment: retrying with the same Options gets the
+// same answer forever.
+//
+// It exists to make ONE rule about New true, rather than to name a new failure.
+// New has a caller that opens on a retry loop, and that caller has to decide
+// which failures are worth retrying. The rule it needs is:
+//
+//	a commitlog sentinel from New means the condition is PERMANENT — do not
+//	retry — with ErrLogLocked as the sole exception, because another process
+//	holding the directory is exactly the condition that clears on its own.
+//	Anything else is an OS or store error and may be transient.
+//
+// Before this, that rule was false in the direction that costs the caller
+// nothing to get wrong and everything to rely on. Seven refusals — an empty
+// Path, an unknown codec, a negative option, and validateTiers' four — carried
+// no sentinel at all, so they were indistinguishable from a disk that was
+// briefly busy. A caller retrying "unrecognised means transient" would spin on
+// an empty Path until its budget ran out; a caller retrying the inverse would
+// give up on a full disk. Both readings were defensible, which is the actual
+// defect: the boundary was a matter of opinion.
+//
+// hack/openerrors.sh is what keeps it true. An eighth config refusal added
+// without this sentinel fails there, at the point of adding it.
+var ErrInvalidOptions = errors.New("commitlog: invalid options")
+
 const (
 	logFileSuffix   = ".log"
 	indexFileSuffix = ".index"
@@ -507,9 +533,17 @@ type Options struct {
 // process holds fails with ErrLogLocked rather than succeeding into a log the
 // two of them then corrupt. See lockLogDir for what the two writers do to each
 // other and why nothing after open time can detect it.
+//
+// For a caller that opens on a retry loop, the rule about New's errors is: a
+// commitlog sentinel means the condition is PERMANENT and retrying is wasted,
+// with ErrLogLocked as the sole exception — another process holding the
+// directory is exactly the condition that clears on its own. Anything else is
+// an OS or store error and may be transient. See ErrInvalidOptions for what
+// made that rule false until it existed, and hack/openerrors.sh for what keeps
+// it true.
 func New(opts Options) (_ CommitLog, err error) {
 	if opts.Path == "" {
-		return nil, errors.New("commitlog: Options.Path is empty")
+		return nil, errors.Wrap(ErrInvalidOptions, "Options.Path is empty")
 	}
 	// Refused HERE because every other place that meets an unknown codec meets it
 	// too late. Compress has no error to return and falls through to storing the
@@ -523,7 +557,7 @@ func New(opts Options) (_ CommitLog, err error) {
 	// only after there were records to lose. A codec is a value the caller hands
 	// in; checking it where it arrives is the whole fix.
 	if !opts.Compression.Valid() {
-		return nil, errors.Errorf("commitlog: unknown compression codec %d", byte(opts.Compression))
+		return nil, errors.Wrapf(ErrInvalidOptions, "unknown compression codec %d", byte(opts.Compression))
 	}
 	// Checked where it arrives, for the same reason as the codec above: every
 	// place further in that meets a nameless or storeless tier meets it after
@@ -641,7 +675,7 @@ func New(opts Options) (_ CommitLog, err error) {
 		// the next person to extend this list will be looking at all four.
 	} {
 		if c.bad {
-			return nil, errors.Errorf("commitlog: %s is %v; it must not be negative",
+			return nil, errors.Wrapf(ErrInvalidOptions, "%s is %v; it must not be negative",
 				c.name, c.got)
 		}
 	}

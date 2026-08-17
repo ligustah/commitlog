@@ -65,7 +65,7 @@ func validateTiers(tiers []Tier) error {
 	seen := make(map[string]bool, len(tiers))
 	for _, t := range tiers {
 		if t.Name == "" {
-			return errors.New("commitlog: a tier in Options.Tiers has no Name")
+			return errors.Wrap(ErrInvalidOptions, "a tier in Options.Tiers has no Name")
 		}
 		// Names are how everything resolves a tier — a manifest entry, a
 		// placement, a reclaim, a handover. Two tiers sharing one would make
@@ -73,20 +73,20 @@ func validateTiers(tiers []Tier) error {
 		// caller's second store would be unreachable in exactly the way the
 		// old length-1 refusal existed to prevent.
 		if seen[t.Name] {
-			return errors.Errorf(
-				"commitlog: Options.Tiers names tier %q twice; a tier's name is how "+
+			return errors.Wrapf(ErrInvalidOptions,
+				"Options.Tiers names tier %q twice; a tier's name is how "+
 					"an object, a placement and a handover find its store", t.Name)
 		}
 		seen[t.Name] = true
 		if t.Store == nil {
-			return errors.Errorf("commitlog: tier %q in Options.Tiers has no Store", t.Name)
+			return errors.Wrapf(ErrInvalidOptions, "tier %q in Options.Tiers has no Store", t.Name)
 		}
 		// Negatives, for the reason every other option refuses them: zero is
 		// the unset value, so a negative is not a smaller budget, it is a
 		// caller who computed one and got it wrong.
 		if t.MaxBytes < 0 || t.MaxMessages < 0 || t.MaxAge < 0 {
-			return errors.Errorf(
-				"commitlog: tier %q has a negative retention limit; zero means "+
+			return errors.Wrapf(ErrInvalidOptions,
+				"tier %q has a negative retention limit; zero means "+
 					"no limit", t.Name)
 		}
 	}

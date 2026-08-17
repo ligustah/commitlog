@@ -231,7 +231,14 @@ jobs:
       # omitting the one format it was written about.
       - name: formatversion
         run: bash hack/formatversion.sh
-      # The six scripts above and guardcheck decide whether this repo is
+      # Every refusal New makes about the caller's Options carries
+      # ErrInvalidOptions, so a caller opening on a retry loop can tell a
+      # permanent condition from a busy disk. Checked in the SOURCE rather than
+      # by a test, because a test only covers the refusals someone wrote down
+      # and the risk is the one they did not.
+      - name: openerrors
+        run: bash hack/openerrors.sh
+      # The seven scripts above and guardcheck decide whether this repo is
       # correct, and until now nothing checked THEM. Every bug they have had was
       # shell semantics rather than logic: a `| while` setting its flag in a
       # subshell so layercheck printed every violation and exited 0; a substring

@@ -74,6 +74,9 @@ func TestEveryNumericOptionDecidesAboutNegatives(t *testing.T) {
 			require.Contains(t, err.Error(), "must not be negative",
 				"Options.%s was refused for some OTHER reason, so this test says nothing "+
 					"about negatives for it", field.Name)
+			require.ErrorIs(t, err, ErrInvalidOptions,
+				"a caller opening on a retry loop reads an unsentineled refusal as "+
+					"an environment problem and spins on Options that will never change")
 		})
 	}
 	// Reflection finding nothing is a passing test. See how many fields it is
@@ -151,6 +154,7 @@ func TestNegativeOptionsAreRefused(t *testing.T) {
 			require.Error(t, err, "New accepted a negative %s", name)
 			require.Contains(t, err.Error(), name,
 				"the error must name the option the caller got wrong")
+			require.ErrorIs(t, err, ErrInvalidOptions)
 		})
 	}
 }

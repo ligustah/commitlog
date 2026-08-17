@@ -2640,3 +2640,50 @@ unanswered.
 The general form: **a guard's neutralization defines the unit of coverage.** If
 it deletes more than one decision, the guard is a claim about the group, not
 about any member of it.
+
+## The boundary, not the sentinel
+
+#302 was one error with the wrong retryability, and the fix was to give it the
+right one. The question that outlived it is the one the fix does not answer:
+**for a caller retrying `New`, what does an error MEAN?**
+
+Written down, the rule commitlog wanted is one sentence:
+
+> A commitlog sentinel from `New` means the condition is permanent — do not
+> retry — with `ErrLogLocked` as the sole exception, because another process
+> holding the directory is exactly the condition that clears on its own.
+> Anything else is an OS or store error and may be transient.
+
+It was false, and false in the cheap direction. Seven refusals carried no
+sentinel: an empty `Path`, an unknown codec, a negative option, and
+`validateTiers`' four. Each was individually fine — a clear message naming the
+field the caller got wrong — and collectively they made the rule unusable,
+because a classifier can only sort on what it can match.
+
+The interesting part is that **both possible caller defaults are correct code**.
+Treat unrecognised as transient and you spin on an empty `Path` forever. Treat
+it as permanent and you abandon a log because the disk was briefly full. sqlcdc
+picked the second and documented it; a different peer could as easily have
+picked the first. Neither is a bug in the caller. The bug is that the library
+left the boundary to be guessed, so the guess had to be right for reasons the
+library never supplied.
+
+Two things follow, and only the second is about this defect.
+
+**Audit the boundary, not the members.** Walking sentinels one at a time asks
+"is this error right?", which every one of the seven passes. The question that
+finds them is "what is the RULE, and is it true of all of them?" — a question
+with one answer per package, not one per error.
+
+**A test cannot close this set.** The refusals a test covers are the refusals
+someone wrote down, and the risk is the eighth. So the check is on the source:
+`hack/openerrors.sh` scans `New`'s body and every `validate*` function for a
+bare `errors.New`/`Errorf`/`fmt.Errorf` and fails on one. Scope is stated rather
+than implied — a refusal added somewhere neither of those reaches is out of
+reach, which is why the convention is to name new validators `validateX`.
+
+Mutating it was worth more than reading it, again: the first draft's awk
+patterns used `\(`, which awk treats as a plain `(` with a warning, so the New
+scan matched nothing and the script reported HARNESS ERROR — visibly, because
+"scanning nothing" is a failure here rather than a pass. That was luck of a
+design decision made two scripts ago, not of this one.
