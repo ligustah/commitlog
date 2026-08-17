@@ -66,3 +66,42 @@ func TestBuildingAReaderOnALiveLogStillWorks(t *testing.T) {
 	require.NoError(t, err, "an open log must still hand out readers")
 	require.NotNil(t, r)
 }
+
+// The replication read answers the same question the same way.
+//
+// ReadMessageSet grew the identical pair of arms when its resolve loop was
+// added, on the reasoning newSourceReader states: one path of a package
+// translating and another not is worse than either rule applied consistently.
+// Reasoning is not coverage. The loop's end-to-end test asserts only that no
+// error appeared, so both arms sat behind a recovery that never let them be
+// observed — the exact shape the sweep's "no error appeared is one assertion"
+// entry describes, arriving in the change that entry was written about.
+//
+// Split per arm for the reason the reader cases give: IsDeleted and IsClosed
+// read separate state, and one test would be satisfied by whichever ran first.
+func TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment(t *testing.T) {
+	t.Run("closed", func(t *testing.T) {
+		l, _ := setupWithOptions(t, Options{Name: "fetch-closed", Path: tempDir(t), MaxSegmentBytes: 512})
+		appendMsg(t, l, "a record")
+		require.NoError(t, l.Close())
+
+		_, err := l.ReadMessageSet(0, 4096)
+		require.Error(t, err, "a fetch succeeded against a closed log")
+		require.ErrorIs(t, err, ErrCommitLogClosed,
+			"a closed log reported %v to a follower", err)
+		require.NotErrorIs(t, err, ErrSegmentClosed,
+			"the segment-level spelling is the one the resolve loop retries; a "+
+				"follower handed it re-fetches a log that is never coming back")
+	})
+
+	t.Run("deleted", func(t *testing.T) {
+		l, _ := setupWithOptions(t, Options{Name: "fetch-deleted", Path: tempDir(t), MaxSegmentBytes: 512})
+		appendMsg(t, l, "a record")
+		require.NoError(t, l.Delete())
+
+		_, err := l.ReadMessageSet(0, 4096)
+		require.Error(t, err, "a fetch succeeded against a deleted log")
+		require.ErrorIs(t, err, ErrCommitLogDeleted,
+			"a deleted log reported %v to a follower", err)
+	})
+}

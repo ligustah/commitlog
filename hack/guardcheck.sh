@@ -2319,6 +2319,24 @@ run_guard "a reader built on a deleted log names the log" reader.go   $'		if l.I
 
 run_guard "a reader built on a closed log names the log" reader.go   $'		if l.IsClosed() {'   $'		if false {'   '^TestBuildingAReaderOnADeadLogNamesTheLogNotTheSegment$/^closed$'
 
+# The replication fetch answers it the same way. ReadMessageSet's resolve loop
+# grew the identical pair on newSourceReader's reasoning, and reasoning is not
+# coverage: its end-to-end test asserted only that no error appeared, so both
+# arms sat behind a recovery that never let them be observed. Same split, for
+# the same reason the reader's pair is split.
+#
+# Checked when these were written: neutralized ONE at a time each turns red only
+# its own subtest, so neither hides behind the other in the ordered check -- the
+# deleted arm's mutation reports "commit log was closed", which is why the order
+# is load-bearing and not stylistic. Neutralized BOTH, the loop still compiles
+# and TestReadMessageSetRoundTripsIntoAnotherLog,
+# TestReadMessageSetIncludesRecordsAboveTheHighWatermark and both compaction-swap
+# tests still pass, so these measure the translation and not a fetch that has
+# started refusing everything.
+run_guard "a replication fetch on a deleted log names the log" commitlog.go   $'		if l.IsDeleted() {'   $'		if false {'   '^TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment$/^deleted$'
+
+run_guard "a replication fetch on a closed log names the log" commitlog.go   $'		if l.IsClosed() {'   $'		if false {'   '^TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment$/^closed$'
+
 
 echo
 if [ "$failures" -ne 0 ]; then

@@ -73,6 +73,25 @@ library from that fork onward.
   expensive way: an arm nothing can falsify is a comment with an `if` in front
   of it, and the fix is usually a seam, not a longer run.
 
+- **The replication read's two terminal-sentinel arms have a test each, and had
+  none.** The fix above translates `ErrCommitLogDeleted` and `ErrCommitLogClosed`
+  before the swap check, on `newSourceReader`'s reasoning — but reasoning is not
+  coverage. The resolve loop's own test asserts only that no error appeared, so
+  both arms sat behind a recovery that never let them be observed: the same
+  defect this release's other entries describe, arriving in the change that
+  described it.
+
+  `TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment` splits per arm, for
+  the reason the reader's pair is split — `IsDeleted` is a mutex-guarded bool and
+  `IsClosed` is a channel, so one test would be satisfied by whichever the
+  runtime reached first. Both are guarded (`hack/guardcheck.sh`).
+
+  What neutralizing them one at a time showed is worth more than the coverage:
+  with the deleted arm gone, a deleted log reports **`ErrCommitLogClosed`** to
+  the follower — a terminal sentinel, so no caller spins, but the wrong cause,
+  and the operator reads "closed" about a log that was deleted. The arms' order
+  is load-bearing rather than stylistic, and only a per-arm mutation says so.
+
 ### Documentation
 
 - **The retryability rule on `CommitLog` is stated per sentinel, and the rule it
