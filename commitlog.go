@@ -141,6 +141,24 @@ var ErrBlockFormat = errors.New("unsupported block format version")
 //
 // hack/openerrors.sh is what keeps it true. An eighth config refusal added
 // without this sentinel fails there, at the point of adding it.
+//
+// # Not only Options
+//
+// The class is "a value the caller supplied is wrong", and Options are only the
+// largest instance of it. ReadMessageSet's maxBytes and CopyTier's two stores
+// are the same thing arriving through a different door: the argument cannot be
+// made right by waiting, and no environment change alters the answer.
+//
+// They were found by taking the interface doc's retryability rule literally and
+// looking for a refusal that breaks it. Both did. A doc that promises a rule
+// the code does not keep is worse than no doc at all, because a caller builds a
+// classifier on it — which is precisely how the original defect reached three
+// separate paths.
+//
+// Note what is NOT filed here: descriptor, manifest and index parse failures.
+// Those refuse bytes read back from disk or a store, not a value the caller
+// handed in, and no argument change fixes them. They are damage, and the
+// sentinel for damage is ErrSegmentUnreadable.
 var ErrInvalidOptions = errors.New("commitlog: invalid options")
 
 const (
@@ -1271,7 +1289,7 @@ func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int
 // See the interface doc for the contract.
 func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
-		return nil, errors.New("commitlog: maxBytes must be positive")
+		return nil, errors.Wrap(ErrInvalidOptions, "maxBytes must be positive")
 	}
 	seg, contains := findSegmentContains(l.segmentsSnapshot(), offset)
 	if seg == nil {

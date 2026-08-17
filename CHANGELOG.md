@@ -5,6 +5,29 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **`ReadMessageSet` and `CopyTier` now refuse a bad argument with
+  `ErrInvalidOptions`.** Both returned a bare error for a value the caller
+  supplied and can only fix in their own code — a non-positive `maxBytes`, a nil
+  source or destination store. That contradicts the retryability rule the
+  `CommitLog` interface doc states, so a caller sorting failures on the sentinel
+  got the wrong answer for two exported entry points.
+
+  They were found by taking that doc literally and looking for a refusal that
+  breaks it, which is the only reason they surfaced: neither is reachable from
+  `New`, so `hack/openerrors.sh` could not see them and no Options test covered
+  them. This is the third path the same defect reached, after `New`'s Options
+  and a corrupt block header refusing an open.
+
+  `ErrInvalidOptions` is documented for the class rather than the struct — a
+  value the caller supplied is wrong — with the boundary stated: descriptor,
+  manifest and index parse failures stay out of it, because those refuse bytes
+  read back from disk rather than an argument, and no argument change fixes
+  them.
+
 ## v0.91.0 — 2026-08-17
 
 ### Fixed

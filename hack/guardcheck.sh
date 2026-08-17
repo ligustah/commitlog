@@ -1555,6 +1555,15 @@ run_guard "a version mismatch is not damage" block.go   '		return 0, 0, 0, 0, fm
 			ErrBlockFormat, v, BlockFormatVersion)' '		return 0, 0, 0, 0, fmt.Errorf("%w: %w: block format version %d, this build writes %d",
 			ErrSegmentUnreadable, ErrBlockFormat, v, BlockFormatVersion)'   '^TestBlockHeaderErrors$'
 
+# The same rule one door over: a caller's bad ARGUMENT is as permanent as a bad
+# Option. Neutralized by the bare errors these were, which is what broke the
+# retryability rule the interface doc states — found by taking that doc
+# literally and looking for a refusal that contradicts it. Two did.
+run_guard "a bad maxBytes is permanent" commitlog.go   '		return nil, errors.Wrap(ErrInvalidOptions, "maxBytes must be positive")' '		return nil, errors.New("commitlog: maxBytes must be positive")'   '^TestACallersBadArgumentIsAsPermanentAsABadOption$'
+
+run_guard "a missing CopyTier store is permanent" copy_tier.go   '		return errors.Wrap(ErrInvalidOptions,
+			"CopyTier needs both a source and a destination store")' '		return errors.New("commitlog: CopyTier needs both a source and a destination store")'   '^TestACallersBadArgumentIsAsPermanentAsABadOption$'
+
 # New's Options refusals are permanent, and say so. Neutralized by the bare
 # error each of these was — which reads identically to a human and is
 # indistinguishable from a busy disk to the retry loop New's callers open on.

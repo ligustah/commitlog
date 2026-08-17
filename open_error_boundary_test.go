@@ -108,3 +108,47 @@ func TestAnEnvironmentFailureAtOpenCarriesNoSentinel(t *testing.T) {
 		"Options.Path is a perfectly good value; the filesystem is what said no")
 	require.NotErrorIs(t, err, ErrLogLocked)
 }
+
+// The same rule, one door over: a caller-supplied argument that is wrong is as
+// permanent as a wrong Option, and must say so with the same sentinel.
+//
+// These two were found by taking the interface doc's retryability rule
+// literally — "a commitlog sentinel means permanent; anything else is an OS or
+// store error and may be transient" — and looking for a refusal that breaks it.
+// Both did, on exported surface, and both are exactly the ErrInvalidOptions
+// class arriving through a different door than New.
+//
+// That is the third path the same defect reached, after New's Options (#309)
+// and a corrupt block header refusing an open (#312). The pattern is what makes
+// it worth a test rather than a fix: the rule is easy to state, easy to believe
+// already true, and false at whichever refusal nobody re-read.
+func TestACallersBadArgumentIsAsPermanentAsABadOption(t *testing.T) {
+	l, cleanup := setup(t)
+	defer cleanup()
+	defer l.Close() // nolint: errcheck
+
+	// maxBytes is the caller's, and no environment change makes zero positive.
+	_, err := l.ReadMessageSet(0, 0)
+	require.ErrorIs(t, err, ErrInvalidOptions,
+		"a retrying caller cannot tell a bad maxBytes from a busy disk")
+	require.Contains(t, err.Error(), "maxBytes must be positive",
+		"the error must still name what the caller got wrong")
+
+	// CopyTier is a package function rather than a method, which is the only
+	// reason it was missed: nothing about it is reachable from New, so neither
+	// hack/openerrors.sh nor any Options test could see it.
+	require.ErrorIs(t, CopyTier(nil, nil), ErrInvalidOptions)
+
+	// And the boundary holds in the other direction — a store that exists but
+	// is empty is not the caller's mistake, so it must NOT claim to be.
+	dir := tempDir(t)
+	src, err := NewFileSegmentStore(filepath.Join(dir, "src"))
+	require.NoError(t, err)
+	dst, err := NewFileSegmentStore(filepath.Join(dir, "dst"))
+	require.NoError(t, err)
+	if cerr := CopyTier(src, dst); cerr != nil {
+		require.NotErrorIs(t, cerr, ErrInvalidOptions,
+			"both arguments are exactly what the caller meant; whatever went "+
+				"wrong here is about the stores, not the call")
+	}
+}

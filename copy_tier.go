@@ -41,7 +41,8 @@ import (
 //     dangling reference into a new store.
 func CopyTier(src, dst SegmentStore) error {
 	if src == nil || dst == nil {
-		return errors.New("commitlog: CopyTier needs both a source and a destination store")
+		return errors.Wrap(ErrInvalidOptions,
+			"CopyTier needs both a source and a destination store")
 	}
 
 	if err := requireAbsent(dst, manifestKey, "manifest"); err != nil {
