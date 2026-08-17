@@ -2581,3 +2581,33 @@ pairs do share a check on purpose (nil and header-only are both too short; a
 bogus count and a trailing byte are both size-vs-count) — deliberate sharing is
 fine, and accidental drift onto a shared check is what the message assertion
 catches. Aiming the wrong-magic case at the version byte is now red.
+
+## The same question, answered twice in one package
+
+#302 (sqlcdc's report) is not really about which error is right. Both spellings
+existed and both were defensible in isolation. The defect is that **two paths of
+one package had to decide what a dead log looks like to a caller, and only one
+of them had been asked.**
+
+`ReadMessage` translated `IsClosed`/`IsDeleted` into `ErrCommitLogClosed` /
+`ErrCommitLogDeleted`. `newSourceReader` consulted the same two predicates — but
+only to decide whether to stop retrying — and then returned whatever error it
+happened to be holding, which is `ErrSegmentClosed`: the value `segmentSwapped`
+in that same file defines as *the storage layer announcing a compaction swap*,
+and which the comment above `newSourceReader` describes as the exact condition
+the retry loop exists to absorb.
+
+So at construction, a dead handle and a segment swap were the same value. The
+symptom is what a caller does with that: four retries in 521µs, 0s, 0s, 0s —
+backoff with nothing to back off from, because the sentinel said "try again"
+about a log that was never coming back.
+
+**The lens is not "is this error right".** It is *does any other path in this
+package answer this same question, and does it answer it the same way?* An error
+that is locally reasonable and globally inconsistent has no test that can see
+it: each path passes its own tests, and the caller who suffers is holding the
+difference between them.
+
+Related but distinct from the #307 lens above, which is about a *single* path
+whose refusals cannot be told apart. This one is about *two* paths that agree
+they are answering the same question and disagree on the answer.

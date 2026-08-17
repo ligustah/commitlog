@@ -2224,6 +2224,25 @@ run_guard "a store-backed log refuses to open with no store" descriptor.go   $'	
 # check at all for the caller most exposed to it.
 run_guard "the store-backed refusal is not adoptable" descriptor.go   $'	if got.Tiered && len(opts.Tiers) == 0 {'   $'	if !opts.AdoptOptions && got.Tiered && len(opts.Tiers) == 0 {'   '^TestATieredLogRefusesToOpenWithoutItsStore$/^with_adoption$'
 
+# Building a reader on a dead log names the LOG, not the segment. Reported by
+# sqlcdc against v0.88.0 with the symptom that makes it legible: an operator died
+# on "new reader: segment has been closed" and its four retries took 521us, 0s,
+# 0s, 0s. A permanent state was wearing the transient spelling, so the caller's
+# backoff had nothing to back off from.
+#
+# Two arms, one guard each, because they read different state -- IsDeleted is a
+# mutex-guarded bool and IsClosed is a channel -- and one guard would be
+# satisfied by whichever the runtime reached first while the other returned
+# anything at all.
+#
+# Checked when these were written: with BOTH arms neutralized the remaining
+# `if !segmentSwapped(err)` still compiles and TestBuildingAReaderOnALiveLogStill
+# Works still passes, so these measure the translation rather than a constructor
+# that has started refusing everything.
+run_guard "a reader built on a deleted log names the log" reader.go   $'		if l.IsDeleted() {'   $'		if false {'   '^TestBuildingAReaderOnADeadLogNamesTheLogNotTheSegment$/^deleted$'
+
+run_guard "a reader built on a closed log names the log" reader.go   $'		if l.IsClosed() {'   $'		if false {'   '^TestBuildingAReaderOnADeadLogNamesTheLogNotTheSegment$/^closed$'
+
 
 echo
 if [ "$failures" -ne 0 ]; then

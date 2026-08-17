@@ -7,6 +7,27 @@ library from that fork onward.
 
 ## Unreleased
 
+### Fixed
+
+- **Building a reader on a closed or deleted log now names the log, not the
+  segment.** Reported by sqlcdc against v0.88.0, with the symptom that makes the
+  defect legible: an operator died on `new reader: segment has been closed` and
+  its four retries took 521µs, 0s, 0s, 0s. A permanent state was wearing a
+  transient error, so the caller's backoff had nothing to back off from.
+
+  `newSourceReader` already consulted `IsClosed`/`IsDeleted`, but only to decide
+  whether to stop retrying; it then handed back the raw error it happened to be
+  holding. That error is `ErrSegmentClosed`, which `segmentSwapped` in the same
+  file defines as the storage layer announcing a compaction swap, and which the
+  comment above `newSourceReader` describes as the exact condition the retry
+  loop exists to absorb. At construction a dead handle and a segment swap were
+  therefore the same value, and no caller could separate them.
+
+  `ReadMessage` has always translated. Two paths of one package answering the
+  same question differently is worse than either answer applied consistently, so
+  this mirrors `ReadMessage` rather than inventing a third spelling:
+  `ErrCommitLogDeleted`, then `ErrCommitLogClosed`, then the swap check.
+
 ### Changed
 
 - **`ErrBlockFormat` now means the version byte and nothing else.** It was also
