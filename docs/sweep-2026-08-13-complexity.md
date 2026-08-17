@@ -2824,3 +2824,44 @@ which is useless — the same family as an empty test selection reading as a pas
 Four probes were needed to find it, one per failure path the script claims to
 detect. **A check's own failure has to be distinguishable from the thing it
 checks**, and the only way to know it is, is to make each path fire once.
+
+### "No error appeared" is one assertion, and a recovery path has more than one arm
+
+A standing question about this repo is why finding things seems to need
+high-intensity soak tests, and whether components could be pressure-tested more
+directly. The `#313` fix answers it concretely, with a measurement.
+
+`TestReadMessageSetWhileCompactionReplacesSegments` is the usual shape: three
+goroutines, a driven compaction pass, a segment-departure gate, ~7 seconds. Its
+assertion is `fail()` on any error from the fetch — that is, *no error
+appeared*. Delete the resolve loop and it goes red in 0.62s. Delete the arm that
+decides whether a compaction swap is replica **damage** and it stays **green**.
+
+That is not a gap in the test's intensity. It is the ceiling of its only
+question. When the assertion is "nothing went wrong", the sole falsifiable
+element on the path is whatever makes recovery stop happening at all. Every arm
+that decides *what the failure would have been called* sits behind the recovery
+and is never observed, no matter how long the run or how many goroutines drive
+it. A longer soak buys more samples of the same one bit.
+
+The measurement: **18 of the 20 concurrency-driven tests in this package make no
+error-identity assertion at all** — no `ErrorIs`, no `NotErrorIs`, no
+`ErrorContains`. For most that is correct; an append-concurrency test really is
+asking "does this survive". It bites on the subset whose code under test has a
+recovery path with classification arms — the reader/maintenance races, six of
+them — because there "it survived" is compatible with every arm underneath being
+wrong.
+
+The fix is a seam, not a longer run. Splitting `readMessageSetFrom` out of the
+resolve lets a test hand in a segment a pass has already replaced and ask the
+read directly what it says about it: 1.4s, no goroutines, no window, and the arm
+that was unfalsifiable now fails naming the exact wrong answer — *"segment could
+not be read to its end: … segment was replaced"*. The state was never hard to
+construct; it was only hard to *deliver*, because resolve and read were fused
+and the only way in was to race one in.
+
+So the rule to carry: **when a property needs a soak to observe, the thing that
+is missing is usually a seam rather than intensity.** And the diagnostic that
+finds these without waiting for a bug: take a test whose assertion is "no error
+appeared", delete each arm on the path in turn, and count how many the test
+notices. One is the common answer.
