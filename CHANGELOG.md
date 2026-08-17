@@ -5,7 +5,23 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.93.1 — 2026-08-17
+
+Documentation only — no behaviour change, no API change, no format change. Three
+exported surfaces whose docs could not answer the question a caller actually had.
+Two were created by v0.93.0 itself: wrapping a sentinel to keep it additive made the
+caller's arm ORDER load-bearing, and offering "skip the record and carry on" as a
+remedy never said to bound the skip. The third is older and unrelated —
+`HighWatermark()` hands back a stale checkpoint after a kill.
+
+What the three have in common is the reason all three stayed invisible: **each is
+correct on a healthy log and wrong only after damage or a hard kill.** A clean stream
+sorts identically under either arm order, an undamaged segment never asks how many
+skips are too many, and a clean `Close` writes a final checkpoint so every graceful
+restart agrees with the tail. None of them can be caught by using the library
+correctly — only by using it while something is already going wrong. That is also why
+two of them are now pinned by tests rather than sentences: a warning nothing exercises
+is the same prose in both directions.
 
 ### Fixed
 
@@ -27,6 +43,12 @@ library from that fork onward.
   the wrong answer and narrow-first the right one. A synthesized error would only
   have proved that `errors.Is` walks a chain the test just built.
 
+- **Skip-and-carry-on had no ceiling in the docs.** Skipping is per record, so a loop
+  without a bound turns a badly damaged segment into an unbounded walk that reports
+  success. The declarations now say to bound it, and deliberately do not pick the
+  number — it depends on what the caller does with the records. sqlcdc's walstat uses
+  1000.
+
 - **`HighWatermark()` returns the stale checkpoint after an unclean shutdown, and its
   doc was one line that did not say so.** The watermark reaches disk on a ticker
   (`HWCheckpointInterval`, 5s) and again on `Close`, so a process killed without
@@ -37,25 +59,17 @@ library from that fork onward.
   watermark without calling it gets a committed tail below its own durable records —
   and it stays there.
 
-  Same shape as the arm-order entry above, which is why it went unwritten: a clean
-  `Close` writes a final checkpoint, so every graceful restart agrees with the tail
-  and only a kill disagrees. **The value is wrong only at the moment nobody is
-  watching.** The behaviour was already asserted — `recover_tail_test.go`'s "reopen
-  sees the stale checkpoint" is a `require`, not a comment — so this is the doc
-  catching up to a test that had pinned it for releases.
+  The behaviour was already asserted — `recover_tail_test.go`'s "reopen sees the stale
+  checkpoint" is a `require`, not a comment — so this is the doc catching up to a test
+  that had pinned it for releases.
 
   Prompted by a downstream report of a committed tail 126 records below the local disk
   tail — which turned out **not** to be this mechanism (it was the caller's own
-  replication barrier read from a follower, and their restart path already calls
-  `RecoverTail` from every open). Written anyway, because the doc as it stood could not
-  be used to *rule this out*, and ruling it out is most of what a caller needs when a
-  committed tail looks too low. Docs only; no behaviour change.
-
-- **Skip-and-carry-on had no ceiling in the docs.** Skipping is per record, so a loop
-  without a bound turns a badly damaged segment into an unbounded walk that reports
-  success. The declarations now say to bound it, and deliberately do not pick the
-  number — it depends on what the caller does with the records. sqlcdc's walstat uses
-  1000.
+  replication barrier read from a replica that had just been demoted and dropped from
+  the ISR, and their restart path already calls `RecoverTail` from every open). Written
+  anyway, because the doc as it stood could not be used to *rule this out*, and ruling
+  it out is most of what a caller needs when a committed tail looks too low. Docs only;
+  no behaviour change.
 
 ## v0.93.0 — 2026-08-17
 
