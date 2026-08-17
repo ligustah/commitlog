@@ -460,11 +460,23 @@ func TestBlockHeaderErrors(t *testing.T) {
 			// that was never involved.
 			if tc.format {
 				require.ErrorIs(t, err, ErrBlockFormat)
+				require.NotErrorIs(t, err, ErrSegmentUnreadable,
+					"these bytes are exactly what their writer meant, so a "+
+						"peer holds the same ones — calling this damage aims "+
+						"an operator at restoring a replica when the remedy "+
+						"is running the right build")
 			} else {
 				require.NotErrorIs(t, err, ErrBlockFormat,
 					"this is damage in one header, and ErrBlockFormat is a "+
 						"whole-store claim about the version byte — which "+
 						"reaching this check has already proven correct")
+				// The four damage refusals reach an OPENER, where until #312
+				// they arrived with no sentinel at all — so a caller applying
+				// the rule on New's doc retried bytes that will never parse.
+				require.ErrorIs(t, err, ErrSegmentUnreadable,
+					"a header entirely present and wrong is damage on this "+
+						"replica: a caller with a peer can act on it, and "+
+						"retrying the same call cannot fix it")
 			}
 		})
 	}

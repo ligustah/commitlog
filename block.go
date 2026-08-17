@@ -81,12 +81,38 @@ func encodeBlockHeader(codec compress.Codec, uncompressedLen, compressedLen, rec
 
 // parseBlockHeader reads a block header, returning the codec, lengths and
 // record count.
+//
+// Every refusal but ONE carries ErrSegmentUnreadable, and the exception is the
+// whole reason the sentinel is chosen here rather than by a caller. A header
+// that is entirely present and wrong means the bytes on this replica are
+// damaged: a caller with a peer to copy from can act on that, and retrying the
+// same call cannot fix it — which is what ErrSegmentUnreadable says and what
+// its five read-path sites already mean by it.
+//
+// Until this, none of that reached an opener. scanBlocks refuses the open on a
+// corrupt header, and that error travelled to New with no sentinel at all — so
+// a caller applying the rule on New's doc comment ("a commitlog sentinel means
+// permanent; anything else is an OS or store error and may be transient")
+// retried forever on bytes that will never parse. See #312; it is #309's defect
+// reached by a different door.
+//
+// The exception is the version byte. ErrBlockFormat means another BUILD wrote
+// these bytes — they are exactly what its writer meant, and copying from a peer
+// returns the same bytes back. Filing that as unreadable aims an operator at
+// restoring a replica when the remedy is running the right binary.
+//
+// Chosen HERE, where the class is known, and not by an `errors.Is` arm in
+// scanBlocks — an arm there would be textually identical to the one deleted
+// from that function earlier the same day for buying nothing, while doing the
+// opposite work. Deciding at the refusal needs no arm anywhere.
 func parseBlockHeader(hdr []byte) (codec compress.Codec, uncompressedLen, compressedLen, records uint32, err error) {
 	if len(hdr) < blockHeaderLen {
-		return 0, 0, 0, 0, fmt.Errorf("commitlog: short block header (%d bytes)", len(hdr))
+		return 0, 0, 0, 0, fmt.Errorf("%w: short block header (%d bytes)",
+			ErrSegmentUnreadable, len(hdr))
 	}
 	if hdr[0] != blockMagic {
-		return 0, 0, 0, 0, fmt.Errorf("commitlog: bad block magic 0x%02x", hdr[0])
+		return 0, 0, 0, 0, fmt.Errorf("%w: bad block magic 0x%02x",
+			ErrSegmentUnreadable, hdr[0])
 	}
 	// Clean cutover: pre-version segments are not supported. Refusing here
 	// is the point — the alternative is reading a layout we do not
@@ -97,7 +123,8 @@ func parseBlockHeader(hdr []byte) (codec compress.Codec, uncompressedLen, compre
 	}
 	codec = compress.Codec(hdr[2])
 	if !codec.Valid() {
-		return 0, 0, 0, 0, fmt.Errorf("commitlog: unknown block codec %d", hdr[2])
+		return 0, 0, 0, 0, fmt.Errorf("%w: unknown block codec %d",
+			ErrSegmentUnreadable, hdr[2])
 	}
 	// A block with no records cannot exist — write() refuses an empty message
 	// set before a byte is appended — so a zero here is a field nobody wrote.
@@ -115,7 +142,8 @@ func parseBlockHeader(hdr []byte) (codec compress.Codec, uncompressedLen, compre
 	// filing damage under the version sentinel tells an operator to go looking
 	// for a build mismatch that does not exist.
 	if r := encoding.Uint32(hdr[11:]); r == 0 {
-		return 0, 0, 0, 0, fmt.Errorf("commitlog: block header claims no records")
+		return 0, 0, 0, 0, fmt.Errorf("%w: block header claims no records",
+			ErrSegmentUnreadable)
 	}
 	return codec, encoding.Uint32(hdr[3:]), encoding.Uint32(hdr[7:]), encoding.Uint32(hdr[11:]), nil
 }

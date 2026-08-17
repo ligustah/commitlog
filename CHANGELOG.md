@@ -5,6 +5,30 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- **A corrupt block header now refuses an open with a sentinel a caller can
+  match.** `scanBlocks` refuses the open on a block header that is entirely
+  present and wrong — the right answer, since discarding bytes we merely failed
+  to understand is not recovery — but that error travelled to `New` bare, with
+  no sentinel at all. A caller applying the rule on `New`'s doc comment ("a
+  commitlog sentinel means the condition is permanent; anything else is an OS or
+  store error and may be transient") therefore retried forever on bytes that
+  will never parse. It is the loop sqlcdc reported against v0.88.0, reached
+  through a different door.
+
+  The four damage refusals — a header the file is too short to hold, a bad
+  magic, a codec outside the set, a zero record count — now carry
+  `ErrSegmentUnreadable`, whose doc already described this exact condition and
+  whose five existing sites were all read paths.
+
+  **Not the version byte.** `ErrBlockFormat` means another build wrote these
+  bytes; they are exactly what its writer meant, and a peer holds the identical
+  ones. Filing that as damage aims an operator at restoring a replica when the
+  remedy is running the right binary. Both directions are asserted and guarded.
+
 ## v0.90.0 — 2026-08-17
 
 ### Fixed

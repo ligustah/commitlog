@@ -153,8 +153,20 @@ func corruptBlockHeaderIsNotATornTail(t *testing.T, atByte func([]blockRef) int6
 		require.ErrorIs(t, err, ErrBlockFormat,
 			"a version byte this build does not write must reach the caller as "+
 				"ErrBlockFormat even though it is now wrapped with its position")
+		require.NotErrorIs(t, err, ErrSegmentUnreadable,
+			"these bytes are exactly what their writer meant, so copying from a "+
+				"peer returns the same bytes — calling it damage aims an operator "+
+				"at restoring a replica when the remedy is running the right build")
 	} else {
 		require.NotErrorIs(t, err, ErrBlockFormat)
+		// The half this test could not make before #312: a refused OPEN carried
+		// no sentinel at all, so a caller applying the rule on New's doc
+		// ("a commitlog sentinel means permanent; anything else may be
+		// transient") retried forever on bytes that will never parse.
+		require.ErrorIs(t, err, ErrSegmentUnreadable,
+			"New refused this open for damage on disk and said so with no sentinel "+
+				"a caller can match, which is the loop sqlcdc reported in #302 "+
+				"reached by a different door")
 	}
 
 	fi, err = os.Stat(logPath)

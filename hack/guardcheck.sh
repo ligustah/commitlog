@@ -1540,6 +1540,21 @@ run_guard "an appended set starts above the tail" commitlog.go   '	if first := e
 
 run_guard "an appended set ascends" commitlog.go   '		if entries[i].Offset <= entries[i-1].Offset {' '		if false && entries[i].Offset <= entries[i-1].Offset {'   '^TestAppendMessageSetRefusesOffsetsThatDoNotFitTheTail$'
 
+# A corrupt block header reaches an OPENER as damage a caller can match.
+# Neutralized by the bare error it was, which is what travelled to New until
+# #312: a permanent on-disk fault with no sentinel, so a caller applying the
+# rule on New's doc retried bytes that will never parse.
+run_guard "block damage reaches the opener as damage" block.go   '		return 0, 0, 0, 0, fmt.Errorf("%w: unknown block codec %d",
+			ErrSegmentUnreadable, hdr[2])' '		return 0, 0, 0, 0, fmt.Errorf("commitlog: unknown block codec %d", hdr[2])'   '^TestACorruptBlockHeaderIsNotATornTail$'
+
+# And the boundary the other way: a version this build does not write is NOT
+# damage. Neutralized by filing it as both, which is the tidy direction and the
+# wrong one — a peer holds the identical bytes, so "restore from a replica" is
+# the one remedy that cannot work.
+run_guard "a version mismatch is not damage" block.go   '		return 0, 0, 0, 0, fmt.Errorf("%w: block format version %d, this build writes %d",
+			ErrBlockFormat, v, BlockFormatVersion)' '		return 0, 0, 0, 0, fmt.Errorf("%w: %w: block format version %d, this build writes %d",
+			ErrSegmentUnreadable, ErrBlockFormat, v, BlockFormatVersion)'   '^TestBlockHeaderErrors$'
+
 # New's Options refusals are permanent, and say so. Neutralized by the bare
 # error each of these was — which reads identically to a human and is
 # indistinguishable from a busy disk to the retry loop New's callers open on.

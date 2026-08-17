@@ -2687,3 +2687,48 @@ patterns used `\(`, which awk treats as a plain `(` with a warning, so the New
 scan matched nothing and the script reported HARNESS ERROR — visibly, because
 "scanning nothing" is a failure here rather than a pass. That was luck of a
 design decision made two scripts ago, not of this one.
+
+## The same defect, one door over
+
+#309 gave `New`'s Options refusals a sentinel so a retrying caller could tell a
+wrong value from a busy disk. The audit that followed asked whether the rule it
+established generalises, and the first pass corrected its own framing before any
+work started: **73 bare errors** live outside tests, and four of them were made
+bare *on purpose* a few hours earlier — #307 took `ErrBlockFormat` off the
+short-header, bad-magic, unknown-codec and zero-record refusals because filing
+damage under "unsupported block format version" produced a sentence that
+disproved itself.
+
+So "every permanent refusal carries a sentinel" is false by design, and widening
+`hack/openerrors.sh` to the package would have enforced a rule the package had
+just rejected. The question that survives is narrower: **is there a CLASS of
+failure a caller must act on differently, with nothing to match on?**
+
+There was, and it was live. `scanBlocks` refuses an open on a block header that
+is entirely present and wrong, and that error travelled bare all the way out:
+`scanBlocks` → `initPositions` → `newSegment` → `New`. The existing test proved
+it without meaning to — three of its four cases asserted
+`NotErrorIs(err, ErrBlockFormat)` and asserted no sentinel at all, because there
+was none to assert. A caller applying the rule #309 had just written on `New`'s
+doc comment retries **forever** on permanently corrupted bytes. That is the loop
+sqlcdc reported in #302, reached through a different door.
+
+`ErrSegmentUnreadable` already existed and its doc already described exactly this
+condition — *"the bytes on this replica are damaged, which is a thing a caller
+with a peer to copy from can act on, and a thing retrying the same call cannot
+fix"* — but all five of its sites were read paths. Open time had nothing.
+
+Two things are worth keeping from the fix itself.
+
+**The sentinel is chosen where the class is known.** Wrapping in `scanBlocks`
+would have needed an `errors.Is(err, ErrBlockFormat)` arm to hold the version
+byte out — and that arm would be *textually identical* to the one deleted from
+`scanBlocks` earlier the same day for buying nothing, while doing the opposite
+work. Deciding at each refusal in `parseBlockHeader` needs no arm anywhere.
+
+**The exception is not tidiness, it is a different remedy.** A version this build
+does not write is not damage: the bytes are precisely what their writer meant,
+and a peer holds the identical ones. Calling it unreadable aims an operator at
+restoring a replica when the fix is running the right binary. Both directions are
+asserted and both are guarded, because widening a sentinel is always the silent
+half.
