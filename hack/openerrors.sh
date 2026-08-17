@@ -80,7 +80,7 @@ if [ -z "$validators" ]; then
 fi
 for f in $validators; do
 	while read -r name; do
-		check "$f" "^func $name[(]" "$name"
+		check "$f" "^func ${name}[(]" "$name"
 	done < <(grep -oE '^func validate[A-Za-z0-9_]*' "$f" | sed 's/^func //')
 done
 

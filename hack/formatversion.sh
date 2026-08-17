@@ -147,7 +147,7 @@ while IFS=: read -r file line name; do
   # `theVersion != v` about equally.
   #
   # shellcheck disable=SC2086 # deliberate word-split, as above
-  if ! grep -qE "(!=|==)[[:space:]]*$name([^A-Za-z0-9_]|\$)|$name[[:space:]]*(!=|==)" $files; then
+  if ! grep -qE "(!=|==)[[:space:]]*${name}([^A-Za-z0-9_]|\$)|${name}[[:space:]]*(!=|==)" $files; then
     continue
   fi
   gated=$((gated + 1))
