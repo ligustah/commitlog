@@ -2381,6 +2381,50 @@ run_guard "a reader built on a deleted log names the log" reader.go   $'		if l.I
 
 run_guard "a reader built on a closed log names the log" reader.go   $'		if l.IsClosed() {'   $'		if false {'   '^TestBuildingAReaderOnADeadLogNamesTheLogNotTheSegment$/^closed$'
 
+# The four arms of classifyReadError, one guard each.
+#
+# These were unfalsifiable until the classifier was split out of readOne and
+# ReadMessageMetadata. Fused, the only way to reach them was to race a compaction
+# swap in, and the swap arm in particular could not be falsified at all: the
+# retry it selects makes the failure it just classified go away before anything
+# observes the classification. Deleting it left a seven-second three-goroutine
+# soak green. Split, each arm is a subtest that answers in hundredths of a
+# second, so these guards are deterministic rather than window-dependent.
+#
+# One guard per arm, and each names its own subtest, because the arms are ORDERED
+# and a single guard would be satisfied by whichever fired first. The order is
+# itself under test: Delete closes as part of deleting, so the deleted arm has to
+# be reached before the closed one or a deleted log reports itself merely closed.
+run_guard "a deleted log outranks the read error" reader.go   $'	if r.log.IsDeleted() {
+		return readerLogDeleted
+	}'   $'	if false {
+		return readerLogDeleted
+	}'   '^TestAFailedReadIsClassifiedByWhatItMeans$/^deleted$'
+
+run_guard "a closed log outranks the read error" reader.go   $'	if r.log.IsClosed() {
+		return readerLogClosed
+	}'   $'	if false {
+		return readerLogClosed
+	}'   '^TestAFailedReadIsClassifiedByWhatItMeans$/^closed$'
+
+# Both halves of the readonly arm matter: neutralizing the whole condition makes
+# the readonly subtest red, and the subtest also asserts the sentinel ALONE on a
+# writable log is not a readonly log -- so the `&& r.log.IsReadonly()` half is
+# covered by the same test rather than left to the guard.
+run_guard "a readonly log is named only when it is readonly" reader.go   $'	if errors.Is(err, ErrCommitLogReadonly) && r.log.IsReadonly() {
+		return readerLogReadonly
+	}'   $'	if false {
+		return readerLogReadonly
+	}'   '^TestAFailedReadIsClassifiedByWhatItMeans$/^readonly$'
+
+# The one the soak could not see. Neutralized, a compaction swap becomes a hard
+# read failure for a record sitting on disk in the replacement.
+run_guard "a swap sends the reader back to resolve" reader.go   $'	if errors.Is(err, ErrSegmentReplaced) {
+		return readerReresolve
+	}'   $'	if false {
+		return readerReresolve
+	}'   '^TestAFailedReadIsClassifiedByWhatItMeans$/^reresolve$'
+
 # The replication fetch answers it the same way. ReadMessageSet's resolve loop
 # grew the identical pair on newSourceReader's reasoning, and reasoning is not
 # coverage: its end-to-end test asserted only that no error appeared, so both

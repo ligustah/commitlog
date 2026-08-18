@@ -5,6 +5,39 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Testing
+
+- **The reader's error classification is now falsifiable, and is no longer two
+  copies.** `readOne` and `ReadMessageMetadata` each carried the same five-arm
+  block deciding what a failed read means — deleted, closed, readonly, swapped,
+  or genuinely failed. The copies had already drifted: one grew the explanation
+  of why the swap arm uses `errors.Is` rather than a `Cause` comparison, the
+  other a comment naming itself a copy, filed one arm above the one it describes.
+
+  Fused into the read loops, the arms could not be reached without racing a
+  compaction swap in — and the swap arm could not be falsified even then, because
+  the retry it selects makes the failure it just classified go away before
+  anything observes the classification. That is the ceiling
+  `docs/sweep-2026-08-13-complexity.md` measured: when the assertion is "no error
+  appeared", the only falsifiable element is whatever makes recovery stop
+  happening at all, and a longer soak buys more samples of the same one bit.
+
+  `classifyReadError` is the decision on its own, and both loops now act on it.
+  `TestAFailedReadIsClassifiedByWhatItMeans` asks it directly: five subtests,
+  **0.07s, no goroutines and no window to hit**. Deleting any of the four arms
+  makes exactly one named subtest red, so all four carry guards — where before
+  they carried none, and a seven-second three-goroutine soak stayed green through
+  the deletion of the one that mattered.
+
+  The subtests also pin the two things the split could quietly lose: the ORDER
+  (the log's own state outranks the error's identity, so a swap sentinel on a
+  closed log reports the log — and `Delete` closes as part of deleting, so the
+  deleted arm must be reached first or a deleted log reports itself merely
+  closed), and BOTH halves of the readonly condition (the sentinel alone, on a
+  writable log, is not a readonly log).
+
 ## v0.95.2 — 2026-08-18
 
 A documentation fix. No library code changed.

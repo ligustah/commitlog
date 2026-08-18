@@ -229,6 +229,56 @@ func segmentSwapped(err error) bool {
 	return errors.Is(err, ErrSegmentClosed) || errors.Is(err, ErrSegmentReplaced)
 }
 
+// readerErrorAction is what a Reader does with a failed read: the DECISION,
+// separated from the two loops that act on it.
+//
+// Split out for the reason readMessageSetFrom was split out of its resolve.
+// Fused, the only way to reach these arms was to race a compaction swap in, and
+// the arm deciding what the failure is CALLED sits behind the retry that makes
+// the failure go away -- so a soak observes "it survived" and nothing else, no
+// matter how long it runs. With the decision in its own function a test hands it
+// an error directly and asks what it says, with no window to hit.
+//
+// It also de-duplicates. readOne and ReadMessageMetadata carried a copy each and
+// the copies had already drifted: one grew the explanation of why the arm uses
+// errors.Is, the other a comment naming itself a copy -- filed one arm above the
+// one it describes. See docs/sweep-2026-08-13-complexity.md for the class.
+type readerErrorAction int
+
+const (
+	// readerFail hands the error back unchanged.
+	readerFail readerErrorAction = iota
+	// readerReresolve rebuilds the source reader and reads again. A compaction
+	// swap is not a read failure: the record is in the replacement, on disk.
+	readerReresolve
+	readerLogDeleted
+	readerLogClosed
+	readerLogReadonly
+)
+
+// classifyReadError decides what a failed read means.
+//
+// The ORDER is load-bearing, and mirrors newSourceReader deliberately: the log's
+// own state is tested BEFORE the swap sentinels, because "the log is gone"
+// explains any error the read produced, and a caller that cannot tell that from
+// a compaction swap has to guess whether retrying is safe. One path translating
+// and the other not is worse than either rule applied consistently.
+func (r *Reader) classifyReadError(err error) readerErrorAction {
+	if r.log.IsDeleted() {
+		return readerLogDeleted
+	}
+	if r.log.IsClosed() {
+		return readerLogClosed
+	}
+	if errors.Is(err, ErrCommitLogReadonly) && r.log.IsReadonly() {
+		return readerLogReadonly
+	}
+	if errors.Is(err, ErrSegmentReplaced) {
+		return readerReresolve
+	}
+	return readerFail
+}
+
 // newRecoveryReader returns an uncommitted reader that does NOT block waiting
 // for future appends: it returns io.EOF as soon as it drains the readable
 // bytes. RecoverTail scans a static tail (not a live writer), so blocking for
@@ -310,32 +360,21 @@ func (r *Reader) readOne(
 RETRY:
 	msg, offset, timestamp, leaderEpoch, err := readMessage(ctx, r.ctxReader, headersBuf)
 	if err != nil {
-		if r.log.IsDeleted() {
-			// The log was deleted while we were trying to read.
+		// What each arm means, and why the order is what it is, lives on
+		// classifyReadError. This block is the ACTING half only.
+		switch r.classifyReadError(err) {
+		case readerLogDeleted:
 			return nil, 0, 0, 0, ErrCommitLogDeleted
-		} else if r.log.IsClosed() {
-			// The log was closed while we were trying to read.
+		case readerLogClosed:
 			return nil, 0, 0, 0, ErrCommitLogClosed
-		} else if errors.Is(err, ErrCommitLogReadonly) && r.log.IsReadonly() {
-			// The log was set to readonly while we were trying to read.
+		case readerLogReadonly:
 			return nil, 0, 0, 0, ErrCommitLogReadonly
-		} else if errors.Is(err, ErrSegmentReplaced) {
-			// ErrSegmentReplaced indicates we attempted to read from a log
-			// segment that was replaced due to compaction, so reinitialize the
-			// contextReader and try again to read from the new segment.
-			//
-			// errors.Is, not pkgErrors.Cause(err) ==. Cause walks a `causer`
-			// chain and stops at a `%w` one, and this package writes
-			// `fmt.Errorf("%w: ...")` in a dozen places. Nothing between the
-			// segment and here does today — which is exactly what makes the
-			// comparison work and makes it fragile: one %w added anywhere on this
-			// path turns an ordinary compaction swap into a hard read failure for
-			// a record sitting on disk in the replacement.
+		case readerReresolve:
 			if r.ctxReader, err = r.log.newSourceReader(r.specAt(r.offset)); err != nil {
 				return nil, 0, 0, 0, pkgErrors.Wrap(err, "failed to reinitialize reader")
 			}
 			goto RETRY
-		} else {
+		default:
 			return nil, 0, 0, 0, err
 		}
 	}
@@ -398,20 +437,20 @@ func (r *Reader) ReadMessageMetadata(ctx context.Context, headersBuf []byte, pay
 RETRY:
 	meta, newBuf, err := readMessageMetadata(ctx, r.ctxReader, headersBuf, payloadBuf)
 	if err != nil {
-		if r.log.IsDeleted() {
+		switch r.classifyReadError(err) {
+		case readerLogDeleted:
 			return MessageMetadata{}, newBuf, ErrCommitLogDeleted
-		} else if r.log.IsClosed() {
+		case readerLogClosed:
 			return MessageMetadata{}, newBuf, ErrCommitLogClosed
-		} else if errors.Is(err, ErrCommitLogReadonly) && r.log.IsReadonly() {
+		case readerLogReadonly:
 			return MessageMetadata{}, newBuf, ErrCommitLogReadonly
-			// errors.Is for the reason readOne's copy of this arm gives.
-		} else if errors.Is(err, ErrSegmentReplaced) {
+		case readerReresolve:
 			if r.ctxReader, err = r.log.newSourceReader(r.specAt(r.offset)); err != nil {
 				return MessageMetadata{}, newBuf, pkgErrors.Wrap(err, "failed to reinitialize reader")
 			}
 			payloadBuf = newBuf
 			goto RETRY
-		} else {
+		default:
 			return MessageMetadata{}, newBuf, err
 		}
 	}
