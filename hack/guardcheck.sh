@@ -1130,6 +1130,17 @@ run_guard "a rolling tick still cleans" clean.go   '	if _, err := l.checkAndPerf
 run_guard_windows "a failed shrink leaves the index readable" index_mmap_windows.go   '		return errors.Wrap(stderrors.Join(err, idx.restoreMapping(remap)),
 			"truncate failed during shrink")' '		return errors.Wrap(err, "truncate failed during shrink")'   '^TestAFailedShrinkLeavesTheIndexReadable$'
 
+# The section handle is CLOSED as soon as the view exists. A view keeps its own
+# reference to the section, so the mapping stays valid without it -- which is
+# exactly why dropping the close is dangerous: everything works and the process
+# gains one kernel handle per index mapping, for as long as it runs. It is
+# caught loudly (an open section blocks SetEndOfFile, so every shrink fails),
+# but only ever reported from inside a truncate as "a file with a user-mapped
+# section open", which names the symptom. The named test holds no index and
+# truncates nothing, so it reports the cause: with the neutralization it counts
+# exactly one leaked handle per map/unmap cycle.
+run_guard_windows "the section handle is released at map time" index_mmap_windows.go   '	closeErr := syscall.CloseHandle(h)' '	var closeErr error'   '^TestIndexMappingReleasesTheSectionHandle$'
+
 # An expansion asks the MAPPING whether there is room, not the recorded size.
 # The two agree only while every expansion completes -- the file grows, then the
 # mapping is torn down and rebuilt, and both of those can fail. The
