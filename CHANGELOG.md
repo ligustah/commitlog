@@ -5,6 +5,28 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Fixed
+
+- `From`'s documentation said nothing about a start offset below the log's oldest
+  surviving record, which is the case a reader hits every time retention or compaction
+  moves the floor under it. The behaviour — the read is served from the oldest survivor
+  rather than refused — was already promised, but on `NewReader`, four paragraphs into a
+  termination contract, and not on the option a caller actually reaches for. A downstream
+  consumer read `From` alone, concluded the behaviour was incidental, and was carrying two
+  defensive clamps against it. `From` now states the guarantee and its mechanism.
+
+  The half neither doc stated is the one that matters: the read **starts later than asked
+  and reports nothing**. There is no error, so a caller for whom the gap matters — one
+  tracking a replica's position, or resuming a consumer — has to compare the first offset
+  it receives against the one it requested. Clamping to `OldestOffset()` beforehand does
+  not help, because retention moves the floor under a live reader; the clamp only narrows
+  the window in which the two disagree. Both docs now say so.
+
+  Pinned by a test across both reader constructions and three below-oldest start offsets,
+  because `From(0)` alone cannot distinguish an explicit request from an unset one.
+
 ## v0.93.2 — 2026-08-17
 
 Documentation and one test — no behaviour change, no API change, no format change.

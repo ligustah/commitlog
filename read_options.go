@@ -39,6 +39,22 @@ type readSpec struct {
 
 // From starts the read at offset. Defaults to the log's oldest surviving
 // record, so a caller that just wants everything need not ask for it.
+//
+// An offset BELOW the oldest surviving record is served from the oldest
+// survivor rather than refused. This is a guarantee, not an accident: it is
+// what lets a reader outlive retention and compaction. The offsets it asked
+// for are gone, the next surviving records are the right answer, and both
+// reader constructions reach that answer through the same branch —
+// findSegmentContains reports contains=false for an offset below the segment's
+// base, which is read as "start at the beginning of this segment".
+//
+// The cost is that the read STARTS LATER THAN ASKED and says nothing about it.
+// A caller for whom the gap matters — one tracking a replica's position, or
+// resuming a consumer — cannot learn it from the error (there is none) and must
+// compare the first offset it receives against the one it requested. Clamping
+// the request to OldestOffset() first does not avoid this: retention moves the
+// floor under a live reader, so the clamp only narrows the window in which the
+// two can disagree.
 func From(offset int64) ReadOption {
 	return func(s *readSpec) { s.offset, s.offsetSet = offset, true }
 }

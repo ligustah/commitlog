@@ -222,8 +222,12 @@ type CommitLog interface {
 	//     and not ==.
 	//   - construction returns ErrSegmentNotFound only when the log holds no
 	//     segments at all. A start offset merely BELOW the oldest surviving
-	//     record clamps up to it, so reading from 0 over a log that retention
-	//     has since trimmed is fine and starts at the oldest record present.
+	//     record is served FROM the oldest survivor, so reading from 0 over a
+	//     log that retention has since trimmed is fine and starts at the oldest
+	//     record present. Nothing clamps the requested offset — it is carried
+	//     verbatim, and segment lookup resolves it forward — so the read
+	//     silently starts LATER than asked. See From, which states what a
+	//     caller must do to notice.
 	//
 	// So the single case a caller must handle itself is the empty log. That is
 	// deliberately an error rather than a reader that instantly ends: "there is
