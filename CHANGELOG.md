@@ -5,6 +5,19 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## Unreleased
+
+### Documentation
+
+- **The README snippet named a subpackage it never showed how to import.** It
+  uses `compress.Zstd`, and `compress` lives at
+  `github.com/ligustah/commitlog/compress` — not a path anyone guesses. Found by
+  building the snippet as a fresh external module against the published v0.95.3
+  rather than by reading it: `example_test.go` compiles *inside* the module, so
+  it proves the calls and cannot prove the imports. The block now carries the two
+  imports, matching the executed copy. Verified end to end through the module
+  proxy: resolve, build, append, read back.
+
 ## v0.95.3 — 2026-08-18
 
 A test-quality change and two documentation fixes. No exported API changed and no

@@ -53,6 +53,11 @@ the log removed); substantially extended since — see
 ## Use
 
 ```go
+import (
+    "github.com/ligustah/commitlog"
+    "github.com/ligustah/commitlog/compress"
+)
+
 log, err := commitlog.New(commitlog.Options{
     Path:        "orders-log",
     Compression: compress.Zstd,
