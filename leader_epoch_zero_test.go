@@ -99,7 +99,7 @@ func TestLeaderEpochZeroIsRecorded(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, reopened.epochOffsets, 2, "the checkpoint did not round-trip")
 	require.EqualValues(t, 0, reopened.epochOffsets[0].leaderEpoch)
-	require.EqualValues(t, 0, reopened.epochOffsets[0].startOffset)
+	require.EqualValues(t, 0, reopened.epochOffsets[0].assignedAtOffset)
 
 	// Retention re-anchors epoch 0 rather than dropping it. This is the
 	// invariant the file's own comment defends — "a trim at the earliest end

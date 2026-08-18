@@ -5,6 +5,46 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.95.8 — 2026-08-19
+
+A documentation fix and an unexported rename. No behaviour changed.
+
+### Documentation
+
+- **`LastOffsetForLeaderEpoch` described an exclusive bound while returning an
+  inclusive one.** Its doc said it returns "the start offset of the first leader
+  epoch larger than the named one". It does not. `NewLeaderEpoch` anchors each
+  epoch at `NewestOffset()` — the last offset ALREADY written — so the successor's
+  recorded offset is the named epoch's own last record, and the fallback arm
+  returns `NextOffset()-1` rather than `NextOffset()`. Both arms are inclusive.
+  A follower keeps offsets through the answer and truncates from answer+1.
+
+  The wording cost real time twice in one hour, in opposite directions: a
+  consumer derived one off-by-one from it, and this author reported a
+  non-existent data-loss bug after reading the doc and the field name as
+  authority instead of the single line that writes the value.
+
+### Changed
+
+- **`epochOffset.startOffset` is now `epochOffset.assignedAtOffset`**
+  (unexported; no API change). The field never held a start offset. The new name
+  states what `assign` is handed, so neither reading has to be reconstructed from
+  the call site. The epoch checkpoint is positional (`"%d %d"`), so the on-disk
+  format is untouched and files round-trip across the rename.
+
+### Known limitation, now documented rather than fixed
+
+- An epoch that writes **no** records is not preserved: `ClearEarliest`
+  re-anchors sub-floor entries as the log trims, so two epochs opened back to
+  back on an empty log collapse into one entry at the surviving floor. A probe
+  naming the earlier epoch is then answered from the successor's re-anchored
+  offset instead of with the −1 that would say "this epoch wrote nothing".
+  Whether that is reachable depends on the caller's controller never issuing an
+  epoch that writes nothing and then reappearing on a follower — a guarantee
+  this package cannot make or check, so this release documents the shape at
+  `leaderEpochCache.LastOffsetForLeaderEpoch` rather than inventing a policy for
+  it.
+
 ## v0.95.7 — 2026-08-18
 
 A documentation fix. No code changed.

@@ -57,10 +57,25 @@ func AtEpoch(e uint64) Epoch { return Epoch{epoch: e, known: true} }
 // Get returns the epoch and whether one was named.
 func (e Epoch) Get() (uint64, bool) { return e.epoch, e.known }
 
-// epochOffset contains the start offset for a given leader epoch.
+// epochOffset records where the log stood when a leader epoch was assigned.
+//
+// The value is NOT the epoch's first offset, which is what the field's earlier
+// name (startOffset) claimed and what the probe's doc repeated. Assign is
+// handed NewestOffset() -- the last offset ALREADY written -- so the entry for
+// epoch E holds the inclusive end of epoch E-1, one below E's first record.
+// LastOffsetForLeaderEpoch relies on exactly that: it answers a probe for E by
+// looking up E+1. That identity holds for entries retention has not moved; see
+// the note on ClearEarliest re-anchoring there.
+//
+// An epoch assigned to an empty log records -1, because that is what
+// NewestOffset answers there; see leader_epoch_compaction_test.go.
+//
+// The name earned this comment. Read as an exclusive next-epoch start it
+// yields an off-by-one, and it was read that way twice in one hour -- once by
+// a consumer and once by this author -- in opposite directions.
 type epochOffset struct {
-	leaderEpoch uint64
-	startOffset int64
+	leaderEpoch      uint64
+	assignedAtOffset int64
 }
 
 type leaderEpochCache struct {
@@ -110,9 +125,28 @@ func (l *leaderEpochCache) Assign(epoch uint64, offset int64) error {
 	return l.assign(epoch, offset)
 }
 
-// LastOffsetForLeaderEpoch returns the start offset of the first leader epoch
-// larger than the provided one or -1 if the current epoch equals the provided
-// one.
+// LastOffsetForLeaderEpoch returns the INCLUSIVE last offset belonging to the
+// provided epoch, or -1 when no larger epoch is recorded.
+//
+// It reads the entry for epoch+1, not for epoch. That is not an off-by-one:
+// assign stores NewestOffset(), so the successor's entry holds the offset the
+// log had reached when the successor opened -- the last record the provided
+// epoch wrote. See epochOffset.
+//
+// -1 is overloaded: it means "no successor recorded" here, and the caller
+// substitutes the log end for it, but it is ALSO the value assign records for
+// an epoch opened on an empty log. In practice the second reading rarely
+// reaches a caller, because ClearEarliest re-anchors sub-floor entries as the
+// log trims -- two epochs opened back to back on an empty log collapse into a
+// single entry at the surviving floor, and the earlier of the two stops
+// existing.
+//
+// Which is the honest caveat on the paragraph above: an epoch that wrote no
+// records is not preserved, so a probe naming one is answered from its
+// successor's re-anchored offset rather than with the -1 that would say "this
+// epoch wrote nothing". Whether that is reachable depends on the caller's
+// controller never issuing an epoch that writes nothing and then reappearing
+// on a follower -- a guarantee this package cannot make or check.
 func (l *leaderEpochCache) LastOffsetForLeaderEpoch(epoch uint64) int64 {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -120,7 +154,7 @@ func (l *leaderEpochCache) LastOffsetForLeaderEpoch(epoch uint64) int64 {
 	if e == nil {
 		return -1
 	}
-	return e.startOffset
+	return e.assignedAtOffset
 }
 
 // LastLeaderEpoch returns the latest leader epoch for the log.
@@ -140,7 +174,7 @@ func (l *leaderEpochCache) ClearLatest(offset int64) error {
 	}
 	filtered := make([]*epochOffset, 0, len(l.epochOffsets))
 	for _, epoch := range l.epochOffsets {
-		if epoch.startOffset < offset {
+		if epoch.assignedAtOffset < offset {
 			filtered = append(filtered, epoch)
 		}
 	}
@@ -163,7 +197,7 @@ func (l *leaderEpochCache) ClearEarliest(offset int64) error {
 		removed  = 0
 	)
 	for _, epoch := range l.epochOffsets {
-		if epoch.startOffset < offset {
+		if epoch.assignedAtOffset < offset {
 			earliest = append(earliest, epoch)
 			removed++
 		}
@@ -176,8 +210,8 @@ func (l *leaderEpochCache) ClearEarliest(offset int64) error {
 	// previous epoch back but with an updated offset.
 	if offset < l.earliestOffset() || len(l.epochOffsets) == 0 {
 		l.epochOffsets = append([]*epochOffset{{
-			leaderEpoch: earliest[len(earliest)-1].leaderEpoch,
-			startOffset: offset,
+			leaderEpoch:      earliest[len(earliest)-1].leaderEpoch,
+			assignedAtOffset: offset,
 		}}, l.epochOffsets...)
 	}
 	err := l.flush()
@@ -196,7 +230,7 @@ func (l *leaderEpochCache) earliestOffset() int64 {
 	if len(l.epochOffsets) == 0 {
 		return -1
 	}
-	return l.epochOffsets[0].startOffset
+	return l.epochOffsets[0].assignedAtOffset
 }
 
 func (l *leaderEpochCache) latestEpoch() uint64 {
@@ -210,7 +244,7 @@ func (l *leaderEpochCache) latestOffset() int64 {
 	if len(l.epochOffsets) == 0 {
 		return -1
 	}
-	return l.epochOffsets[len(l.epochOffsets)-1].startOffset
+	return l.epochOffsets[len(l.epochOffsets)-1].assignedAtOffset
 }
 
 func (l *leaderEpochCache) findEpoch(epoch uint64) *epochOffset {
@@ -245,8 +279,8 @@ func (l *leaderEpochCache) assign(epoch uint64, offset int64) error {
 	// assignment after the first is checked exactly as before.
 	if len(l.epochOffsets) == 0 || (epoch > latestEpoch && offset >= latestOffset) {
 		l.epochOffsets = append(l.epochOffsets, &epochOffset{
-			leaderEpoch: epoch,
-			startOffset: offset,
+			leaderEpoch:      epoch,
+			assignedAtOffset: offset,
 		})
 		if err := l.flush(); err != nil {
 			return pkgErrors.Wrap(err, "failed to flush epoch offsets")
@@ -290,7 +324,7 @@ func (l *leaderEpochCache) flush() error {
 		return err
 	}
 	for _, epoch := range l.epochOffsets {
-		if _, err := b.WriteString(fmt.Sprintf("%d %d\n", epoch.leaderEpoch, epoch.startOffset)); err != nil {
+		if _, err := b.WriteString(fmt.Sprintf("%d %d\n", epoch.leaderEpoch, epoch.assignedAtOffset)); err != nil {
 			return err
 		}
 	}
@@ -396,7 +430,7 @@ func readLeaderEpochOffsets(file io.Reader) ([]*epochOffset, error) {
 		if !scanner.Scan() {
 			return nil, errors.New("missing start offset for epoch")
 		}
-		startOffset, err := strconv.ParseInt(scanner.Text(), 10, 64)
+		assignedAtOffset, err := strconv.ParseInt(scanner.Text(), 10, 64)
 		if err != nil {
 			return nil, pkgErrors.Wrap(err, "invalid epoch start offset value")
 		}
@@ -405,10 +439,10 @@ func readLeaderEpochOffsets(file io.Reader) ([]*epochOffset, error) {
 			// Duplicate entry.
 			return nil, fmt.Errorf("duplicate leader epoch %d", leaderEpoch)
 		}
-		epochs[leaderEpoch] = startOffset
+		epochs[leaderEpoch] = assignedAtOffset
 		epochOffsets = append(epochOffsets, &epochOffset{
-			leaderEpoch: leaderEpoch,
-			startOffset: startOffset,
+			leaderEpoch:      leaderEpoch,
+			assignedAtOffset: assignedAtOffset,
 		})
 	}
 

@@ -50,7 +50,7 @@ func TestCompactionKeepsTheAssignedLeaderEpoch(t *testing.T) {
 		"compaction erased the leader epoch, which fences every follower out for good")
 }
 
-// An epoch assigned to an EMPTY log gets startOffset -1, since NewLeaderEpoch
+// An epoch assigned to an EMPTY log gets assignedAtOffset -1, since NewLeaderEpoch
 // passes NewestOffset(). That is below every base offset, so anything that
 // re-anchors entries at a surviving floor has to keep it rather than treat it as
 // belonging to a range that no longer exists.

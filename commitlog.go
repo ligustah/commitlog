@@ -2087,10 +2087,16 @@ func (l *commitLog) NewLeaderEpoch(epoch uint64) error {
 	return l.leaderEpochCache.Assign(epoch, l.NewestOffset())
 }
 
-// LastOffsetForLeaderEpoch returns the start offset of the first leader epoch
-// larger than the named one, or the log end offset when no recorded epoch is
-// larger — the probing follower is level with this log or ahead of it, and has
-// nothing to discard.
+// LastOffsetForLeaderEpoch returns the INCLUSIVE last offset belonging to the
+// named epoch, or the log end offset when no larger epoch is recorded — the
+// probing follower is level with this log or ahead of it, and has nothing to
+// discard.
+//
+// Inclusive on BOTH branches, and deliberately so: the fallback is
+// NextOffset()-1, not NextOffset(). The cache arm looks up epoch+1 because
+// NewLeaderEpoch anchors each epoch at NewestOffset(), so the successor's
+// recorded offset IS the named epoch's last record. Read either arm as an
+// exclusive next-epoch start and the follower keeps one record too many.
 //
 // An Epoch that names nothing is refused with ErrUnknownLeaderEpoch. See Epoch
 // for why that is a refusal and not a default: the caller truncates to the

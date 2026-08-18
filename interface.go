@@ -643,10 +643,16 @@ type CommitLog interface {
 	// NewLeaderEpoch indicates the log is entering a new leader epoch.
 	NewLeaderEpoch(epoch uint64) error
 
-	// LastOffsetForLeaderEpoch returns the start offset of the first leader
-	// epoch larger than the named one, or the log end offset when no recorded
-	// epoch is larger — the probing follower is level with this log or ahead of
-	// it, and has nothing to discard.
+	// LastOffsetForLeaderEpoch returns the INCLUSIVE last offset belonging to
+	// the named epoch, or the log end offset when no larger epoch is recorded —
+	// the probing follower is level with this log or ahead of it, and has
+	// nothing to discard.
+	//
+	// Inclusive on BOTH branches. A follower keeps offsets up to and including
+	// the answer and truncates from answer+1; it must not treat the return as
+	// the exclusive start of the next epoch. The cache stores each epoch's
+	// assignment point as NewestOffset() — the last offset already written —
+	// so there is no arm of this that returns a first offset.
 	//
 	// An Epoch that names nothing is refused with ErrUnknownLeaderEpoch rather
 	// than answered. The caller of this truncates to the answer, so an offset
