@@ -31,8 +31,14 @@ import (
 func TestReadBelowOldestServesFromOldest(t *testing.T) {
 	// Every start offset here is below the post-trim oldest. 0 is the zero
 	// value, so on its own it could not distinguish an explicit request from an
-	// unset one; 1 and 2 are set values that no default could produce.
-	for _, from := range []int64{0, 1, 2} {
+	// unset one; 1 and 2 are set values that no default could produce; -1 is
+	// included because a consumer stack passes negative offsets through to this
+	// library as a "from the beginning" sentinel of its own, and was told here
+	// that it works incidentally. It does not — a negative offset is below the
+	// oldest surviving record, which is exactly the case the contract covers,
+	// and the committed path reaches it through a branch that names negative
+	// offsets explicitly.
+	for _, from := range []int64{-1, 0, 1, 2} {
 		for _, committed := range []bool{false, true} {
 			name := fmt.Sprintf("from=%d/committed=%v", from, committed)
 			t.Run(name, func(t *testing.T) {

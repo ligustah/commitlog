@@ -42,7 +42,11 @@ type readSpec struct {
 //
 // An offset BELOW the oldest surviving record is served from the oldest
 // survivor rather than refused. This is a guarantee, not an accident: it is
-// what lets a reader outlive retention and compaction. The offsets it asked
+// what lets a reader outlive retention and compaction. NEGATIVE offsets are
+// covered by it too — a negative start is below the oldest record like any
+// other — so a caller stack passing one as its own "from the beginning"
+// sentinel is resting on this contract rather than on incidental behaviour.
+// The offsets it asked
 // for are gone and the next surviving records are the right answer. Both a
 // committed and an uncommitted reader behave this way.
 //
