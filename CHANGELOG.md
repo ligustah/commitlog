@@ -15,7 +15,10 @@ library from that fork onward.
   rather than refused — was already promised, but on `NewReader`, four paragraphs into a
   termination contract, and not on the option a caller actually reaches for. A downstream
   consumer read `From` alone, concluded the behaviour was incidental, and was carrying two
-  defensive clamps against it. `From` now states the guarantee and its mechanism.
+  defensive clamps against it. `From` now states the guarantee. It deliberately does not
+  state the mechanism: naming an unexported symbol in the one doc whose whole audience
+  cannot see the implementation is the same mistake in a smaller form, so that account
+  lives in the test's comment instead.
 
   The half neither doc stated is the one that matters: the read **starts later than asked
   and reports nothing**. There is no error, so a caller for whom the gap matters — one
@@ -26,6 +29,11 @@ library from that fork onward.
 
   Pinned by a test across both reader constructions and three below-oldest start offsets,
   because `From(0)` alone cannot distinguish an explicit request from an unset one.
+  `TestNewScanReaderClampsBelowOldest` already pinned the same guarantee for the scan
+  reader, and its comment said "the same behaviour as NewReader" without pinning that
+  half; the new test is that half, and says so, so a later duplication sweep does not
+  collapse the two. The guarantee was therefore documented AND tested and still read as
+  an accident to every consumer — which is the actual finding here.
 
 - The concrete `NewReader` method carried a partial copy of the interface's documentation
   — it restated the defaults and the one refused option combination, and dropped the
