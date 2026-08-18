@@ -17,11 +17,36 @@ import (
 var errIndexCorrupt = errors.New("corrupt index file")
 
 // gommapMu serializes every gommap.Map / UnsafeUnmap call in this package.
-// gommap keeps a package-level handle registry keyed by mapping address with
-// no internal locking, so concurrent map/unmap calls from different goroutines
-// — an append rolling a segment while the cleaner mmaps a rewrite target —
-// race on that registry. Mapping operations are rare (segment create, seal,
-// expand, close), so one mutex costs nothing.
+//
+// The registry it protects is on the MAP side, and only on Windows:
+// gommap_windows.go's MapRegion writes the package-level mmapAttrs map under no
+// lock at all, so two concurrent gommap.Map calls — an append rolling a segment
+// while the cleaner maps a rewrite target — are a concurrent map write, which
+// the runtime turns into a process-wide throw. The two registries UnsafeUnmap
+// mutates (handleMap, fileHandleMap) do have gommap's own handleLock around
+// them, and gommap.Map off Windows touches no package state whatsoever. An
+// earlier version of this comment said the registry had "no internal locking"
+// flatly, which is true of exactly one of the three maps and made the unmap
+// side look like it was resting on this mutex. It is not.
+//
+// Holding this mutex across UnsafeUnmap is therefore redundant, and it is kept
+// anyway because dropping it buys almost nothing. gommap's unmap calls flush()
+// first, unconditionally, and flush holds handleLock across
+// syscall.FlushFileBuffers — so every unmap in the process is already
+// serialized on an fsync one level down, whatever this mutex does. Measured on
+// 64 dirty 64KB mappings: 3.8ms per unmap with 64-way concurrency and this
+// mutex removed entirely, against 28µs for the same teardown issued through
+// MapViewOfFile / UnmapViewOfFile directly with no flush.
+//
+// That 136x is why Close, CloseFlushed and CloseDiscarding are
+// indistinguishable on Windows: the fsync they choose between is not the one
+// that costs, and the one that costs is not reachable from this side of the
+// dependency. A consumer tearing down hundreds of small indexes sees them
+// strictly in series. Fixing it means owning the mapping here rather than
+// narrowing anything in this file.
+//
+// Mapping operations are rare (segment create, seal, expand, close), so the
+// mutex itself costs nothing beyond what gommap already costs.
 var gommapMu sync.Mutex
 
 // mmapFile is a var so a test can make the mapping FAIL. What it guards
