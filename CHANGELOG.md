@@ -27,11 +27,13 @@ library from that fork onward.
   not help, because retention moves the floor under a live reader; the clamp only narrows
   the window in which the two disagree. Both docs now say so.
 
-  Negative start offsets are covered by the same guarantee and now say so. A consumer
-  stack passes a negative `from` through to this library as its own "from the beginning"
-  sentinel, and was told at its own layer that this works incidentally. It does not: a
-  negative start is below the oldest surviving record like any other, which is the case
-  the contract already covers. Pinned on both reader paths alongside 0, 1 and 2.
+  Negative start offsets are covered by the same guarantee and now say so. This came up
+  while a consumer weighed making a negative `from` a documented "from the beginning"
+  sentinel in its own API: their client already forwards the value unvalidated, so on an
+  embedded path it reaches this library, and the question was whether it then works by
+  contract or by accident. By contract — a negative start is below the oldest surviving
+  record like any other, which is the case already covered. Pinned on both reader paths
+  alongside 0, 1 and 2.
 
   `From` also separates which callers need that comparison, and the API already draws
   the line: "everything you still have" is expressed by NOT calling `From` at all, which
