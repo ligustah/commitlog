@@ -43,10 +43,8 @@ type readSpec struct {
 // An offset BELOW the oldest surviving record is served from the oldest
 // survivor rather than refused. This is a guarantee, not an accident: it is
 // what lets a reader outlive retention and compaction. The offsets it asked
-// for are gone, the next surviving records are the right answer, and both
-// reader constructions reach that answer through the same branch —
-// findSegmentContains reports contains=false for an offset below the segment's
-// base, which is read as "start at the beginning of this segment".
+// for are gone and the next surviving records are the right answer. Both a
+// committed and an uncommitted reader behave this way.
 //
 // The cost is that the read STARTS LATER THAN ASKED and says nothing about it.
 // A caller for whom the gap matters — one tracking a replica's position, or
