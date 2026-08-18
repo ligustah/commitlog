@@ -174,6 +174,35 @@ func TestCloseDiscardingAfterCloseLeavesTheCheckpoint(t *testing.T) {
 	require.Equal(t, int64(2), reopened.HighWatermark())
 }
 
+// TestIsClosedIsTrueAfterEveryShutdown pins a doc claim rather than a defence.
+// CommitLog.IsClosed used to say "whether Close has run", which was already
+// loose about Delete and became loose about CloseDiscarding too; the corrected
+// doc names all three, so it needs a test for the same reason the v0.93.2
+// emptiness fix did — a doc naming specific behaviour invites an obvious
+// cleanup that would make it false again.
+//
+// IsDeleted is asserted alongside because the two docs refer to each other:
+// IsClosed says it does not distinguish, IsDeleted says it separates the last.
+func TestIsClosedIsTrueAfterEveryShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		shut    func(l *commitLog) error
+		deleted bool
+	}{
+		{"Close", func(l *commitLog) error { return l.Close() }, false},
+		{"CloseDiscarding", func(l *commitLog) error { return l.CloseDiscarding() }, false},
+		{"Delete", func(l *commitLog) error { return l.Delete() }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := discardableLog(t, tempDir(t))
+			require.False(t, l.IsClosed(), "a live log")
+			require.NoError(t, tc.shut(l))
+			require.True(t, l.IsClosed())
+			require.Equal(t, tc.deleted, l.IsDeleted())
+		})
+	}
+}
+
 // TestCloseDiscardingReleasesTheDirectory: the claim outlives the segments and
 // is given back last on every close path. A CloseDiscarding that forgot the
 // release would leave the name unopenable for the life of the process, which on

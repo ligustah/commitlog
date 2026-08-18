@@ -2343,7 +2343,8 @@ func (l *commitLog) IsDeleted() bool {
 	return l.deleted
 }
 
-// IsClosed returns true if the commit log was closed.
+// IsClosed reports whether this handle has been shut. See CommitLog.IsClosed
+// for which methods make it true; restating that here is how a copy sheds it.
 func (l *commitLog) IsClosed() bool {
 	select {
 	case <-l.closed:

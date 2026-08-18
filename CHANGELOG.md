@@ -5,6 +5,34 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.95.1 — 2026-08-18
+
+One documentation fix, found by re-reading the doc next to the method v0.95.0 had
+just added. No code change.
+
+### Fixed
+
+- **`CommitLog.IsClosed` said "whether `Close` has run against this log", and three
+  methods make it true.** `Delete` has always closed as part of deleting — `IsDeleted`'s
+  own doc says so, one line below — and `CloseDiscarding` now closes as part of
+  discarding, so the sentence named one of three. That is the failure mode this
+  changelog has recorded repeatedly under a different name: a claim quantified over a
+  set, written while looking at one member. It is the more dangerous half of the pair
+  here, because a caller checking `IsClosed()` to decide whether a handle is still usable
+  gets the right answer and the wrong reason, and only finds out when they reason from
+  the doc about which method ran.
+
+  The corrected doc names all three and says what it does NOT distinguish, which is the
+  part a caller needs: `IsDeleted` separates `Delete`, and nothing separates `Close` from
+  `CloseDiscarding`, because that difference is on disk rather than in the handle. Pinned
+  by a test, for the same reason v0.93.2's emptiness fix was — a doc that names specific
+  behaviour invites a tidy-up that makes it false again. Measured before it was written:
+  all three yield `IsClosed()` true, and only `Delete` yields `IsDeleted()` true.
+
+  The concrete method's own doc was a lossy copy of the interface's and now points at it
+  instead of restating it, which is the same correction v0.93.2 made to `reader.go`'s
+  `NewReader`.
+
 ## v0.95.0 — 2026-08-18
 
 One method: `CloseDiscarding()` on `CommitLog`, and the sentinel it makes reachable. A

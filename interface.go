@@ -802,7 +802,10 @@ type CommitLog interface {
 	// directory is being removed outright.
 	CloseDiscarding() error
 
-	// IsClosed reports whether Close has run against this log.
+	// IsClosed reports whether this handle has been shut — true after Close,
+	// CloseDiscarding or Delete, which share the step that does it. It does not
+	// say which: IsDeleted separates the last, and the difference between the
+	// first two is on disk rather than in the handle.
 	IsClosed() bool
 
 	// IsDeleted reports whether Delete has run against this log. Distinct from
