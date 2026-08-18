@@ -5,7 +5,22 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.94.0 — 2026-08-18
+
+A Windows performance change and three documentation fixes. No API change, no format
+change; non-Windows builds are untouched.
+
+The performance change is the one worth reading. Three `Close` variants on the index
+exist so a caller can say whether the bytes need to reach stable storage — and on
+Windows they were nearly indistinguishable, because the fsync that dominated teardown
+was not the one they choose between. It belonged to the mapping dependency, which called
+`FlushFileBuffers` on every unmap regardless. This release takes the mapping, and the
+flags now decide whether an fsync happens at all: the teardown a real shutdown performs
+goes from 2.32ms per index to 24.8µs.
+
+Getting there took overturning something this repo had already written down as settled.
+v0.93.x documented the 1.81x that narrowing our own flush could reach, and called the
+rest "not reachable from this side of the dependency". It was about sixty lines away.
 
 ### Fixed
 
@@ -99,6 +114,20 @@ library from that fork onward.
   4.55ms to 2.19ms — the second fsync was half of it. A consumer reported a 9m43s
   `Coordinator.Close` with `FlushFileBuffers` in the stack, on a shutdown closing hundreds
   of segments.
+
+  **Confirmed downstream against this commit, not just on the bench.** durable_streams
+  re-ran the teardown that reported the 9m43s close: marginal cost per index 2.32ms →
+  **38.6µs**, and in the syscall trace `unmapFile` went from 953.3ms (88.5% of teardown)
+  to 2.19ms (2.06%), dropping out of the top ten. Their whole curve flattens — 796
+  indexes now close faster than 438 did before — and the 583s extrapolates to ~10s. Their
+  38.6µs against the 24.8µs here is whole-teardown marginal cost against the index arm
+  alone.
+
+  Worth stating because it is the next thing anyone will hit: **the bottleneck has moved
+  to fixed per-close cost**, which no longer amortises across segments. In their trace
+  `checkpointHW` is now the largest single item at 43.7ms (41.2%) and `PutSidecar` 16.0ms
+  (15.1%). Both are this library's, both are per-close rather than per-index, and neither
+  is addressed here.
 
   gommap needs its address-to-handle registry because its `Sync` flushes with the handle
   `CreateFileMapping` returned. Nothing here does: this package already flushed through
