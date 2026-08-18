@@ -59,7 +59,10 @@ type cachedIndex struct {
 
 func (ci *cachedIndex) close() {
 	if ci.idx != nil {
-		_ = ci.idx.Close()
+		// Discarding: the file is removed on the next line, and a cached index is
+		// a read-only download of an object the store still holds — there is
+		// nothing dirty to flush even in principle.
+		_ = ci.idx.CloseDiscarding()
 	}
 	_ = os.Remove(ci.path)
 }
@@ -283,7 +286,8 @@ func (c *RemoteIndexCache) fetch(store SegmentStore, objectKey string, baseOffse
 		return nil, errors.Wrap(err, "open cached index")
 	}
 	if _, err := idx.InitializePosition(); err != nil {
-		idx.Close()
+		// Discarding: same as above, and this download never became usable.
+		idx.CloseDiscarding()
 		os.Remove(path)
 		return nil, errors.Wrap(err, "initialize cached index")
 	}

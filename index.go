@@ -458,6 +458,14 @@ func (idx *index) CloseFlushed() error {
 //
 // What it still does is release the mapping and the handle, which is not
 // optional: a mapped index cannot be unlinked on Windows at all.
+//
+// Which caps what this can save on Windows, and the cap is worth stating
+// because the paragraph above reads like the fsync goes away entirely. It does
+// not: gommap's unmap calls FlushFileBuffers itself, unconditionally, before it
+// releases anything (see gommapMu). So this drops ONE of the two fsyncs a
+// durable Close pays, not both. Measured by BenchmarkIndexTeardownParts on the
+// real close path: 4.55ms durable against 2.52ms here, a 1.81x. The remaining
+// 2.52ms is the dependency's and is not reachable from this file.
 func (idx *index) CloseDiscarding() error {
 	return idx.closeIndex(false, false)
 }

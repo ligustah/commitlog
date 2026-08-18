@@ -548,7 +548,11 @@ func (s *segment) attachOffloadedLocked(store SegmentStore, tier string,
 	var localIndex string
 	if meta.IndexKey != "" && cache != nil {
 		localIndex = s.Index.Name()
-		errs = append(errs, errors.Wrap(s.Index.Close(), "close local index"))
+		// Discarding: the file is unlinked a few lines below, and the index it
+		// describes now lives in the store under meta.IndexKey. Pushing these
+		// bytes to stable storage microseconds before removing them is work with
+		// no reader.
+		errs = append(errs, errors.Wrap(s.Index.CloseDiscarding(), "close local index"))
 	}
 	if err := os.Remove(localLog); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, errors.Wrap(err, "remove local log"))
@@ -2683,7 +2687,11 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 	// from the index and needs the new blockMode, blocks and position to read it
 	// the way the rewrite wrote it.
 	if localIndex {
-		if err := s.Index.Close(); err != nil {
+		// Discarding: the rename below overwrites this file with the rewritten
+		// index, so its bytes have no future. The rewritten index beside it keeps
+		// the durable Close deliberately — THAT one is being published by the
+		// rename, and nothing rebuilds a short index on a sealed segment.
+		if err := s.Index.CloseDiscarding(); err != nil {
 			return errors.Wrap(err, "close stale local index")
 		}
 		if err := fresh.Index.Close(); err != nil {
@@ -2753,7 +2761,9 @@ func (s *segment) retireIntoJoin(joined *segment) []pendingReclaim {
 	// weight rather than a hazard.
 	if s.Index != nil {
 		name := s.Index.Name()
-		if err := s.Index.Close(); err != nil {
+		// Discarding for the reason just given: it is dead weight, and the next
+		// line removes it.
+		if err := s.Index.CloseDiscarding(); err != nil {
 			slog.Warn("commitlog: a joined-away segment's local index would not close",
 				slog.Int64("base_offset", s.BaseOffset), slog.String("err", err.Error()))
 		} else if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
