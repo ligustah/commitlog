@@ -5,6 +5,34 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.95.2 — 2026-08-18
+
+A documentation fix. No library code changed.
+
+### Fixed
+
+- **The README's only code block did not compile against the API it documents.** It
+  called `log.NewReader(0, false)`; the reader became option-based in **v0.38.0**
+  (`a641572`), and the call is now `log.NewReader()` with the defaults the interface
+  documents — committed records, from the oldest surviving one, terminating at the end
+  of the data. The bad line stood through **116 releases**, in the first code anyone
+  copies.
+
+  What makes this worth an entry is that the repo already had the defence. `8db03a3`
+  turned the README snippet into `Example` in `example_test.go` precisely so a signature
+  change could not go unnoticed — and it worked exactly as designed: `a641572` broke the
+  build, the executed copy was updated, and the suite went green. The check covers the
+  executed copy. It cannot cover the TRANSCRIPTION of it, and a second copy that nothing
+  compares against is free to drift the moment the first one moves. The copy nobody checks is the one that lies, which
+  this changelog has recorded before for duplicated rules and duplicated guards.
+
+  So the fix is two-sided. The snippet is corrected, and the README now says which copy
+  is the checked one and to believe that one — because the alternative, keeping them
+  identical by discipline, is the arrangement that just failed. The example was also
+  simplified to make the two literally the same call: it passed `From(0)` and `Follow()`,
+  both redundant, since it reads exactly the records it appended and so never reaches the
+  end it was following past.
+
 ## v0.95.1 — 2026-08-18
 
 A documentation fix and a test fix. No library code changed, and nothing about the

@@ -43,7 +43,11 @@ func Example() {
 	// replicating elsewhere decides when a record counts as durable.
 	log.SetHighWatermark(offsets[len(offsets)-1])
 
-	r, err := log.NewReader(commitlog.From(0), commitlog.Follow()) // committed reader, from the start
+	// No options is the documented default: COMMITTED records, from the oldest
+	// surviving one, terminating at the end of the data. From(0) and Follow()
+	// were both redundant here -- this reads exactly the records it appended,
+	// so it never reaches the end and never needed following.
+	r, err := log.NewReader()
 	if err != nil {
 		panic(err)
 	}

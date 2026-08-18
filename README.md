@@ -61,9 +61,14 @@ log, err := commitlog.New(commitlog.Options{
 offsets, err := log.Append([]*commitlog.Message{{Key: k, Value: v}})
 log.SetHighWatermark(offsets[len(offsets)-1])
 
-r, err := log.NewReader(0, false) // committed reader from the start
-msg, _, _, _, err := r.ReadMessage(ctx, hdrBuf)
+r, err := log.NewReader() // committed, from the oldest surviving record
+msg, offset, _, _, err := r.ReadMessage(ctx, make([]byte, commitlog.HeaderBufferLen))
 ```
+
+This is an excerpt of `Example` in [example_test.go](example_test.go), which is
+the copy that is compiled and output-checked. Read that one when the two
+disagree: this snippet went stale once already, when the reader became
+option-based and only the executed copy was updated.
 
 The [package documentation](https://pkg.go.dev/github.com/ligustah/commitlog)
 covers the full surface; [CHANGELOG.md](CHANGELOG.md) records the format
