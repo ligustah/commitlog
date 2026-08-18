@@ -46,7 +46,9 @@ the log removed); substantially extended since — see
   log never writes and its directory scans skip — so neither side has to know
   what the other calls its files.
 - Zero-allocation metadata scans, buffered sequential readers, on-demand
-  full-durability barrier (`SyncAll`), leader-epoch tracking.
+  full-durability barrier (`SyncAll`), leader-epoch tracking, and a
+  non-durable close for directories that are about to be thrown away
+  (`CloseDiscarding`, which then refuses to reopen them).
 
 ## Use
 

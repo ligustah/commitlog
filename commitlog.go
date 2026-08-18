@@ -236,6 +236,26 @@ var ErrBlockFormat = errors.New("unsupported block format version")
 // sentinel for damage is ErrSegmentUnreadable.
 var ErrInvalidOptions = errors.New("commitlog: invalid options")
 
+// ErrLogDiscarded means this directory was closed with CloseDiscarding, which
+// gave up the high watermark instead of checkpointing it. New refuses the
+// directory rather than opening whatever is left in it.
+//
+// The remedy is a different directory. Nothing here is repairable and nothing
+// is retryable: the segments were closed without their indexes being flushed or
+// shrunk, and the checkpoint saying how far the log was committed was
+// deliberately not written. Recovery could rebuild SOMETHING from those bytes,
+// and that is the problem — it would be a log the caller has already declared
+// disposable, resumed from a high watermark belonging to an earlier close.
+// Handing that back silently is the failure CloseDiscarding exists to prevent,
+// and it is not hypothetical: durable_streams reuses one t.TempDir() across
+// subtests, so the reopen is their ordinary path rather than a mistake.
+//
+// Distinct from ErrSegmentUnreadable deliberately, and at the consumer's
+// request. "You discarded this" and "this is damaged" ask different things of a
+// caller, and answering the first with the second files a deliberate act in the
+// bucket reserved for lost data.
+var ErrLogDiscarded = errors.New("commitlog: log was closed with CloseDiscarding and cannot be reopened")
+
 const (
 	logFileSuffix   = ".log"
 	indexFileSuffix = ".index"
@@ -245,6 +265,14 @@ const (
 	// log may replace or sweep away as its own unfinished work.
 	tmpSuffix  = ".tmp"
 	hwFileName = "replication-offset-checkpoint"
+	// hwDiscardedMarker replaces the offset in hwFileName when CloseDiscarding
+	// runs, so the next New over this directory refuses instead of resuming
+	// from whatever the last checkpoint happened to say. Deliberately not a
+	// number, so the open path's ParseInt cannot mistake it for one; and
+	// matched WHOLE, so a torn write leaves a prefix that is neither this
+	// marker nor an integer and lands on the generic parse error — the honest
+	// answer for a file that says nothing intelligible.
+	hwDiscardedMarker = "discarded"
 	// maxSyncWindow caps how long a flush leader waits for others to join it.
 	// The window tracks the last flush's duration, so a single pathological
 	// fsync would otherwise park every later commit behind its outlier.
@@ -1019,6 +1047,12 @@ func (l *commitLog) open() error {
 			b, err := ReadFileWithRetry(filepath.Join(l.Path, file.Name()))
 			if err != nil {
 				return errors.Wrap(err, "read high watermark file failed")
+			}
+			// Checked before the parse, because this is a state the log
+			// put there on purpose rather than a file that failed to say a
+			// number. See ErrLogDiscarded.
+			if string(b) == hwDiscardedMarker {
+				return errors.Wrap(ErrLogDiscarded, l.Path)
 			}
 			hw, err := strconv.ParseInt(string(b), 10, 64)
 			if err != nil {
@@ -2161,6 +2195,91 @@ func (l *commitLog) Close() error {
 	// window would be exactly the two-writer state the lock exists to prevent.
 	err := l.closeSegments()
 	return stderrors.Join(err, l.dirLock.release())
+}
+
+// CloseDiscarding closes the log without making any of it durable, and poisons
+// the directory so that opening it again fails with ErrLogDiscarded.
+//
+// It is for a caller who is about to throw the directory away — a test fixture,
+// a scratch log — and whose cost is dominated by the fsyncs of an orderly
+// close. It stops the background loops and closes every segment exactly as
+// Close does, but skips the high-watermark checkpoint (which fsyncs the active
+// segment before writing) and closes each segment's index discarding rather
+// than flushing it. What survives on disk is whatever the OS had already
+// written.
+//
+// A METHOD rather than an Option, and close-time rather than construction-time,
+// for reasons the two consumers who asked for it supplied between them. A
+// construction flag would make EVERY close of that log skip the checkpoint,
+// including the intermediate ones — so a fixture that closes and reopens its
+// log mid-test would silently resume from a stale high watermark, which is the
+// v0.93.1 trap with a config knob attached. And a config struct cannot call a
+// method, so "unreachable from production configuration" holds for free rather
+// than by review.
+//
+// Delete remains the right call for a log whose directory is being removed
+// outright: it skips the same checkpoint AND removes the files, and leaves no
+// marker because there is nothing left to mark. CloseDiscarding is for the case
+// where the directory outlives the log — most often because something else owns
+// it, like a t.TempDir() that will be swept at the end of the run.
+func (l *commitLog) CloseDiscarding() error {
+	// Same order as Close: loops joined without l.mu (see stopBackgroundLoops),
+	// then segments under it, then the directory claim last so no window exists
+	// where this process has let go of the directory but still holds a file
+	// open in it.
+	l.stopBackgroundLoops()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	err := l.discardSegments()
+	return stderrors.Join(err, l.dirLock.release())
+}
+
+// discardSegments closes every segment non-durably and marks the directory
+// discarded. The caller must hold l.mu. Idempotent, like closeSegments.
+func (l *commitLog) discardSegments() error {
+	if l.segmentsClosed {
+		return nil
+	}
+	// The marker goes down FIRST, and its failure does not stop the close. Two
+	// separate reasons, both taken from closeSegments' own history. Closing the
+	// segments is the part nothing else will do, so nothing best-effort may
+	// abort it. And the marker is the only thing standing between a discarded
+	// directory and a silent reopen — so if the segments are going to be closed
+	// non-durably either way, the refusal is worth writing before the state it
+	// describes exists, not after.
+	markErr := l.markDiscarded()
+	var errs []error
+	for _, segment := range l.segments {
+		// closeDiscarding wants the segment lock held, as close() does; Close()
+		// is the variant that takes it for you and there is no discarding twin.
+		segment.Lock()
+		err := segment.closeDiscarding()
+		segment.Unlock()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	l.segmentsClosed = true
+	return stderrors.Join(append(errs, markErr)...)
+}
+
+// markDiscarded writes hwDiscardedMarker over the high-watermark file.
+//
+// A plain os.WriteFile, where checkpointHW writes through a temp file, a rename
+// and an fsync budget. That asymmetry is the point rather than an oversight:
+// durability is precisely what this close is giving up, and spending an atomic
+// write to record that fact would leave one fsync-bearing operation on a path
+// whose reason to exist is having none. O_TRUNC makes the degradation safe — a
+// torn write leaves a short prefix, which is neither the marker nor a number,
+// so the reopen still refuses, just through the parse error rather than the
+// sentinel.
+func (l *commitLog) markDiscarded() error {
+	file := filepath.Join(l.Path, hwFileName)
+	if err := os.WriteFile(file, []byte(hwDiscardedMarker), 0o666); err != nil {
+		return errors.Wrap(err, "failed to mark log discarded")
+	}
+	return nil
 }
 
 // Delete closes the log and removes all data associated with it from the

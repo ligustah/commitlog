@@ -154,6 +154,11 @@ package commitlog
 //     error. A grouped bullet asserts that the group shares a remedy; that is
 //     right for ErrSegmentClosed/ErrSegmentReplaced, which are one condition
 //     under two names, and it was wrong here.
+//   - ErrLogDiscarded — somebody called CloseDiscarding on this directory, so
+//     what is on disk was never made durable and the log refuses to guess what
+//     it holds. Use a different path. The third member of the family above and
+//     the one with the least left: closed reopens, deleted is gone, discarded
+//     is still THERE and must not be opened.
 //   - ErrCommitLogReadonly — not a failure at all. It is the end of a readonly
 //     log, in the way io.EOF is the end of a file.
 //   - ErrSegmentNotFound — the log holds nothing at or after that offset, which
@@ -786,6 +791,16 @@ type CommitLog interface {
 	// Close closes each log segment file and stops the background goroutine
 	// checkpointing the high watermark to disk.
 	Close() error
+
+	// CloseDiscarding closes the log without making any of it durable, and
+	// poisons the directory so a later New over the same path fails with
+	// ErrLogDiscarded rather than resuming from a stale high watermark.
+	//
+	// For a caller about to throw the directory away — a test fixture, a
+	// scratch log — whose cost is dominated by an orderly close's fsyncs. Use
+	// Close for a log whose contents matter, and Delete for one whose
+	// directory is being removed outright.
+	CloseDiscarding() error
 
 	// IsClosed reports whether Close has run against this log.
 	IsClosed() bool

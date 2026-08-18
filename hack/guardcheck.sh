@@ -1734,7 +1734,42 @@ run_guard "a live log directory is claimed" commitlog.go   '	lock, err := lockLo
 # A lock that outlived its log would make every clean shutdown leave a directory
 # nothing could reopen until the process exited. The neutralization keeps the
 # Join so err stays used, and drops only the release.
-run_guard "closing gives the directory back" commitlog.go   '	return stderrors.Join(err, l.dirLock.release())' '	return stderrors.Join(err, error(nil))'   '^TestClosingALogReleasesItsDirectory$'
+#
+# The anchor carries the line ABOVE it because CloseDiscarding ends the same
+# way, and a one-line anchor matching two places makes guardcheck skip rather
+# than check. Its sibling below is the same defence on the other close.
+run_guard "closing gives the directory back" commitlog.go   $'\terr := l.closeSegments()\n\treturn stderrors.Join(err, l.dirLock.release())' $'\terr := l.closeSegments()\n\treturn stderrors.Join(err, error(nil))'   '^TestClosingALogReleasesItsDirectory$'
+
+# The same defence on CloseDiscarding, and it needs its own guard because it is
+# the one close where losing the release is INVISIBLE to the obvious test: a
+# reopen of a discarded directory refuses either way, once for the marker and
+# once for the lock. Its test removes the marker first so only the lock can
+# refuse.
+run_guard "a discarding close gives the directory back" commitlog.go   $'\terr := l.discardSegments()\n\treturn stderrors.Join(err, l.dirLock.release())' $'\terr := l.discardSegments()\n\treturn stderrors.Join(err, error(nil))'   '^TestCloseDiscardingReleasesTheDirectory$'
+
+# The refusal itself. Without it New parses the marker, fails, and reports a
+# damaged high watermark -- which is the SAME outcome for a caller who reads
+# only the exit status, and the opposite one for the caller who asked for this:
+# durable_streams reuses a t.TempDir() across subtests and needs to tell "you
+# discarded this" from "this is broken".
+run_guard "a discarded log refuses the reopen" commitlog.go   '			if string(b) == hwDiscardedMarker {' '			if false {'   '^TestCloseDiscardingRefusesTheReopen$'
+
+# WHOLE, not a prefix. markDiscarded writes without a rename, so a crash
+# mid-write leaves a prefix of the marker on disk; a prefix match would report
+# that as a completed discard. The neutralization is the tidier-looking spelling
+# somebody would reach for, not a strawman.
+run_guard "the discard marker is matched whole" commitlog.go   '			if string(b) == hwDiscardedMarker {' '			if strings.HasPrefix(string(b), hwDiscardedMarker[:4]) {'   '^TestDiscardedIsDistinctFromDamage$/^torn_marker$'
+
+# The half of CloseDiscarding that makes it fast rather than merely refusing.
+# Every other assertion about this method is about the marker and passes with
+# the segments closed durably, which is where all the fsyncs are.
+run_guard "a discarding close discards the index" commitlog.go   '		err := segment.closeDiscarding()' '		err := segment.close()'   '^TestCloseDiscardingLeavesTheIndexUnshrunk$'
+
+# The marker write sits INSIDE the segmentsClosed guard, so a log already closed
+# durably keeps the checkpoint Close wrote. The neutralization hoists it out,
+# which is a one-line change that poisons a directory whose contents were made
+# durable on purpose.
+run_guard "a discard after a durable close changes nothing" commitlog.go   $'func (l *commitLog) discardSegments() error {\n\tif l.segmentsClosed {\n\t\treturn nil\n\t}' $'func (l *commitLog) discardSegments() error {\n\t_ = l.markDiscarded()\n\tif l.segmentsClosed {\n\t\treturn nil\n\t}'   '^TestCloseDiscardingAfterCloseLeavesTheCheckpoint$'
 
 # Windows only, and the asymmetry is the whole reason it is a separate guard:
 # the lock handle is opened with no sharing, so a Delete that has not released
