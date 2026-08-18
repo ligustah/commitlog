@@ -422,6 +422,12 @@ jobs:
         # CompactionRecovery 3000 -> 2500 (its 10.7min worst case was already over
         # half). The two Offload targets are 7.4 and 6.7min and stay as they are.
         #
+        # CorruptFrameHeader joined on 2026-08-18. It was excluded when it was
+        # committed SKIPPED, documenting a gap that readOne's offset bounds check
+        # and the header CRC have since closed; the skip went and the exclusion
+        # did not. Sized by the same rule from a measured 47/sec: 1/13th is
+        # 3.6/sec, and 2000 execs is a 9.3min worst case.
+        #
         # This trades smoke-test volume for a job that reports rather than times
         # out; volume belongs in the nightly `Fuzz (deep)` run, which is bounded by
         # wall clock and has no tag waiting on it.
@@ -432,6 +438,7 @@ jobs:
           - {target: FuzzCorruptedRecordIsNeverServedSilently, execs: 3000}
           - {target: FuzzCorruptDigestNeverChangesTheAnswer, execs: 8000}
           - {target: FuzzTornLogServesOnlyAPrefix, execs: 10000}
+          - {target: FuzzCorruptFrameHeaderIsNeverServedAsTruth, execs: 2000}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
