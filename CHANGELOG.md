@@ -27,6 +27,14 @@ library from that fork onward.
   not help, because retention moves the floor under a live reader; the clamp only narrows
   the window in which the two disagree. Both docs now say so.
 
+  `From` also separates which callers need that comparison, which is a consumer's
+  distinction rather than ours: one passing a deliberately low offset to mean
+  "everything you still have" EXPECTS to be repositioned, and reporting it every time
+  produces a line nobody reads — the same invisibility that let this sit unnoticed. The
+  caller that needs to know is the one that passed a resume point it believed was still
+  present, because being moved forward there means records it intended to process were
+  dropped.
+
   Pinned by a test across both reader constructions and three below-oldest start offsets,
   because `From(0)` alone cannot distinguish an explicit request from an unset one.
   `TestNewScanReaderClampsBelowOldest` already pinned the same guarantee for the scan

@@ -53,6 +53,13 @@ type readSpec struct {
 // the request to OldestOffset() first does not avoid this: retention moves the
 // floor under a live reader, so the clamp only narrows the window in which the
 // two can disagree.
+//
+// Which callers those are is worth separating. One that passes a deliberately
+// low offset to mean "everything you still have" EXPECTS to be repositioned,
+// and reporting it every time produces a line nobody reads. The caller that
+// needs to know is the one that passed a RESUME POINT it believed was still
+// present — there, being moved forward means records it intended to process
+// were dropped, and that is the whole signal.
 func From(offset int64) ReadOption {
 	return func(s *readSpec) { s.offset, s.offsetSet = offset, true }
 }
