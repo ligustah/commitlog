@@ -19,9 +19,10 @@ A documentation fix. No code changed.
   just-promoted node can hold a record and report a watermark below it — an
   uncommitted reader bounded by it cannot see the records `Uncommitted()` was
   passed to reach, and returns no error to say so. `HighWatermark`'s own doc has
-  covered this since v0.90.x and a consumer hit it again anyway, which is the
-  argument for the repetition: the accessor's doc is not open when the reader is
-  constructed. Second downstream sighting.
+  covered this since v0.93.2 — written on 2026-08-17, one day earlier — and a
+  consumer hit it anyway, which is the argument for the repetition rather than
+  against it: the accessor's doc is not open when the reader is constructed.
+  Second downstream sighting.
 
 ## v0.95.4 — 2026-08-18
 
