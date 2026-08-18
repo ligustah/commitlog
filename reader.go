@@ -115,23 +115,22 @@ type Reader struct {
 	prefix *prefixSource
 }
 
-// NewReader opens a Reader over the log. With no options it reads every
-// committed record from the oldest surviving one and returns io.EOF at the end
-// of the data; see From, Until, Follow, Uncommitted, KeyPrefix, SkipSuperseded
-// and IncludeControl.
+// NewReader opens a Reader over the log.
 //
-// Two defaults are the opposite of the constructors this replaces, on purpose.
-// It TERMINATES rather than follows, because a reader that unexpectedly ends is
-// noticed by its caller while one that unexpectedly follows blocks forever. And
-// it reads COMMITTED data only, which was previously an unlabelled bool at the
-// call site.
+// See CommitLog.NewReader for the contract: the defaults and why they are the
+// safe direction, the termination rules, and what a start offset BELOW the
+// oldest surviving record does. That last one is the reason this doc no longer
+// restates the others — it used to carry a partial copy that covered the
+// unset-offset default and silently dropped the below-oldest guarantee, and a
+// consumer reading this copy concluded the guarantee did not exist.
 //
-// One combination is refused: KeyPrefix with Uncommitted, and neither Until nor
-// IncludeControl. Reading past the commit boundary yields records whose
-// transactions are undecided, and the markers that say which committed are
-// keyless — the filter drops them. The caller would hold records it cannot
-// classify, silently. Bound the read at your commit boundary with Until, or take
-// the markers with IncludeControl.
+// What stays here is the one refused combination, which the interface doc
+// defers to this one for. KeyPrefix with Uncommitted, and neither Until nor
+// IncludeControl, is refused. Reading past the commit boundary yields records
+// whose transactions are undecided, and the markers that say which committed
+// are keyless — the filter drops them. The caller would hold records it cannot
+// classify, silently. Bound the read at your commit boundary with Until, or
+// take the markers with IncludeControl.
 func (l *commitLog) NewReader(opts ...ReadOption) (*Reader, error) {
 	spec, err := l.resolve(opts)
 	if err != nil {

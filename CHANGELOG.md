@@ -27,6 +27,20 @@ library from that fork onward.
   Pinned by a test across both reader constructions and three below-oldest start offsets,
   because `From(0)` alone cannot distinguish an explicit request from an unset one.
 
+- The concrete `NewReader` method carried a partial copy of the interface's documentation
+  — it restated the defaults and the one refused option combination, and dropped the
+  termination contract, which is where the below-oldest guarantee lived. That copy is how
+  a second consumer reached the opposite conclusion from the first: told the guarantee was
+  documented, they went to `reader.go`, found only "with no options it reads from the
+  oldest surviving one", and correctly observed that a *default* is not a promise about a
+  *passed* offset. They were reading a lossy transcription of a doc that did promise it.
+
+  The method doc now points at `CommitLog.NewReader` instead of restating it, keeping only
+  the refusal rationale that the interface doc explicitly defers to it for. Three careful
+  readers failed to find this guarantee in three different places; the count is the
+  finding, not any one of the misses.
+
+
 ## v0.93.2 — 2026-08-17
 
 Documentation and one test — no behaviour change, no API change, no format change.
