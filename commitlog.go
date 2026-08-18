@@ -655,6 +655,23 @@ type Options struct {
 // two of them then corrupt. See lockLogDir for what the two writers do to each
 // other and why nothing after open time can detect it.
 //
+// ABSENCE IS NOT AN ERROR. New creates the log when opts.Path holds none, so
+// there is no "open only if it exists" mode and no error distinguishing the two
+// cases. That is the right default for a log whose first open is its creation,
+// and it means a caller who opens the WRONG path gets an empty log rather than
+// a refusal — reads from it return io.EOF, which is the same answer a genuinely
+// empty log gives. Nothing later in the log's life can recover the distinction.
+//
+// So a caller whose path is derived from anything that can be wrong — a
+// partition it may not own, a name from a request, a routing table that may be
+// stale — must decide whether the log should exist BEFORE calling New, and must
+// treat "no records" as a possible symptom of that mistake rather than as data.
+// commitlog cannot make that judgment: it does not know which of its callers is
+// entitled to a given directory, and a path that is wrong is indistinguishable
+// here from a path that is simply new. Observed downstream as reads served from
+// a log the node had no claim to, which stayed silent because an empty log is a
+// valid one.
+//
 // For a caller that opens on a retry loop, the rule about New's errors is: a
 // commitlog sentinel means the condition is PERMANENT and retrying is wasted,
 // with ErrLogLocked as the sole exception — another process holding the

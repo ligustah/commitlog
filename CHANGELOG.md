@@ -5,6 +5,27 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.95.7 — 2026-08-18
+
+A documentation fix. No code changed.
+
+### Documentation
+
+- **`New` never said it CREATES the log when the path holds none.** Its doc
+  covered the exclusive directory claim and the retryability of its errors, and
+  left the most consequential thing about opening implicit: absence is not an
+  error, there is no open-only-if-it-exists mode, and no error separates the two
+  cases. A caller who opens the wrong path therefore gets an empty log, whose
+  reads return `io.EOF` — the same answer a genuinely empty log gives, with
+  nothing later able to recover the distinction.
+
+  Written from a downstream incident where reads were served from a log the node
+  had no claim to, and stayed silent across five soaks precisely because an empty
+  log is a valid one. commitlog cannot make that call itself: it does not know
+  which caller is entitled to a directory, and a wrong path is indistinguishable
+  here from a new one. The doc now says so, and says the decision has to be made
+  before `New` is called.
+
 ## v0.95.6 — 2026-08-18
 
 A documentation fix. No code changed.
