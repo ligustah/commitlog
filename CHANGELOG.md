@@ -5,7 +5,11 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
-## Unreleased
+## v0.95.3 — 2026-08-18
+
+A test-quality change and two documentation fixes. No exported API changed and no
+behaviour changed: `classifyReadError` and its result type are unexported, and the
+addition to `CommitLog.Close` is a comment.
 
 ### Documentation
 
