@@ -221,6 +221,18 @@ type CommitLog interface {
 	// visible, so a caller that cares about the commit boundary bounds the read
 	// itself with Until.
 	//
+	// The obvious value to pass to Until is HighWatermark(), and that is the
+	// one place this bites. It is a snapshot, not a limit — on a replica it
+	// moves whenever replication delivers a record the replica did not have
+	// yet, so a just-promoted node can hold a record and report a watermark
+	// that still sits below it. An uncommitted reader bounded by that value
+	// therefore cannot see the very records Uncommitted() was passed to reach,
+	// reports no error, and looks like a clean scan of an empty range. Record
+	// the offset the scan actually reached and resume from it; do not treat
+	// "I stopped at the high watermark" as "I read everything". HighWatermark's
+	// own documentation states this at length — it is repeated here because the
+	// decision is made at this call, not at that one. Seen downstream twice.
+	//
 	// Termination contract, both halves of which callers must handle:
 	//   - a read ends when ReadMessage returns an error satisfying
 	//     errors.Is(err, io.EOF). The EOF is WRAPPED, so compare with errors.Is

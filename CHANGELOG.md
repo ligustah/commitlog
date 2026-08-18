@@ -5,6 +5,24 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.95.5 — 2026-08-18
+
+A documentation fix. No code changed.
+
+### Documentation
+
+- **The warning about bounding a scan with `HighWatermark()` now sits where the
+  decision is made.** `NewReader`'s contract told a caller who cares about the
+  commit boundary to bound the read with `Until`, and said nothing about which
+  value to use; the obvious one is `HighWatermark()`, which is exactly the trap.
+  On a replica that value moves whenever replication delivers a record, so a
+  just-promoted node can hold a record and report a watermark below it — an
+  uncommitted reader bounded by it cannot see the records `Uncommitted()` was
+  passed to reach, and returns no error to say so. `HighWatermark`'s own doc has
+  covered this since v0.90.x and a consumer hit it again anyway, which is the
+  argument for the repetition: the accessor's doc is not open when the reader is
+  constructed. Second downstream sighting.
+
 ## v0.95.4 — 2026-08-18
 
 A documentation fix. No code changed.
