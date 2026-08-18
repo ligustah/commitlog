@@ -231,7 +231,14 @@ type CommitLog interface {
 	// the offset the scan actually reached and resume from it; do not treat
 	// "I stopped at the high watermark" as "I read everything". HighWatermark's
 	// own documentation states this at length — it is repeated here because the
-	// decision is made at this call, not at that one. Seen downstream twice.
+	// decision is made at this call, not at that one.
+	//
+	// It recurs because each half is locally reasonable. Reading uncommitted is
+	// correct when you need records the watermark has not reached; bounding a
+	// scan is correct when you do not want to read forever. Nothing at either
+	// call site suggests the other one is there, and the combination fails
+	// silently — so the shape survives review and is found only by noticing
+	// that a scan which reported success covered nothing.
 	//
 	// Termination contract, both halves of which callers must handle:
 	//   - a read ends when ReadMessage returns an error satisfying

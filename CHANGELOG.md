@@ -5,6 +5,22 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.95.6 — 2026-08-18
+
+A documentation fix. No code changed.
+
+### Documentation
+
+- **A sighting count in a doc goes stale, and this one managed it in ninety
+  minutes.** v0.95.5 closed its `NewReader` warning with "Seen downstream
+  twice"; the consumer that prompted it then audited the same path and found
+  three more sites, one of them the identical watermark bound. The number was
+  never the point and nothing checks it, so it is gone. In its place is the
+  reason the shape recurs: reading uncommitted and bounding a scan are each
+  correct in isolation, neither call site hints the other exists, and the
+  combination fails silently — which is why it survives review and shows up
+  only as a scan that reported success having covered nothing.
+
 ## v0.95.5 — 2026-08-18
 
 A documentation fix. No code changed.
