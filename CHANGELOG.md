@@ -7,6 +7,30 @@ library from that fork onward.
 
 ## Unreleased
 
+### Documentation
+
+- **What a failed `Close` means was stated where callers read it.** The behaviour
+  was already right and already tested — the directory claim is given back on
+  every path out of `Close`, `CloseDiscarding` and `Delete`, including the one
+  where a segment refuses to close, and `TestAFailedCheckpointStillClosesTheLog`
+  `AndReleasesTheDirectory` and `TestAFailedDeleteStillReleasesTheDirectory` have
+  pinned exactly that for releases. But the guarantee lived in implementation
+  comments in `commitlog.go`, and a caller reads `interface.go`.
+
+  That gap is the one v0.91.2 recorded from the other side: a consumer shipped
+  defensive clamps against behaviour this library already promised, on a doc they
+  had no reason to open. A caller who cannot tell "the close reported a problem"
+  from "the log is still held" has to guess, and the safe-looking guess — retry,
+  or treat the handle as leaked — is wrong in both directions here. `Close` and
+  `CloseDiscarding` are idempotent, so a retry is safe and does nothing; `Delete`
+  is terminal and has no retry at all, so a caller whose `Delete` failed should
+  drop the log, which is what keeps the NAME openable rather than held for the
+  life of the process.
+
+  Prompted by a question one layer up, where the same contract was undocumented
+  for a transaction commit — reading a consumer's debug thread as an audit of
+  this library's own docs, which is the third time that has paid.
+
 ### Testing
 
 - **The reader's error classification is now falsifiable, and is no longer two

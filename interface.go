@@ -790,6 +790,24 @@ type CommitLog interface {
 
 	// Close closes each log segment file and stops the background goroutine
 	// checkpointing the high watermark to disk.
+	//
+	// What a returned error MEANS, because callers have to decide something and
+	// the answer is not the obvious one: it reports what did not shut down
+	// cleanly, and never that the log is still held. The directory claim is
+	// given back on every path out of Close, CloseDiscarding and Delete,
+	// including the one where a segment refused to close — a transient sharing
+	// violation on one segment must not leave a directory that no other process
+	// can open. So a caller that logs the error and moves on is correct.
+	//
+	// Close and CloseDiscarding are IDEMPOTENT: the segments close once and the
+	// claim is released once, so a second call returns nil and does nothing.
+	// Retrying a failed close is therefore safe and pointless — it cannot
+	// recover what failed, because that work is not attempted again.
+	//
+	// Delete is terminal and has no retry at all: once the caller drops the
+	// handle nothing can call it again. A caller whose Delete failed should drop
+	// the log anyway, which leaves the NAME openable rather than held for the
+	// life of the process.
 	Close() error
 
 	// CloseDiscarding closes the log without making any of it durable, and
