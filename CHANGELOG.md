@@ -65,6 +65,24 @@ library from that fork onward.
   readers failed to find this guarantee in three different places; the count is the
   finding, not any one of the misses.
 
+- `IncludeControl` explained why a COMMITTED read needs no transactional markers by
+  asserting that "below the commit boundary compaction has already removed aborted
+  records and stripped the survivors" — unconditionally, with nothing said about when
+  that is true. It holds only for the prefix a compaction pass actually converged, which
+  is precisely what `CleanWithSpec` returns as its verified floor, and that floor
+  explicitly excludes the active segment and age-protected ones "whose records keep their
+  headers and abort markers even below the LSO". On a log with `Compact` disabled no
+  segment is ever stripped, so aborted records sit below the commit boundary for the life
+  of the log.
+
+  The doc now states the condition, and states the thing it never did: **nothing on the
+  read path filters an aborted DATA record at any time.** The only `AttrControl` test on
+  the read side drops keyless markers from a `KeyPrefix` read. Being below the commit
+  boundary BOUNDS a read; it does not clean it. Found by a consumer's forensics, which
+  turned up a superseded producer epoch sitting at a higher offset than a newer one and
+  asked whether a raw read can return records an abort discarded. It can — and a doc
+  that says otherwise is how a caller stops filtering.
+
 ### Changed
 
 - Five call sites closed an index with a full durable `Close` — fsync plus shrink —

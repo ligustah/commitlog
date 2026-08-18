@@ -145,9 +145,26 @@ func SkipSuperseded() ReadOption {
 // KeyPrefix read. They are keyless, so a key filter would otherwise drop them.
 //
 // Needed only by a caller that reads UNCOMMITTED and does its own
-// transactional filtering: markers are what decide undecided records, and
-// below the commit boundary compaction has already removed aborted records and
-// stripped the survivors, so there is nothing left for a marker to say.
+// transactional filtering: markers are what decide undecided records.
+//
+// The reason a COMMITTED read usually needs no markers is weaker than this doc
+// used to claim. It said that below the commit boundary "compaction has already
+// removed aborted records and stripped the survivors, so there is nothing left
+// for a marker to say", with no condition on it. That holds only for the prefix
+// a compaction pass actually converged — the consecutive run of sealed segments
+// it rewrote or digest-proved, which is exactly what CleanWithSpec returns as
+// its verified floor. It does NOT hold for the active segment, nor for an
+// age-protected one, whose records keep their headers and abort markers even
+// below the LSO; and on a log with Compact disabled nothing is ever stripped,
+// so aborted records sit below the commit boundary for the life of the log.
+//
+// Nothing on the read path filters an aborted DATA record, ever. The only
+// AttrControl test on this side drops keyless markers from a KeyPrefix read.
+// Being below the commit boundary BOUNDS a read; it does not clean it. So a
+// caller that must not observe aborted records either reads the markers and
+// filters, or knows its log is compacted past the offsets it is reading —
+// asked by a consumer whose forensics found a superseded producer epoch
+// sitting above a newer one, which an aborted record still in place explains.
 func IncludeControl() ReadOption {
 	return func(s *readSpec) { s.includeControl = true }
 }
