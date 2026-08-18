@@ -2865,3 +2865,39 @@ is missing is usually a seam rather than intensity.** And the diagnostic that
 finds these without waiting for a bug: take a test whose assertion is "no error
 appeared", delete each arm on the path in turn, and count how many the test
 notices. One is the common answer.
+
+**Verdict: the class is closed. No further action.** — *2026-08-18. The six
+reader/maintenance race paths were walked one arm at a time; the state of each is
+below, so the next reader does not repeat the walk.*
+
+| arm | falsifiable by |
+|---|---|
+| replication fetch: re-resolve across a swap | guard "a fetch re-resolves across a swap" |
+| replication fetch: a swap is not damage | guard "a swap is not replica damage" (the seam above) |
+| reader construction: log deleted / log closed | two guards, one per arm, on `TestBuildingAReaderOnADeadLog…` |
+| timestamp lookup: resolve through `current()` | guard "a timestamp lookup resolves the segment" |
+| timestamp lookup: the RETRY | nothing, deliberately — the window is a few instructions wide and a guard red one time in tens is worse than none. Argued at the registration. |
+| reader read loop: deleted / closed / readonly / swapped | four guards on `TestAFailedReadIsClassifiedByWhatItMeans`, added 2026-08-18 |
+
+Two corrections to how the class was described above, both worth keeping because
+they are the reusable half.
+
+**The unit is the ARM, not the test file.** Reading this entry as "these six
+concurrency tests need error-identity assertions" scores it by grepping test
+files for `ErrorIs` — and that answers a different question. An arm is falsifiable
+if *some* test notices its deletion, and for four of the six the noticing test is
+a fast dedicated one that shares no file with the race test. `hack/guardcheck.sh`
+is the registry of exactly this property; a grep of `_test.go` is not.
+
+**Two of the flagged files were never in the biting subset**, and this entry
+already says why — "for most that is correct; an append-concurrency test really
+is asking *does this survive*". `segment_store_publish_race_test.go` covers a
+Windows retry around `os.Open`/`Size`, and `live_concurrent_readers_test.go`
+exists to evidence that concurrent readers are supported. Neither has a
+classification underneath. A count of six paths is not a list of six defects.
+
+The last one open was not the one this entry pointed at. `readOne` and
+`ReadMessageMetadata` held two *copies* of the same five-arm block, already
+drifted — one carrying the explanation, the other a comment naming itself a copy
+and filed one arm above the one it describes. `classifyReadError` is that decision
+alone: five subtests, 0.07s, and deleting any arm reddens exactly one of them.
