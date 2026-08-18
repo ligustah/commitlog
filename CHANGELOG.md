@@ -27,13 +27,14 @@ library from that fork onward.
   not help, because retention moves the floor under a live reader; the clamp only narrows
   the window in which the two disagree. Both docs now say so.
 
-  `From` also separates which callers need that comparison, which is a consumer's
-  distinction rather than ours: one passing a deliberately low offset to mean
-  "everything you still have" EXPECTS to be repositioned, and reporting it every time
-  produces a line nobody reads — the same invisibility that let this sit unnoticed. The
-  caller that needs to know is the one that passed a resume point it believed was still
-  present, because being moved forward there means records it intended to process were
-  dropped.
+  `From` also separates which callers need that comparison, and the API already draws
+  the line: "everything you still have" is expressed by NOT calling `From` at all, which
+  resolves to the oldest survivor by definition and cannot be late. Every explicit
+  `From` is a NAMED offset — `From(0)` included — so being repositioned away from one
+  means records the caller named were already gone. Gate on which of the two was asked
+  for, not on how small the number is: a report that fires on ordinary full reads is
+  tuned out before the one that matters arrives, which is the same invisibility that let
+  this sit unnoticed in the first place.
 
   Pinned by a test across both reader constructions and three below-oldest start offsets,
   because `From(0)` alone cannot distinguish an explicit request from an unset one.

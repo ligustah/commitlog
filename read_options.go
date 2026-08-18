@@ -54,12 +54,15 @@ type readSpec struct {
 // floor under a live reader, so the clamp only narrows the window in which the
 // two can disagree.
 //
-// Which callers those are is worth separating. One that passes a deliberately
-// low offset to mean "everything you still have" EXPECTS to be repositioned,
-// and reporting it every time produces a line nobody reads. The caller that
-// needs to know is the one that passed a RESUME POINT it believed was still
-// present — there, being moved forward means records it intended to process
-// were dropped, and that is the whole signal.
+// Which callers those are is worth separating, and this API already draws the
+// line. "Everything you still have" is expressed by NOT calling From: the read
+// then resolves to the oldest surviving record by definition, and cannot be
+// late. Every explicit From is a NAMED offset — including From(0) — so being
+// repositioned away from one means records the caller named were already gone.
+// That is the signal, and a caller that only wanted the whole log never
+// generates it. Gate on which of the two the caller asked for, not on how small
+// the number is; a report that fires on ordinary full reads is tuned out before
+// the one that matters arrives.
 func From(offset int64) ReadOption {
 	return func(s *readSpec) { s.offset, s.offsetSet = offset, true }
 }
