@@ -5,6 +5,64 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.95.0 — 2026-08-18
+
+One method: `CloseDiscarding()` on `CommitLog`, and the sentinel it makes reachable. A
+minor bump rather than a patch because the method sits on the exported interface, so an
+external type implementing `CommitLog` no longer satisfies it. Nothing else changes —
+`Close` and `Delete` behave exactly as before, and there is no format change.
+
+### Added
+
+- **`CommitLog.CloseDiscarding()`** — closes the log without making any of it durable, and
+  poisons the directory so that a later `New` over the same path fails with the new
+  `ErrLogDiscarded` rather than resuming from a stale high watermark. It skips the
+  high-watermark checkpoint (which fsyncs the active segment before writing it) and closes
+  each segment's index discarding rather than flushing and shrinking it. What survives on
+  disk is whatever the OS had already written.
+
+  It exists for a caller about to throw the directory away, which after v0.94.0 is where
+  the remaining teardown cost lives. With the mapping dependency's unconditional
+  `FlushFileBuffers` gone, a close is now dominated by the fsyncs an orderly close asks
+  for on purpose: measured at 20.5–31.0ms per fixture against ~15.9ms to open one. Two
+  downstream consumers independently reported that as their next bottleneck, one of them
+  with 268 fixture sites in a 647-second suite.
+
+  Measured on the same fixtures in the same process, over three runs: `CloseDiscarding`
+  costs **0.19–0.47ms**, against **7.4–23.2ms** for `Close`. Both ends of that range are
+  worth reading. The wide one is `Close`, and the width is the fsync's rather than the
+  method's — the same fixture varies threefold run to run, which is why the ratio is
+  quoted as 24x–77x rather than as a figure. The narrow one is the point: what is left
+  after the fsyncs is small enough that a fixture's teardown stops being visible next to
+  its open.
+
+  **A method, and close-time, rather than an `Options` field.** Both consumers asked for a
+  construction flag first. A flag would apply to every close of that log, including the
+  intermediate ones, so a fixture that closes and reopens mid-test would silently resume
+  from a stale high watermark — the v0.93.1 trap with a configuration knob attached.
+  Close-time also satisfies one consumer's real constraint for free rather than by review:
+  a config struct cannot call a method, so no path leads from production configuration to
+  this behaviour.
+
+  `Delete` remains the right call for a directory being removed outright — it skips the
+  same checkpoint and removes the files, and leaves no marker because nothing is left to
+  mark. `CloseDiscarding` is for the case where the directory outlives the log, most often
+  because a test framework owns it.
+
+- **`ErrLogDiscarded`** — what `New` returns for a directory closed that way. Distinct from
+  the damage sentinels deliberately, and at a consumer's request: "you discarded this" and
+  "this is broken" ask different things of a caller, and answering the first with the
+  second files a deliberate act in the bucket reserved for lost data. Refusing rather than
+  merely documenting the hazard was their ask too, and it was the right one — their helpers
+  reuse a single `t.TempDir()` across subtests, so the stale-HW reopen is their ordinary
+  path, and documented alone it fails silently for exactly the caller who meets it most.
+
+  The marker is matched WHOLE. `markDiscarded` writes it with a plain `os.WriteFile` — no
+  temp file, no rename, no fsync, since durability is precisely what this close gives up —
+  so a crash mid-write can leave a prefix of it on disk. A prefix is neither the marker nor
+  an offset, so it lands on the ordinary parse failure, which is the honest answer for a
+  file that says nothing intelligible.
+
 ## v0.94.0 — 2026-08-18
 
 A Windows performance change and three documentation fixes. No API change, no format
