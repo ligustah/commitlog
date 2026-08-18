@@ -17,7 +17,7 @@ library from that fork onward.
   pinned exactly that for releases. But the guarantee lived in implementation
   comments in `commitlog.go`, and a caller reads `interface.go`.
 
-  That gap is the one v0.91.2 recorded from the other side: a consumer shipped
+  That gap is the one v0.94.0 recorded from the other side: a consumer shipped
   defensive clamps against behaviour this library already promised, on a doc they
   had no reason to open. A caller who cannot tell "the close reported a problem"
   from "the log is still held" has to guess, and the safe-looking guess — retry,
