@@ -12,10 +12,12 @@ alongside it for anything touching compression, mmap, or atomic file writes — 
 in the data path, not the periphery, so a subtle behaviour change is a corruption bug rather than a
 compile error.
 
-`gommap` deserves particular care: it has no internal locking around its package-level handle registry, and
-this repo works around that with `gommapMu` in index.go. Read its changes rather than trusting the version
-number. (It was pinned to a commit when this task was written; it moved to the v0.0.3 release the same day,
-which is the newest tag that exists.)
+`gommap` is now used on non-Windows builds only, for `Map` and `UnsafeUnmap` — both thin syscall wrappers
+touching no package state. Windows maps and unmaps through `CreateFileMapping`/`MapViewOfFile` in
+`index_mmap_windows.go`, because gommap's unmap fsyncs unconditionally and that dominated teardown. So the
+surface exposed to drift here is small, but read its changes rather than trusting the version number: the
+type `index.mmap` is declared with is still gommap's. (It was pinned to a commit when this task was
+written; it moved to the v0.0.3 release the same day, which is the newest tag that exists.)
 
 Where the advisories actually land here: every dependency is a leaf this repo pins directly, and
 `govulncheck` reports have so far been entirely STDLIB — fixed by the toolchain, not by go.mod. CI builds

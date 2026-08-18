@@ -111,9 +111,11 @@ func TestIndexShrinkWhileMmappedWindows(t *testing.T) {
 
 // TestIndexExpandWindows verifies that the index can grow past its initial
 // allocation (triggering re-mmap) and that entries before and after the
-// expansion boundary are all readable.  The unmapping of the old mmap must
-// happen before the new mmap is created to prevent address-collision in
-// gommap's handleMap on Windows.
+// expansion boundary are all readable. It was written for an address-collision
+// bug in gommap's package-level handle map, which this package no longer
+// depends on — see the ordering comment in writeAt. What it pins is the
+// property that outlived the cause: an expansion swaps the mapping underneath
+// live entries, and entries on both sides of the boundary must survive it.
 func TestIndexExpandWindows(t *testing.T) {
 	dir := tempDir(t)
 

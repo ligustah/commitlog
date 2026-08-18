@@ -85,6 +85,37 @@ library from that fork onward.
 
 ### Changed
 
+- **Windows maps and unmaps the index itself** rather than through gommap. gommap's
+  Windows `unmap` calls `FlushFileBuffers` as its first statement, unconditionally and
+  under a package-level lock, before it releases anything — so every index teardown in
+  the process paid a device-cache fsync and took it in series with every other one,
+  whichever `Close` variant the caller picked. That is why `Close`, `CloseFlushed` and
+  `CloseDiscarding` were nearly indistinguishable on this platform: the fsync they choose
+  between was not the one that cost.
+
+  `CreateFileMapping`/`MapViewOfFile` on the way in, `UnmapViewOfFile` on the way out.
+  Measured by the in-repo `BenchmarkIndexTeardownParts` (windows, 30x, same box as the
+  entry above): the discarding teardown goes from 2.52ms to 3.2µs, and a durable one from
+  4.55ms to 2.19ms — the second fsync was half of it. A consumer reported a 9m43s
+  `Coordinator.Close` with `FlushFileBuffers` in the stack, on a shutdown closing hundreds
+  of segments.
+
+  gommap needs its address-to-handle registry because its `Sync` flushes with the handle
+  `CreateFileMapping` returned. Nothing here does: this package already flushed through
+  `FlushViewOfFile` plus the `*os.File`, because passing a section handle to
+  `FlushFileBuffers` is what produced "The handle is invalid". A view keeps its own
+  reference to the section and the two may be released in either order, so the handle is
+  closed as soon as the view exists — no registry, no lock, and an unmap that is one
+  syscall and no flush.
+
+  Two things fall out of that. The package-level mutex serializing every map and unmap is
+  gone: it existed for gommap's unlocked Windows registry, and off Windows gommap touches
+  no package state at all, so it never had a job there. And the rule that an expansion
+  must unmap before it remaps was written against gommap's address-keyed registry, which
+  no longer exists; the order stays for its own reason, and the comment says which.
+
+  Non-Windows builds are unchanged and still map through gommap.
+
 - Five call sites closed an index with a full durable `Close` — fsync plus shrink —
   immediately before deleting or overwriting the file it had just flushed. `Index.Close`
   has had a `CloseDiscarding` variant for exactly this since the case was first found,
@@ -105,11 +136,12 @@ library from that fork onward.
   become a bug. **`swapReplacement` closes two indexes and only one was converted**: the
   stale one is overwritten by the rename, while the rewritten one beside it is being
   PUBLISHED by that rename, and nothing rebuilds a short index on a sealed segment. The
-  unit is the close, not the call site. And on Windows this drops **one of two** fsyncs
-  rather than both — gommap's unmap calls `FlushFileBuffers` itself, unconditionally,
-  before it releases the mapping, so no flag reaches zero from this side of the
-  dependency. `CloseDiscarding`'s doc now states that cap, having previously read as
-  though the fsync went away entirely.
+  unit is the close, not the call site. And on Windows this dropped **one of two** fsyncs
+  rather than both, because gommap's unmap called `FlushFileBuffers` itself before
+  releasing the mapping — a cap no flag on this side of the dependency could reach. That
+  second fsync is gone as of the mapping change below, and the numbers here are the ones
+  measured before it: the same benchmark now reads 2.19ms durable against 3.2µs
+  discarding.
 
   Scope it honestly: these are the offload, compaction and cache paths. An ordinary log
   close of sealed segments already took the `CloseFlushed` arm, because sealing clears

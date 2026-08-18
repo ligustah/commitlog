@@ -16,56 +16,13 @@ import (
 
 var errIndexCorrupt = errors.New("corrupt index file")
 
-// gommapMu serializes every gommap.Map / UnsafeUnmap call in this package.
-//
-// The registry it protects is on the MAP side, and only on Windows:
-// gommap_windows.go's MapRegion writes the package-level mmapAttrs map under no
-// lock at all, so two concurrent gommap.Map calls — an append rolling a segment
-// while the cleaner maps a rewrite target — are a concurrent map write, which
-// the runtime turns into a process-wide throw. The two registries UnsafeUnmap
-// mutates (handleMap, fileHandleMap) do have gommap's own handleLock around
-// them, and gommap.Map off Windows touches no package state whatsoever. An
-// earlier version of this comment said the registry had "no internal locking"
-// flatly, which is true of exactly one of the three maps and made the unmap
-// side look like it was resting on this mutex. It is not.
-//
-// Holding this mutex across UnsafeUnmap is therefore redundant, and it is kept
-// anyway because dropping it buys almost nothing. gommap's unmap calls flush()
-// first, unconditionally, and flush holds handleLock across
-// syscall.FlushFileBuffers — so every unmap in the process is already
-// serialized on an fsync one level down, whatever this mutex does. Measured on
-// 64 dirty 64KB mappings: 3.8ms per unmap with 64-way concurrency and this
-// mutex removed entirely, against 28µs for the same teardown issued through
-// MapViewOfFile / UnmapViewOfFile directly with no flush.
-//
-// That 136x is why Close, CloseFlushed and CloseDiscarding are
-// indistinguishable on Windows: the fsync they choose between is not the one
-// that costs, and the one that costs is not reachable from this side of the
-// dependency. A consumer tearing down hundreds of small indexes sees them
-// strictly in series. Fixing it means owning the mapping here rather than
-// narrowing anything in this file.
-//
-// Mapping operations are rare (segment create, seal, expand, close), so the
-// mutex itself costs nothing beyond what gommap already costs.
-var gommapMu sync.Mutex
-
 // mmapFile is a var so a test can make the mapping FAIL. What it guards
 // against — an index left claiming more than its mapping covers — is reachable
 // only when the OS refuses to map, and unlike the Windows truncate refusal
 // there is no way to provoke that for real without a mapping large enough to
 // be a hazard of its own. A test that cannot reach the failure path is a test
 // that proves the recovery works by never running it.
-var mmapFile = func(f *os.File) (gommap.MMap, error) {
-	gommapMu.Lock()
-	defer gommapMu.Unlock()
-	return gommap.Map(f.Fd(), gommap.PROT_READ|gommap.PROT_WRITE, gommap.MAP_SHARED)
-}
-
-func unmapFile(m gommap.MMap) error {
-	gommapMu.Lock()
-	defer gommapMu.Unlock()
-	return m.UnsafeUnmap()
-}
+var mmapFile = mapIndexFile
 
 const (
 	offsetWidth    = 4
@@ -349,12 +306,18 @@ func (idx *index) writeAt(p []byte, offset int64) error {
 			return errors.Wrap(err, "failed to expand index file")
 		}
 
-		// Unmap the old index BEFORE creating the new mapping. On Windows,
-		// gommap stores mmap handles keyed by virtual address in a package-level
-		// map. If MapViewOfFile returns the same address as the old mapping,
-		// the new handle overwrites the old one; the subsequent UnsafeUnmap of
-		// the old slice then closes the new handle, leaving idx.mmap with an
-		// invalid entry and causing ERROR_INVALID_HANDLE on the next Sync.
+		// Unmap the old index BEFORE creating the new mapping. This order was
+		// forced by a defect it no longer has to avoid: gommap kept mmap
+		// handles in a package-level map keyed by virtual address, so a new
+		// mapping landing on the address the old one had just vacated
+		// overwrote the old entry, and unmapping the old slice then closed the
+		// NEW handle — ERROR_INVALID_HANDLE on the next Sync. Windows owns its
+		// mappings here now (index_mmap_windows.go) and keeps no such registry,
+		// so address reuse is no longer a hazard on either platform.
+		//
+		// The order stays because idx.mmap names one live view and releasing
+		// before acquiring is what keeps that true; mapping first would need a
+		// temporary and would hold two views of the same file for no gain.
 		//
 		// Exclude a concurrent flush for the swap: it holds the mapping shared
 		// without mu, so this is the one teardown mu alone does not cover.
@@ -459,13 +422,13 @@ func (idx *index) CloseFlushed() error {
 // What it still does is release the mapping and the handle, which is not
 // optional: a mapped index cannot be unlinked on Windows at all.
 //
-// Which caps what this can save on Windows, and the cap is worth stating
-// because the paragraph above reads like the fsync goes away entirely. It does
-// not: gommap's unmap calls FlushFileBuffers itself, unconditionally, before it
-// releases anything (see gommapMu). So this drops ONE of the two fsyncs a
-// durable Close pays, not both. Measured by BenchmarkIndexTeardownParts on the
-// real close path: 4.55ms durable against 2.52ms here, a 1.81x. The remaining
-// 2.52ms is the dependency's and is not reachable from this file.
+// On Windows this used to save far less than it reads like, because the unmap
+// underneath carried a second FlushFileBuffers of its own that no flag here
+// could reach: 4.55ms durable against 2.52ms discarding, a 1.81x. That fsync
+// belonged to gommap, and Windows no longer goes through gommap
+// (index_mmap_windows.go). Measured the same way afterwards, on the same box:
+// 2.19ms durable against 3.2µs here. The flag now decides whether an fsync
+// happens at all, which is what it always claimed to.
 func (idx *index) CloseDiscarding() error {
 	return idx.closeIndex(false, false)
 }

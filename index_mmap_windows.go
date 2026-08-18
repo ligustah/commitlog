@@ -5,6 +5,7 @@ package commitlog
 import (
 	stderrors "errors"
 	"os"
+	"reflect"
 	"syscall"
 	"unsafe"
 
@@ -130,6 +131,102 @@ func (idx *index) restoreMapping(remap bool) error {
 	idx.mapMu.Unlock()
 	if err != nil {
 		return errors.Wrap(err, "restoring the mapping after a failed shrink")
+	}
+	return nil
+}
+
+// mapIndexFile maps the whole of f read-write, without going through gommap.
+//
+// gommap's unmap on this platform calls FlushFileBuffers itself,
+// unconditionally, under a package-level lock, before it releases anything. So
+// every index teardown in the process paid an fsync and took it in series with
+// every other one, whichever Close variant the caller chose — which is why
+// Close, CloseFlushed and CloseDiscarding were indistinguishable here: the
+// fsync they choose between is not the one that cost. Measured on 64 dirty
+// 64KB mappings: 3.28ms per unmap through gommap against 26µs issued
+// directly. durable_streams reported a 9m43s Coordinator.Close with
+// FlushFileBuffers in the stack.
+//
+// gommap keeps an address-to-handle registry because its Sync flushes with the
+// handle CreateFileMapping returned. Nothing here needs that handle again:
+// syncMmap flushes through FlushViewOfFile and the *os.File, for the separate
+// reason given above. A view holds its own reference to the section object and
+// UnmapViewOfFile and CloseHandle may be called in either order, so the handle
+// is closed as soon as the view exists. That leaves no registry to protect, no
+// lock to take, and an unmap that is one syscall and no flush.
+//
+// A zero-length file cannot be mapped, here as under gommap: CreateFileMapping
+// refuses a maximum size of zero on an empty file. Callers already treat "no
+// mapping" as the coherent state for an empty index rather than mapping one.
+func mapIndexFile(f *os.File) (gommap.MMap, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, errors.Wrap(err, "sizing the index file to map")
+	}
+	size := fi.Size()
+	h, err := syscall.CreateFileMapping(syscall.Handle(f.Fd()), nil,
+		syscall.PAGE_READWRITE, uint32(size>>32), uint32(size&0xFFFFFFFF), nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "CreateFileMapping failed")
+	}
+	addr, mapErr := syscall.MapViewOfFile(h, syscall.FILE_MAP_WRITE, 0, 0, uintptr(size))
+	// Released whether or not the view was created: the view owns the section
+	// from here, and if there is no view there is nothing to own. gommap leaks
+	// the handle on the failure path.
+	closeErr := syscall.CloseHandle(h)
+	if mapErr != nil {
+		return nil, errors.Wrap(mapErr, "MapViewOfFile failed")
+	}
+	if closeErr != nil {
+		// The view is usable and only its section handle is unaccounted for, so
+		// this throws away something that works. It is still the right way
+		// round: closing a handle we just opened fails only if this file's idea
+		// of what it owns is already wrong, and a caller told the mapping
+		// failed retries or reports it, where one handed a mapping we cannot
+		// account for carries it for the life of the process. Every caller of
+		// mmapFile already has a failure path — that is what the seam in
+		// index.go exists to exercise.
+		return nil, errors.Wrap(stderrors.Join(closeErr, syscall.UnmapViewOfFile(addr)),
+			"CloseHandle failed after mapping")
+	}
+	return viewSlice(addr, size), nil
+}
+
+// viewSlice describes the mapped view as a slice.
+//
+// The two linters this repo runs disagree about how to spell this, and there
+// is no third spelling. go vet's unsafeptr check rejects
+// unsafe.Slice((*byte)(unsafe.Pointer(addr)), n) because addr is a bare
+// uintptr, and it runs on the Windows job, where this file compiles.
+// staticcheck rejects reflect.SliceHeader as deprecated, and today it does not
+// see this file at all because it runs on Linux — so the directive below is
+// what stops that from being an accident that a later GOOS=windows lint run
+// turns into a failure.
+//
+// What the deprecation is about does not apply here: a Data field written as a
+// uintptr is invisible to the garbage collector, which matters when it points
+// into the Go heap and nothing else keeps the object alive. This points at a
+// view of a file mapping. The OS keeps it until UnmapViewOfFile, the collector
+// has no claim on it, and gommap constructed its mappings exactly this way.
+func viewSlice(addr uintptr, size int64) gommap.MMap {
+	m := gommap.MMap{}
+	//lint:ignore SA1019 see above: no vet-clean non-deprecated spelling exists.
+	dh := (*reflect.SliceHeader)(unsafe.Pointer(&m))
+	dh.Data = addr
+	dh.Len = int(size)
+	dh.Cap = dh.Len
+	return m
+}
+
+// unmapFile releases a mapping made by mapIndexFile. It does NOT flush: a
+// caller that wants the bytes durable calls Sync first, and one that does not
+// is entitled to skip it — which was not true while gommap owned the unmap.
+func unmapFile(m gommap.MMap) error {
+	if len(m) == 0 {
+		return nil
+	}
+	if err := syscall.UnmapViewOfFile(uintptr(unsafe.Pointer(&m[0]))); err != nil {
+		return errors.Wrap(err, "UnmapViewOfFile failed")
 	}
 	return nil
 }

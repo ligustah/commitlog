@@ -34,3 +34,21 @@ func (idx *index) shrink() error {
 	idx.size = idx.position
 	return nil
 }
+
+// mapIndexFile maps the whole of f read-write.
+//
+// This used to run under a package-level mutex shared with the unmap side. The
+// mutex was there for gommap's Windows internals — a package-level registry
+// written without a lock — and this side of the build never needed it:
+// gommap.MapAt is an fstat, an mmap syscall and a slice header built on a
+// local, and UnsafeUnmap is a bare SYS_MUNMAP. Neither touches package state,
+// so there was nothing for it to serialize. Windows no longer goes through
+// gommap at all (see index_mmap_windows.go), which left the mutex with no
+// justification on either platform.
+func mapIndexFile(f *os.File) (gommap.MMap, error) {
+	return gommap.Map(f.Fd(), gommap.PROT_READ|gommap.PROT_WRITE, gommap.MAP_SHARED)
+}
+
+func unmapFile(m gommap.MMap) error {
+	return m.UnsafeUnmap()
+}

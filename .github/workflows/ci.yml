@@ -36,8 +36,8 @@ concurrency:
 
 jobs:
   # Build, vet, and run the full test suite on every supported platform.
-  # Windows is a first-class target here: the index is memory-mapped through
-  # gommap and has a separate windows implementation (index_mmap_windows.go),
+  # Windows is a first-class target here: the index is memory-mapped, and on
+  # Windows this package maps it itself (index_mmap_windows.go),
   # and the Sync/Close/Shrink paths use FlushFileBuffers + SetEndOfFile — all
   # of which only fail on Windows, so it must be exercised in CI.
   #
@@ -70,7 +70,7 @@ jobs:
         run: go test -count=1 -timeout=30m ./...
 
   # The race detector on Linux, where cgo + gcc are always available. Covers the
-  # concurrent paths: the gommap map/unmap mutex, the process-wide RemoteIndexCache
+  # concurrent paths: the index map/unmap swap on expand, the process-wide RemoteIndexCache
   # LRU, and offload read-through under contention (offload_concurrency_test.go).
   race:
     name: race (ubuntu)
