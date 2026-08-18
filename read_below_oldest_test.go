@@ -17,6 +17,12 @@ import (
 // accident, and was carrying two defensive clamps against it being an accident.
 // Nothing exercised it, so the honest answer was "behaviour, not promise".
 //
+// TestNewScanReaderClampsBelowOldest covers the same guarantee for the scan
+// reader. This one is deliberately not a duplicate of it: that test uses From(0)
+// on the uncommitted path and reads a single record, so it cannot see a
+// committed-path divergence, cannot distinguish an explicit request from an
+// unset one, and cannot see a survivor being skipped after the first.
+//
 // The mechanism is one branch, and both reader constructions carry it:
 // findSegmentContains returns the first segment whose next offset exceeds the
 // requested one, plus contains=false when that segment's base is ABOVE it. Both
