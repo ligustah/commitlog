@@ -62,6 +62,10 @@ func TestDamageInOneSegmentDoesNotKillTheProcess(t *testing.T) {
 				Path:            dir,
 				MaxSegmentBytes: 1024,
 				Compact:         true,
+				// DisableAutoClean: mustKeep above says what each call is not
+				// entitled to remove, and a concurrent at-open pass removes
+				// records under exactly that assertion.
+				DisableAutoClean: true,
 			})
 			defer cleanup()
 			for i := range 200 {

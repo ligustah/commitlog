@@ -403,8 +403,17 @@ func TestReaderIncludeControlReturnsMarkers(t *testing.T) {
 
 func TestSkipSupersededDropsWithinSegmentOnly(t *testing.T) {
 	// Segments large enough to hold many copies of a key.
+	//
+	// DisableAutoClean because this test asserts that a PLAIN read still returns
+	// every copy -- which is exactly what a compaction pass is entitled to make
+	// false. cleanerLoop's first act is cleanAtOpen, in a goroutine, so on a
+	// runner that schedules it late the pass lands mid-append and compacts the
+	// segments this loop has already sealed. It failed on macOS CI reading 166
+	// of 200; delaying that goroutine by 5ms reproduces it locally, and the same
+	// mutation over the whole package names exactly one other test.
 	l, cleanup := setupWithOptions(t, Options{
 		Path: tempDir(t), MaxSegmentBytes: 2000, Compact: true,
+		DisableAutoClean: true,
 	})
 	defer cleanup()
 	app := func(m *Message) int64 {
@@ -447,8 +456,12 @@ func TestSkipSupersededDropsWithinSegmentOnly(t *testing.T) {
 // began, so a resuming reader can return MORE records than one that read the
 // whole segment — never fewer, and never a stale value for a key it reports.
 func TestSkipSupersededResumeReturnsNoFewer(t *testing.T) {
+	// DisableAutoClean for the reason given on the test above: the comparison is
+	// between two reads of one log, and a cleaner pass landing between them
+	// changes what the second one can see.
 	l, cleanup := setupWithOptions(t, Options{
 		Path: tempDir(t), MaxSegmentBytes: 2000, Compact: true,
+		DisableAutoClean: true,
 	})
 	defer cleanup()
 	app := func(m *Message) int64 {
@@ -700,6 +713,10 @@ func denseSegLog(t *testing.T) (*commitLog, func(m *Message) int64) {
 		Path:            tempDir(t),
 		MaxSegmentBytes: 2000,
 		Compact:         true,
+		// Not named by the falsification above, and disabled anyway: every test
+		// on this helper is about read fan-out, so a compaction pass is noise
+		// that can only ever make one of them lie.
+		DisableAutoClean: true,
 	})
 	t.Cleanup(cleanup)
 	app := func(m *Message) int64 {

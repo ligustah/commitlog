@@ -368,6 +368,10 @@ func TestCleanerDeleteLeaderEpochOffsets(t *testing.T) {
 		Path:            tempDir(t),
 		MaxSegmentBytes: 6,
 		MaxLogMessages:  5,
+		// DisableAutoClean for the reason setup() gives: this asserts what
+		// retention removed after the pass IT drives, and the at-open pass is a
+		// goroutine that can land mid-append on a loaded runner.
+		DisableAutoClean: true,
 	})
 	defer l.Close()
 	defer cleanup()

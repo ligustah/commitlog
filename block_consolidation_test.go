@@ -285,6 +285,12 @@ func TestConsolidationOnlyPassForNonCompactedLog(t *testing.T) {
 		MaxSegmentBytes: 256 << 10,
 		Compact:         false, // the daemon's uncompacted view-stream shape
 		Compression:     compress.Zstd,
+		// DisableAutoClean: cleanerLoop's first act is cleanAtOpen, in a
+		// goroutine, so on a loaded runner it lands mid-append and consolidates
+		// blocks this test is about to count. Compact:false does not exempt it
+		// -- the consolidation pass is the delete cleaner's, not compaction's,
+		// which is why a scan for Compact:true fixtures did not name this one.
+		DisableAutoClean: true,
 	}
 	l, cleanup := setupWithOptions(t, opts)
 	defer cleanup()

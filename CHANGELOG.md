@@ -7,8 +7,9 @@ library from that fork onward.
 
 ## v0.95.1 — 2026-08-18
 
-One documentation fix, found by re-reading the doc next to the method v0.95.0 had
-just added. No code change.
+A documentation fix and a test fix. No library code changed, and nothing about the
+behaviour of v0.95.0 is different — both entries are about claims made ABOUT that
+behaviour, one in a doc comment and one in five fixtures.
 
 ### Fixed
 
@@ -32,6 +33,23 @@ just added. No code change.
   The concrete method's own doc was a lossy copy of the interface's and now points at it
   instead of restating it, which is the same correction v0.93.2 made to `reader.go`'s
   `NewReader`.
+
+- **Five test fixtures raced the cleaner, and CI found one of them.** `cleanerLoop`'s
+  first act is `cleanAtOpen`, in a goroutine — so on a runner that schedules that
+  goroutine late, the pass lands in the middle of a test's appends and compacts segments
+  the test has already sealed. `TestSkipSupersededDropsWithinSegmentOnly` read 166 of 200
+  records on macOS. Library behaviour is correct throughout: a compaction pass dropping
+  superseded records is the whole point, and these fixtures were asserting a record count
+  while leaving the pass enabled.
+
+  Worth recording is how the set was closed. A scan for the obvious pattern —
+  `Compact: true` with neither `DisableAutoClean` nor a long `CleanerInterval` — returned
+  36 fixtures, and could not say which of them was actually at risk. Delaying the
+  goroutine and running the package answers that directly: 5ms named two, 25ms named three
+  more, and one of those three sets `Compact: false`, so the grep would never have reached
+  it however carefully the list was read. Verified dry at 25ms. Not probed beyond it —
+  100ms makes the suite exceed its own timeout, which is a limit of the method and is
+  stated rather than left as an implied all-clear.
 
 ## v0.95.0 — 2026-08-18
 
