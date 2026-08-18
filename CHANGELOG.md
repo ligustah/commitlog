@@ -65,6 +65,41 @@ library from that fork onward.
   readers failed to find this guarantee in three different places; the count is the
   finding, not any one of the misses.
 
+### Changed
+
+- Five call sites closed an index with a full durable `Close` — fsync plus shrink —
+  immediately before deleting or overwriting the file it had just flushed. `Index.Close`
+  has had a `CloseDiscarding` variant for exactly this since the case was first found,
+  and until now one of the six such sites used it. The other five now do:
+  `attachOffloadedLocked` and `retireIntoJoin` (both `os.Remove` within a few lines),
+  `swapReplacement` (the rename overwrites the file on the next line), and both
+  `RemoteIndexCache` paths, where a cached index is a read-only download of an object the
+  store still holds and there was never anything dirty to flush.
+
+  Measured on the real close path by the in-repo `BenchmarkIndexTeardownParts` (windows,
+  30x): 4.55ms per index durable against 2.52ms discarding, a 1.81x. The truncate is
+  inside noise; the fsync is the whole saving. The stronger argument is variance rather
+  than the mean — with a neighbour working the disk, syncing cases move to 36–50ms while
+  non-syncing stay near 3ms, because `FlushFileBuffers` flushes the DEVICE cache and so
+  pays for whatever else is dirty on the volume.
+
+  Two boundaries are worth stating, because getting either wrong is how this change would
+  become a bug. **`swapReplacement` closes two indexes and only one was converted**: the
+  stale one is overwritten by the rename, while the rewritten one beside it is being
+  PUBLISHED by that rename, and nothing rebuilds a short index on a sealed segment. The
+  unit is the close, not the call site. And on Windows this drops **one of two** fsyncs
+  rather than both — gommap's unmap calls `FlushFileBuffers` itself, unconditionally,
+  before it releases the mapping, so no flag reaches zero from this side of the
+  dependency. `CloseDiscarding`'s doc now states that cap, having previously read as
+  though the fsync went away entirely.
+
+  Scope it honestly: these are the offload, compaction and cache paths. An ordinary log
+  close of sealed segments already took the `CloseFlushed` arm, because sealing clears
+  `dirtyIndex`. A downstream trace of a 438-segment teardown put `closeIndex` via
+  `CloseFlushed` at 99.12% and via `Close` at 0.88% — unsealed segments are bounded by
+  open STREAM count, not segment count, so this saving scales with streams while a
+  large teardown scales with segments.
+
 
 ## v0.93.2 — 2026-08-17
 
