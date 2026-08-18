@@ -44,7 +44,7 @@ library from that fork onward.
   tuned out before the one that matters arrives, which is the same invisibility that let
   this sit unnoticed in the first place.
 
-  Pinned by a test across both reader constructions and three below-oldest start offsets,
+  Pinned by a test across both reader constructions and four below-oldest start offsets,
   because `From(0)` alone cannot distinguish an explicit request from an unset one.
   `TestNewScanReaderClampsBelowOldest` already pinned the same guarantee for the scan
   reader, and its comment said "the same behaviour as NewReader" without pinning that
