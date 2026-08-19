@@ -5,6 +5,55 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.96.0 — 2026-08-19
+
+A behaviour fix in the committed read path.
+
+### Fixed
+
+- **A high watermark above the log's tail failed every committed reader.**
+  `getHWPos` went looking for a segment holding an offset the log does not have,
+  found none, and `ErrSegmentNotFound` came back from reader construction and
+  from every subsequent read — an error naming a missing segment for what is
+  really a watermark the log cannot honour yet. The caller could not undo it
+  either: `SetHighWatermark` is monotonic and refuses to walk back down, so
+  recovery needed `OverrideHighWatermark` or a reopen.
+
+  This is a state a correct caller reaches. A follower is told what the leader
+  committed before the records arrive. The recovery path already treated it as
+  survivable — it clamps an overshooting checkpoint at open, calling that "the
+  only honest answer" — and this applies the same reasoning at read time, where
+  nothing did. The reader now serves what the log holds and waits for the rest.
+
+  The log's stored watermark is NOT lowered: the caller's claim survives, and the
+  readable bound rises on its own as records arrive.
+
+### Changed
+
+- **`committedReader.hw` was two values sharing a field** (unexported; no API
+  change): the bound this reader may serve, and the watermark the log reports.
+  They are the same number only while the watermark is inside the log. Split into
+  `hw` (readable bound) and `rawHW` (what the log reports). `rawHW` is what
+  `syncHW` hands `waitForHW`, whose own test is `l.hw != hw` — a clamped argument
+  would report a move that had not happened.
+
+### Known limitation
+
+- An over-set watermark parks the reader until the watermark next CHANGES.
+  Appends do not signal watermark waiters, so a follower sitting above its own
+  tail does not track the tail on its own. This turns a hard error into a wait,
+  not into tail-following. Pinned by
+  `TestAnOverSetWatermarkParksAtTheTailAndWakesOnTheNextAdvance`.
+
+### Tests
+
+- `TestACommittedReadReportsALostWatermarkRatherThanCorruption` reached a failed
+  `getHWPos` by pushing the watermark past the log. That route is now legal, so
+  it drives the compaction swap its own comment named as "the route that matters
+  in production" instead — every segment marked left-behind-by-a-pass, which
+  `current()` reports with `ok=false` and `findSegment` skips. Deterministic, and
+  closer to the thing it guards. The contract it asserts is unchanged.
+
 ## v0.95.8 — 2026-08-19
 
 A documentation fix and an unexported rename. No behaviour changed.

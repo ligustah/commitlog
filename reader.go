@@ -594,7 +594,24 @@ type committedReader struct {
 	cl    *commitLog
 	hwSeg *segment
 	hwPos int64
+	// hw is the READABLE bound: min(the watermark the log reports, the last
+	// offset the log actually holds). It is what this reader may serve, what
+	// hwSeg/hwPos locate, and what Read means by "the record I owe next is
+	// hw+1".
+	//
+	// rawHW is the watermark the log reports, unclamped, and is used for one
+	// thing only: the wait. waitForHW compares its argument against l.hw, so
+	// handing it a clamped value would make it see a change that had not
+	// happened and return immediately, forever.
+	//
+	// They are equal in ordinary operation, because a caller sets the watermark
+	// to what it has. They diverge when a caller sets it ABOVE the log's tail --
+	// a follower told what the leader committed before the records arrive. That
+	// used to make getHWPos search for an offset the log does not hold and fail
+	// the whole reader with ErrSegmentNotFound, which named a missing segment
+	// for what was really a watermark the log could not honour yet.
 	hw    int64
+	rawHW int64
 	// noWait ends the read at the high watermark instead of parking for it to
 	// advance. This is what a non-Follow committed reader needs: "committed
 	// data ran out" is an end condition for a bounded pass, not something to
@@ -735,21 +752,40 @@ func (r *committedReader) readLoop(
 // ErrSegmentReplaced, the one error the reader knows how to retry) discarded a
 // frame earlier.
 func (r *committedReader) syncHW(ctx context.Context) ([]*segment, error) {
-	hw := r.cl.HighWatermark()
-	for hw == r.hw {
+	// Both values are re-read each pass, and the snapshot with them: the append
+	// that moved the watermark may have rolled a segment, and a snapshot taken
+	// before the wait cannot hold the one the watermark now lives in. It is also
+	// what lets the loop notice the TAIL moving under a watermark that did not.
+	rawHW := r.cl.HighWatermark()
+	segments := r.cl.segmentsSnapshot()
+	// Still `==`, not `>`. A watermark that moves BACKWARDS -- which is what
+	// OverrideHighWatermark exists to do -- must reposition this reader rather
+	// than park it, and testing for equality is what keeps both directions
+	// waking it.
+	for clampHW(segments, rawHW) == r.hw {
 		if r.noWait {
 			return nil, io.EOF
 		}
-		if err := r.waitForHW(ctx, hw); err != nil {
+		// The RAW watermark, deliberately: waitForHW decides whether to park by
+		// testing `l.hw != hw`, so its argument has to be the same unclamped
+		// value it is compared against. Hand it the clamped bound and, whenever
+		// the two differ, the test is unequal by construction -- it reports a
+		// watermark that has already moved, returns without parking, and this
+		// loop spins.
+		//
+		// Not falsifiable by the tests below, and said here rather than left
+		// implied: they exercise a watermark at or below the tail, where clamped
+		// and raw are the same value and the substitution changes nothing. The
+		// divergent case busy-loops instead of blocking, which from outside the
+		// reader looks exactly like the parking it should be doing.
+		if err := r.waitForHW(ctx, rawHW); err != nil {
 			return nil, err
 		}
-		hw = r.cl.HighWatermark()
+		rawHW = r.cl.HighWatermark()
+		segments = r.cl.segmentsSnapshot()
 	}
-	r.hw = hw
-	// Re-snapshotted AFTER the wait: the append that moved the watermark may have
-	// rolled a segment, and a snapshot taken before it cannot hold the one the
-	// watermark now lives in.
-	segments := r.cl.segmentsSnapshot()
+	r.rawHW = rawHW
+	r.hw = clampHW(segments, rawHW)
 	hwSeg, hwPos, err := getHWPos(segments, r.hw)
 	if err != nil {
 		return nil, err
@@ -788,8 +824,9 @@ func (r *committedReader) waitForHW(ctx context.Context, hw int64) error {
 // watermark instead of parking for it to advance.
 func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader, error) {
 	var (
-		hw       = l.HighWatermark()
+		rawHW    = l.HighWatermark()
 		segments = l.segmentsSnapshot()
+		hw       = clampHW(segments, rawHW)
 	)
 
 	// If offset exceeds HW, wait for the next message. This also covers the
@@ -823,6 +860,7 @@ func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader
 			hwSeg:  nil,
 			hwPos:  -1,
 			hw:     hw,
+			rawHW:  rawHW,
 			noWait: noWait,
 		}, nil
 	}
@@ -857,6 +895,23 @@ func (l *commitLog) newReaderCommitted(offset int64, noWait bool) (contextReader
 		hw:     hw,
 		noWait: noWait,
 	}, nil
+}
+
+// clampHW bounds a watermark by what the log actually holds.
+//
+// The same reasoning the recovery path already uses on an overshooting
+// checkpoint, applied at read time instead of at open: the records are not
+// there, and everything above the real tail is unreadable by construction, so
+// clamping loses a caller nothing it could have used. What it does NOT do is
+// lower the log's stored watermark -- the caller's claim survives, and the
+// bound rises on its own as the records arrive.
+func clampHW(segments []*segment, hw int64) int64 {
+	if n := len(segments); n > 0 {
+		if tail := segments[n-1].NextOffset() - 1; hw > tail {
+			return tail
+		}
+	}
+	return hw
 }
 
 // getHWPos returns the segment holding the high watermark and the byte position
