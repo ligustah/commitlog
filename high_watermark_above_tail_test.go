@@ -19,7 +19,12 @@ import (
 // not honour yet. It was also unrecoverable from the caller's side, because
 // SetHighWatermark is monotonic and refuses to walk back down.
 func TestAWatermarkAboveTheTailBoundsTheReaderRatherThanFailingIt(t *testing.T) {
-	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 1024})
+	// DisableAutoClean throughout this file. Every assertion here is about where
+	// the TAIL is relative to the watermark, and a background pass that rolls or
+	// drops a segment moves the tail underneath them. A sibling test in this
+	// package was written without it, went green locally and on one CI run, and
+	// failed on the next when a pass happened to land mid-test.
+	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 1024, DisableAutoClean: true})
 	defer cleanup()
 
 	appendToLog(t, l, []keyValue{
@@ -57,7 +62,7 @@ func TestAWatermarkAboveTheTailBoundsTheReaderRatherThanFailingIt(t *testing.T) 
 // a value that syncHW also waits on, and waitForHW sees a watermark that has
 // already moved, returns instantly, and the loop spins instead of parking.
 func TestACommittedReaderStillParksAndWakesWhenTheWatermarkAdvances(t *testing.T) {
-	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 1024})
+	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 1024, DisableAutoClean: true})
 	defer cleanup()
 
 	appendToLog(t, l, []keyValue{{[]byte("a"), []byte("1")}}, true)
@@ -106,7 +111,7 @@ func TestACommittedReaderStillParksAndWakesWhenTheWatermarkAdvances(t *testing.T
 // hard ErrSegmentNotFound into a reader that waits, not into one that tracks the
 // tail on its own.
 func TestAnOverSetWatermarkParksAtTheTailAndWakesOnTheNextAdvance(t *testing.T) {
-	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 1024})
+	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 1024, DisableAutoClean: true})
 	defer cleanup()
 
 	appendToLog(t, l, []keyValue{{[]byte("a"), []byte("1")}}, true)
