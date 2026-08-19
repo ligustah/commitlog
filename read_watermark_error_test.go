@@ -31,11 +31,20 @@ import (
 // only end by deadline, and a deadline is precisely what a reader must not turn
 // an error into.
 //
-// The watermark is pushed past the log here because that is the deterministic
-// way to make getHWPos fail. The route that matters in production is the same
-// lookup racing a compaction swap: findSegment resolves, Replace runs, findEntry
-// answers ErrSegmentReplaced — the one error the reader knows how to retry, and
-// the one this swallowed.
+// The fixture is the compaction swap itself, driven rather than raced. Every
+// segment is marked as left behind by a pass in flight, which is the state
+// current() reports with ok=false and findSegment skips — so the lookup finds no
+// segment at all and getHWPos fails, deterministically and by the route that
+// matters in production.
+//
+// It used to push the watermark PAST the log instead, which was the easier way
+// to make findSegment come back empty. That stopped being a failure: a watermark
+// above the tail is a state a correct follower reaches, told what the leader
+// committed before the records arrive, and the reader now clamps to what it
+// holds rather than failing every read on the log. See clampHW. The fixture went
+// with the behaviour it depended on; the contract this test is actually about
+// — a failed lookup must be REPORTED, not swallowed into (n, nil) — did not
+// change, so it is asserted here on the harder fixture.
 func TestACommittedReadReportsALostWatermarkRatherThanCorruption(t *testing.T) {
 	dir := tempDir(t)
 	l, err := New(Options{Name: "hwerr", Path: dir, MaxSegmentBytes: 64 << 20})
@@ -62,10 +71,18 @@ func TestACommittedReadReportsALostWatermarkRatherThanCorruption(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(0), off)
 
-	// Past everything the log holds: getHWPos can no longer find a segment for
-	// it. The reader is entitled to fail — it is not entitled to invent a record
-	// or to wait.
-	cl.SetHighWatermark(500)
+	// Every segment goes out from under the lookup, exactly as a compaction pass
+	// leaves them until it publishes. current() answers ok=false for each, so
+	// findSegment skips them all and hands back nothing.
+	for _, seg := range cl.segmentsSnapshot() {
+		seg.Lock()
+		seg.left = true
+		seg.Unlock()
+	}
+	// And the watermark advances, so the reader re-locates rather than parking on
+	// the one it already holds. It is entitled to fail here — it is not entitled
+	// to invent a record or to wait.
+	cl.SetHighWatermark(2)
 
 	_, _, _, _, err = r.ReadMessage(ctx, buf)
 	require.Error(t, err)
