@@ -7,7 +7,39 @@ library from that fork onward.
 
 ## v0.96.1 — 2026-08-22
 
-Two documentation fixes. No code changed.
+A behaviour fix in the readonly read path, and two documentation fixes.
+
+### Fixed
+
+- **A readonly log parked a committed reader whose watermark sat above the tail,
+  and nothing could ever wake it.** `waitForHW`'s readonly arm asked whether the
+  watermark was EQUAL to the log's tail. A watermark above the tail is a state a
+  caller reaches legitimately — a follower is told what the leader committed
+  before the records arrive — so the arm was skipped, the reader went on the
+  waiter list, and there it stayed: a readonly log refuses `Append`, so neither
+  the tail nor the watermark will move again, and nothing else wakes an HW
+  waiter. The reader returned only when its own caller gave up, with the
+  caller's `context.DeadlineExceeded` rather than `ErrCommitLogReadonly` — on a
+  log that had already declared it was finished.
+
+  The arm now tests at-or-above. That is what `SetReadonly`'s contract already
+  promised for a reader caught up with what the log holds, and it keeps the two
+  cases consistent: both end a reader that has been served every record present,
+  on a log that is done.
+
+  REACHABLE ONLY SINCE v0.96.0, which is why the equality survived this long. An
+  over-set watermark used to fail reader CONSTRUCTION with `ErrSegmentNotFound`,
+  so no reader could exist in this state to park; v0.96.0 made the state
+  survivable at read time and turned the hard error into a wait, and this is the
+  one wait that has nothing left to wait for. The live-log parking that release
+  documented as a known limitation is unchanged and still correct — there the
+  records may yet arrive.
+
+  Pinned by `TestAReadonlyLogEndsAReaderWhoseWatermarkSitsAboveTheTail`, and
+  falsified: restoring the equality makes it fail on the caller's deadline,
+  which is the exact symptom. v0.96.0's
+  `TestAnOverSetWatermarkParksAtTheTailAndWakesOnTheNextAdvance` stays green, so
+  the live-log contract is held rather than traded away.
 
 ### Documentation
 

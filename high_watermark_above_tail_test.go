@@ -161,3 +161,54 @@ func TestAnOverSetWatermarkParksAtTheTailAndWakesOnTheNextAdvance(t *testing.T) 
 		t.Fatal("the parked reader was never woken")
 	}
 }
+
+// A READONLY log ends a reader whose watermark sits above the tail, rather than
+// parking it forever.
+//
+// This is the one wait that can never end on its own. The test above pins the
+// parking as correct on a live log -- the records may still arrive, and the
+// watermark moving is what wakes the reader. A readonly log has neither: Append
+// is refused, so nothing will move the tail or the watermark, and nothing else
+// wakes an HW waiter. The reader sat there until its own caller gave up, on a
+// log that had already declared it was finished.
+//
+// It became reachable in v0.96.0. Before that an over-set watermark failed
+// reader CONSTRUCTION, so no reader ever existed in this state to park -- which
+// is why waitForHW's readonly arm tested the watermark for EQUALITY with the
+// tail and nothing noticed.
+func TestAReadonlyLogEndsAReaderWhoseWatermarkSitsAboveTheTail(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{
+		Path: tempDir(t), MaxSegmentBytes: 1 << 20,
+	})
+	defer cleanup()
+
+	_, err := l.Append([]*Message{{Value: []byte("a")}, {Value: []byte("b")}})
+	require.NoError(t, err)
+
+	// The caller's claim runs ahead of the records, and the log keeps it: the
+	// setter is monotonic and nothing lowers it.
+	l.SetHighWatermark(l.NewestOffset() + 5)
+	l.SetReadonly(true)
+	require.Greater(t, l.HighWatermark(), l.NewestOffset(),
+		"fixture: the watermark must sit ABOVE the tail, or this asserts the equality case")
+
+	r, err := l.NewReader(Follow())
+	require.NoError(t, err, "an over-set watermark must not fail construction")
+
+	hdr := make([]byte, HeaderBufferLen)
+	for i := 0; i < 2; i++ {
+		_, _, _, _, err := r.ReadMessage(context.Background(), hdr)
+		require.NoError(t, err, "the reader must serve what the log HOLDS, record %d", i)
+	}
+
+	// A generous bound: the point is that it ends by itself, not how fast. If
+	// the readonly arm is missed this deadline is the only thing that returns,
+	// and the error is the context's rather than the log's.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _, _, _, err = r.ReadMessage(ctx, hdr)
+	require.ErrorIs(t, err, ErrCommitLogReadonly,
+		"a readonly log must END a reader that has been served everything it holds, not park it until the caller gives up")
+	require.NotErrorIs(t, err, context.DeadlineExceeded,
+		"the reader parked: only the caller's deadline ended it")
+}

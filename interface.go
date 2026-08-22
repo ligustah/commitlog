@@ -770,7 +770,10 @@ type CommitLog interface {
 	// messages cannot be added to the log with Append and committed readers
 	// will read up to the log end offset (LEO), if the HW allows so, and then
 	// will receive an ErrCommitLogReadonly error. This will unblock committed
-	// readers waiting for data if they are at the LEO. Readers will continue
+	// readers waiting for data if they are at the LEO — or if their watermark
+	// sits ABOVE it, which is a state a follower reaches legitimately and which
+	// has nothing left to wait for on a readonly log, since nothing will move
+	// the tail or the watermark again. Readers will continue
 	// to block if the HW is less than the LEO. This does not affect
 	// uncommitted readers. Messages can still be written to the log with
 	// AppendMessageSet for reconciliation purposes, e.g. when replicating from

@@ -2058,8 +2058,26 @@ func (l *commitLog) waitForHW(r contextReader, hw int64) <-chan bool {
 	if l.hw != hw {
 		// HW has changed since reader last checked so they can unblock now.
 		wait <- false
-	} else if l.hw == l.NewestOffset() && l.IsReadonly() {
+	} else if l.hw >= l.NewestOffset() && l.IsReadonly() {
 		// Log is readonly and HW is caught up to LEO so return an error to reader.
+		//
+		// AT OR ABOVE, not exactly at. A watermark above the tail is a state a
+		// caller reaches legitimately — a follower is told what the leader
+		// committed before the records arrive — and since v0.96.0 the reader
+		// survives it, serving what the log holds and waiting for the rest.
+		// Equality alone therefore left the one wait that can never end: this
+		// log is readonly, so no Append will move the watermark or the tail, and
+		// nothing else wakes an HW waiter. The reader parked until its own
+		// caller gave up, on a log that had already declared it was finished.
+		//
+		// Reachable only since v0.96.0, which is why the equality survived: an
+		// over-set watermark used to fail reader CONSTRUCTION, so there was no
+		// reader in this state to park.
+		//
+		// Ending it is what the readonly contract already says happens when a
+		// reader is caught up with what the log holds, and it stays consistent
+		// with the equality case in the one way that matters: both end a reader
+		// that has been served everything present, on a log that is done.
 		wait <- true
 	} else {
 		// Reader needs to wait for HW to advance.
