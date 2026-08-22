@@ -102,15 +102,18 @@ func TestACommittedReaderStillParksAndWakesWhenTheWatermarkAdvances(t *testing.T
 	}
 }
 
-// The over-set case parks and wakes too, and what wakes it is the watermark
-// moving -- not the records arriving.
+// The over-set case parks at the tail and is woken by the records ARRIVING.
 //
-// Appends do not signal hw waiters; only the three watermark writers do. So a
-// follower sitting above its own tail stays parked until the next watermark
-// change, even as records land. That is the honest bound on the fix: it turns a
-// hard ErrSegmentNotFound into a reader that waits, not into one that tracks the
-// tail on its own.
-func TestAnOverSetWatermarkParksAtTheTailAndWakesOnTheNextAdvance(t *testing.T) {
+// This inverts what v0.96.0 shipped, deliberately. There, appends did not signal
+// watermark waiters, so a follower sitting above its own tail stayed parked as
+// records landed -- and those records are committed by the caller's own claim
+// the moment they arrive, since the watermark is already above them. Nothing
+// else was ever going to say so: SetHighWatermark notifies only when the value
+// INCREASES, so a leader restating the same watermark is silent, and the reader
+// waited for a change that had already happened in every way except the one it
+// watched. Present, committed, unreadable, no error -- the failure has no caller
+// to fail.
+func TestAnOverSetWatermarkParksAtTheTailAndWakesWhenRecordsArrive(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 1024, DisableAutoClean: true})
 	defer cleanup()
 
@@ -142,23 +145,61 @@ func TestAnOverSetWatermarkParksAtTheTailAndWakesOnTheNextAdvance(t *testing.T) 
 	case <-time.After(250 * time.Millisecond):
 	}
 
-	// The record arrives, but the watermark does not move: still parked. The
-	// SetHighWatermark inside appendToLog is a no-op here, since 1 is below the
-	// 999 already stored and the setter is monotonic.
+	// The record arrives and the watermark does NOT move -- the SetHighWatermark
+	// inside appendToLog is a no-op here, since 1 is below the 999 already stored
+	// and the setter is monotonic. The append itself must wake the reader, since
+	// nothing else is coming.
 	appendToLog(t, l, []keyValue{{[]byte("b"), []byte("2")}}, true)
 	select {
 	case err := <-done:
-		t.Fatalf("an append alone woke the reader; only a watermark change should: %v", err)
+		require.NoError(t, err,
+			"a record arriving below an already-set watermark is committed and present, so the reader must be woken by it")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reader was never woken by a committed record arriving; only the caller's deadline would end this read")
+	}
+}
+
+// An append does NOT wake a committed reader when the watermark is at or below
+// the tail, which is the ordinary case. The bound matters: waking on every
+// append would make a plain tailing read spin against a watermark that has not
+// moved, and the wake above is earned only because the watermark already
+// covered the arriving record.
+func TestAnAppendDoesNotWakeACommittedReaderWhenTheWatermarkIsAtTheTail(t *testing.T) {
+	l, cleanup := setupWithOptions(t, Options{Path: tempDir(t), MaxSegmentBytes: 1024, DisableAutoClean: true})
+	defer cleanup()
+
+	appendToLog(t, l, []keyValue{{[]byte("a"), []byte("1")}}, true)
+	l.SetHighWatermark(0)
+
+	r, err := l.NewReader(From(0), Follow())
+	require.NoError(t, err)
+	headers := make([]byte, HeaderBufferLen)
+	_, off, _, _, err := r.ReadMessage(context.Background(), headers)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, off)
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _, _, _, err := r.ReadMessage(ctx, headers)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the reader returned instead of parking: %v", err)
 	case <-time.After(250 * time.Millisecond):
 	}
 
-	// Move the watermark and it wakes.
-	l.SetHighWatermark(1000)
+	// Append WITHOUT moving the watermark past the old tail: offset 1 is above
+	// the watermark of 0, so it is not committed and the reader must stay put.
+	_, err = l.Append([]*Message{{Key: []byte("b"), Value: []byte("2")}})
+	require.NoError(t, err)
+
 	select {
 	case err := <-done:
-		require.NoError(t, err, "the parked reader must wake when the watermark advances")
-	case <-time.After(10 * time.Second):
-		t.Fatal("the parked reader was never woken")
+		t.Fatalf("an uncommitted record woke a committed reader: %v", err)
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 

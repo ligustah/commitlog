@@ -1409,6 +1409,29 @@ func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int
 		}
 		offsets[i] = entry.Offset
 	}
+	// A committed reader's bound is min(watermark, tail), so this append raises
+	// that bound whenever the watermark ALREADY sits above the tail it extended
+	// — the ordinary state of a follower told what the leader committed before
+	// the records arrived. Those records are committed by the caller's own claim
+	// the moment they land, and nothing else will ever say so: SetHighWatermark
+	// notifies only when the value INCREASES, so a leader restating the same
+	// watermark is silent, and a reader parked at the old bound waits for a
+	// change that has already happened in every way except the one it watches.
+	//
+	// Bounded deliberately by `l.hw >= first`. With the watermark at or below
+	// the old tail nothing about the committed view changed, and waking every
+	// reader on every append would make an ordinary tailing read spin.
+	//
+	// Lock order: appendMu is held here, and mu is taken under it, which is the
+	// documented direction.
+	if len(entries) > 0 {
+		first := entries[0].Offset
+		l.mu.Lock()
+		if l.hw >= first {
+			l.notifyHWChange()
+		}
+		l.mu.Unlock()
+	}
 	return offsets, nil
 }
 

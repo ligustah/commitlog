@@ -5,6 +5,54 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.98.0 — 2026-08-22
+
+A behaviour fix on the committed read path: a record arriving below an
+already-set watermark now wakes the readers waiting for it. This REVERSES the
+known limitation v0.96.0 shipped, so it is a minor rather than a patch.
+
+### Fixed
+
+- **A committed record could be present, committed and unreadable, with no error
+  and nothing that would ever change it.** A reader whose log has a watermark
+  above its tail is bounded by what the log holds and parks there — correct since
+  v0.96.0. But appends did not signal watermark waiters, and `SetHighWatermark`
+  notifies only when the value INCREASES, so a leader restating the same
+  watermark is silent. A record landing below that watermark was therefore
+  committed by the caller's own claim the instant it arrived, sat in the log, and
+  woke nobody. The reader waited for a change that had already happened in every
+  way except the one it watched, and the caller's own deadline was the only thing
+  that ended the read.
+
+  v0.96.0 called this the honest bound on its fix — "a reader that waits, not one
+  that tracks the tail on its own" — and that was the wrong line to draw. Waiting
+  is right for records that are not committed yet. These were.
+
+  `append` now wakes watermark waiters when the stored watermark already sits at
+  or above the first offset it just wrote, which is exactly the condition under
+  which a committed reader's bound `min(watermark, tail)` moves. Deliberately no
+  wider: with the watermark at or below the tail nothing about the committed view
+  changed, and waking on every append would make an ordinary tailing read spin.
+
+  Found by reading a consumer's post-mortem of a wedge in their OWN layer, where
+  the conclusion was "what was genuinely wrong is the silence — publication has
+  no caller to fail". The same sentence was true here, one layer down, about a
+  case this package had documented and closed.
+
+### Changed
+
+- **`TestAnOverSetWatermarkParksAtTheTailAndWakesOnTheNextAdvance` is now
+  `…AndWakesWhenRecordsArrive`,** and asserts the opposite of what it did. It
+  pinned the limitation as intended behaviour, so the fix had to change it rather
+  than pass it — recorded here because a test inverting is worth more scrutiny
+  than a test appearing.
+
+  Its bound is kept by a new sibling,
+  `TestAnAppendDoesNotWakeACommittedReaderWhenTheWatermarkIsAtTheTail`: an
+  uncommitted record must still not wake a committed reader. Falsified — removing
+  the wake reddens the first and leaves the second green, so the two together
+  hold both edges rather than one.
+
 ## v0.97.1 — 2026-08-22
 
 A documentation addition. No code changed.
