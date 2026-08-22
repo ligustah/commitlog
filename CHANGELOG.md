@@ -5,6 +5,66 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.97.0 — 2026-08-22
+
+One new method on `CommitLog`: `RepairTail`, which is `RecoverTail`'s structural
+half without its watermark raise. Additive — no existing behaviour changed and no
+signature changed.
+
+### Added
+
+- **`RepairTail() (lastGood int64, err error)`** truncates a torn or phantom
+  suffix, returns the log's tail afterwards, and sets NO watermark.
+
+  `RecoverTail` does two jobs, and they answer different questions. Truncating a
+  suffix that was never fully written is a fact about the BYTES, which only the
+  log can establish. Declaring those records committed is a POLICY, and on a
+  replicated partition the caller owns it — the division this interface already
+  draws for transaction decisions, retention floors and compaction ceilings, and
+  which recovery was quietly on the wrong side of.
+
+  Folding them together is right for a log that is its own authority: on a single
+  node a record is committed once it is durable, so the tail IS the boundary, and
+  amputating down to a lagging checkpoint would unwrite records tailing consumers
+  were already served — which is what `RecoverTail` was written for and still
+  does.
+
+  A replicated partition inverts it, and the inversion is not an edge case, it is
+  what replication IS. A follower fetches records before they commit; a leader
+  writes them before they reach the in-sync set. Both legitimately hold records
+  above the boundary, and `RecoverTail` published every one of them on reopen. The
+  node had then promised records on a copy no one else held, so when a shorter
+  leader told it to truncate it refused — correctly, since a cut at or below its
+  own boundary discards a published record — and stopped replicating. Both nodes
+  behaving correctly, partition wedged, and an ordinary RESTART the entire
+  trigger.
+
+  Reported by durable_streams from a sqlcdc cluster soak in which every
+  replication halt on a node landed within 1.2 seconds of that node booting, with
+  the commit boundary equal to that replica's own tail in every message. Their
+  reproduction is a barrier at -1, three appends, close, reopen: the boundary
+  comes back as 2.
+
+  A caller wanting both halves against its own ceiling calls this and then
+  `SetHighWatermark` with its own bound. Doing it the other way — `RecoverTail`
+  then a correction — cannot work: `SetHighWatermark` never walks back down, so
+  the correction has to be `OverrideHighWatermark`, and that leaves a window in
+  which the log reports records committed that are not.
+
+  `RecoverTail`'s own documentation now says it is only for a log that is its own
+  authority, since nothing at that call site said so and the failure is invisible
+  until a leader disagrees.
+
+### Tests
+
+- `TestRepairTailTruncatesTheTornSuffixWithoutPublishingIt` uses deliberately the
+  same fixture as `TestRecoverTailTruncatesTornSuffix`, so the two differ in one
+  observable: where the watermark ends up. Falsified — reintroducing the publish
+  fails it on that assertion and nothing else.
+- `TestRecoverTailStillPublishesToTheScannedTail` pins the single-node contract
+  across the split, alongside the three existing recovery tests, so the
+  refactor cannot quietly change what one call still does.
+
 ## v0.96.3 — 2026-08-22
 
 A documentation placement fix. No code changed and no API changed — the three

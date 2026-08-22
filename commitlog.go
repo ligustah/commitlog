@@ -1624,9 +1624,24 @@ func (l *commitLog) NewestOffset() int64 {
 // transaction costs.
 func (l *commitLog) RecoverTail() error {
 	hw := l.HighWatermark()
+	tail, err := l.RepairTail()
+	if err != nil {
+		return err
+	}
+	// The publish half, and the whole of what RepairTail refuses to do. Only a
+	// log that is its own authority may take this step; see RepairTail's
+	// documentation for why a replica must not.
+	if tail > hw {
+		l.SetHighWatermark(tail)
+	}
+	return nil
+}
+
+func (l *commitLog) RepairTail() (int64, error) {
+	hw := l.HighWatermark()
 	newest := l.NewestOffset()
 	if newest <= hw {
-		return nil
+		return newest, nil
 	}
 	start := hw + 1
 	if oldest := l.OldestOffset(); oldest >= 0 && start < oldest {
@@ -1639,7 +1654,10 @@ func (l *commitLog) RecoverTail() error {
 	r, err := l.newRecoveryReader(start)
 	if err != nil {
 		// Nothing readable above the checkpoint: keep the old amputation.
-		return l.Truncate(hw + 1)
+		if terr := l.Truncate(hw + 1); terr != nil {
+			return l.NewestOffset(), terr
+		}
+		return l.NewestOffset(), nil
 	}
 	lastGood := hw
 	headers := make([]byte, msgSetHeaderLen)
@@ -1664,7 +1682,7 @@ func (l *commitLog) RecoverTail() error {
 			}
 			// Torn or phantom suffix: keep everything before it, drop the rest.
 			if terr := l.Truncate(lastGood + 1); terr != nil {
-				return terr
+				return l.NewestOffset(), terr
 			}
 			break
 		}
@@ -1673,10 +1691,10 @@ func (l *commitLog) RecoverTail() error {
 			break
 		}
 	}
-	if lastGood > hw {
-		l.SetHighWatermark(lastGood)
-	}
-	return nil
+	// The log's own tail rather than lastGood, and they agree: the loop leaves
+	// by truncating everything above lastGood, or by reaching newest. Asking the
+	// log keeps the answer true on the paths that never entered the loop.
+	return l.NewestOffset(), nil
 }
 
 // ActiveSegmentBase returns the base offset of the active (unsealed) segment.

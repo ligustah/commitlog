@@ -299,6 +299,12 @@ type CommitLog interface {
 	// producer-id records) runs it at open. Discarding the whole suffix instead
 	// would leave those markers overstating what the log holds.
 	//
+	// ONLY FOR A LOG THAT IS ITS OWN AUTHORITY ON WHAT IS COMMITTED. Raising
+	// the watermark to the scanned tail is right on a single node and wrong on
+	// a replica, where it publishes records that never replicated. Use
+	// RepairTail there, which does the truncation and sets no watermark; its
+	// documentation has the full reasoning.
+	//
 	// Visibility above the watermark stays gated by transaction markers, so
 	// recovering a record is not the same as committing it.
 	//
@@ -328,6 +334,41 @@ type CommitLog interface {
 	// collectable, or compactable, and the log grows without bound until the
 	// transaction is decided.
 	RecoverTail() error
+
+	// RepairTail is RecoverTail's structural half on its own: it truncates a
+	// torn or phantom suffix and returns the log's tail afterwards, and it sets
+	// NO watermark. Use it wherever this log is not the authority on what is
+	// committed.
+	//
+	// The two jobs are separable because they answer different questions.
+	// Truncating a suffix that was never fully written is a fact about the
+	// BYTES, and the log is the only thing that can establish it. Declaring
+	// those records committed is a POLICY, and on a replicated partition the
+	// caller owns it — the same division this interface already draws for
+	// transaction decisions, retention floors and compaction ceilings.
+	//
+	// RecoverTail folds the two together and is right only for a log that is
+	// its own authority: on a single node a record is committed once it is
+	// durable, so the tail IS the boundary. A replicated partition inverts
+	// that, and the inversion is not an edge case — it is what replication IS.
+	// A follower fetches records before they commit; a leader writes them
+	// before they have reached the in-sync set. Both legitimately hold records
+	// above the boundary, and RecoverTail publishes every one of them on the
+	// next reopen. The node has then promised records on a copy no one else
+	// holds, and when a shorter leader tells it to truncate it refuses — which
+	// is correct, and wedges the partition. An ordinary restart is the whole
+	// trigger.
+	//
+	// Reported from a cluster soak where every replication halt on a node
+	// landed within 1.2s of that node booting, with the commit boundary equal
+	// to its own tail in every message.
+	//
+	// A caller that wants both halves and has a ceiling should call this and
+	// then SetHighWatermark with its own bound — not RecoverTail followed by a
+	// correction. SetHighWatermark cannot walk back down, so the correction
+	// would have to be OverrideHighWatermark, and that leaves a window in which
+	// the log reports records as committed that are not.
+	RepairTail() (lastGood int64, err error)
 
 	// ActiveSegmentBase returns the base offset of the active (unsealed)
 	// segment. Cleaning passes only rewrite segments that were sealed before
