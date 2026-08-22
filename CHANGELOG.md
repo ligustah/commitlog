@@ -5,6 +5,42 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.96.2 — 2026-08-22
+
+A build change: the toolchain moves off a release candidate onto the 1.27.0
+release. No library code changed and no API changed.
+
+### Changed
+
+- **`toolchain go1.27rc2` → `toolchain go1.27.0`,** with the matching
+  `GO_VERSION` pin in `ci.yml` and `fuzz-deep.yml`. This is the move the pin's
+  own comment said would happen at GA, and all three parts move together
+  because setup-go and go.mod spell a version differently and nothing checks
+  that they agree.
+
+  The reason it is worth doing promptly rather than whenever: this repo depends
+  on the toolchain for stdlib security fixes. v0.94.0's predecessor moved to
+  go1.27rc2 precisely to clear GO-2026-4602, an advisory `govulncheck` reported
+  as reachable from this package's own code — so the toolchain is not
+  incidental here, it is where the advisories land. A release CANDIDATE is the
+  one pin that can never receive such a fix: the fix ships in the release line
+  that supersedes the RC, not in the RC. Staying on rc2 meant holding the
+  position that had already worked once and could not work again.
+
+  `govulncheck ./...` reports no vulnerabilities on 1.27.0, and the package
+  builds, vets and passes under it.
+
+### Documentation
+
+- **The dependency-drift maintenance task said CI picks up stdlib fixes on its
+  own.** It described CI as building with `go-version: stable`, which stopped
+  being true on 2026-08-12 when the move to the prerelease took every job onto
+  an explicit `GO_VERSION`. The sentence survived a later edit of the same file,
+  so the task told a future reader the Go version maintained itself at exactly
+  the moment it had stopped doing so — and the pin it would have reassured them
+  about was a release candidate. Corrected to say the pin is hand-synced and
+  that moving it belongs to that task.
+
 ## v0.96.1 — 2026-08-22
 
 A behaviour fix in the readonly read path, and two documentation fixes.

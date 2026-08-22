@@ -23,11 +23,12 @@ on:
 permissions:
   contents: read
 
-# setup-go's spelling of go.mod's `toolchain go1.27rc2`; it cannot resolve that
-# form itself, so this is kept in step with ci.yml's GO_VERSION by hand until
-# 1.27.0 GA lets both go back to a plain release. See the longer note in ci.yml.
+# setup-go's spelling of go.mod's `toolchain` line, kept in step with ci.yml's
+# GO_VERSION by hand. Now on the 1.27.0 release rather than a prerelease, which
+# is what made the two spellings differ. See the longer note in ci.yml for why
+# that hand-sync can now be replaced by `go-version-file: go.mod`.
 env:
-  GO_VERSION: '1.27.0-rc.2'
+  GO_VERSION: '1.27.0'
 
 concurrency:
   group: fuzz-deep

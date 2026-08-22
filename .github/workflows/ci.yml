@@ -15,19 +15,26 @@ on:
 permissions:
   contents: read
 
-# Every setup-go in this file reads this, and it is setup-go's spelling of a Go
-# version, which is NOT go.mod's: go.mod says `toolchain go1.27rc2`, setup-go
-# wants `1.27.0-rc.2` and cannot resolve the other form. So `go-version-file:
-# go.mod` — the obvious way to stop these two drifting apart — does not work
-# while a prerelease is pinned. Both move together at 1.27.0 GA, along with the
-# `toolchain` line in go.mod and the same pin in fuzz-deep.yml.
+# Every setup-go in this file reads this, and it is setup-go's spelling of the
+# version go.mod pins in its `toolchain` line. The two are kept in step by hand,
+# here and in fuzz-deep.yml.
+#
+# That hand-sync is now REMOVABLE and was not before. It existed because a
+# prerelease spells itself differently on each side — go.mod said
+# `toolchain go1.27rc2` while setup-go wanted `1.27.0-rc.2` and could not
+# resolve the other form — which ruled out `go-version-file: go.mod`, the
+# obvious way to stop the two drifting apart. On 1.27.0 GA the spellings
+# coincide and that objection is gone; switching these steps to
+# `go-version-file: go.mod` would make the drift impossible rather than
+# merely noticed. Left as its own change so a CI restructure is not mixed
+# into a version bump.
 #
 # This must satisfy go.mod's `go` directive. setup-go leaves GOTOOLCHAIN=local,
 # which turns "the installed toolchain is too old" into a refusal rather than a
 # download — so a pin that drifts below the directive fails every job at once
 # instead of quietly fetching what it needs.
 env:
-  GO_VERSION: '1.27.0-rc.2'
+  GO_VERSION: '1.27.0'
 
 # Newer pushes to the same ref supersede in-flight runs.
 concurrency:
