@@ -5,6 +5,51 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.96.1 — 2026-08-22
+
+Two documentation fixes. No code changed.
+
+### Documentation
+
+- **`NewReader`'s termination contract named one construction failure when there
+  are two.** It said construction returns `ErrSegmentNotFound` "only when the log
+  holds no segments at all", and concluded from that "the single case a caller
+  must handle itself is the empty log". A start offset ABOVE the log's tail
+  returns it too, on a perfectly healthy log: segment lookup resolves an offset
+  forward to the first segment that could hold it, and there is no such segment
+  at `NewestOffset()+1`.
+
+  The two cases need OPPOSITE responses, which is what made the omission worth
+  correcting rather than merely incomplete. An empty log is a state to handle; a
+  start offset above the tail means the reader is ahead of the writer, and the
+  remedy is to wait or read from a lower offset. A caller taking the paragraph at
+  face value would read a resumable position as an empty log — and this interface
+  had it right in the other place all along, since the sentinel list at the top of
+  the file has always described `ErrSegmentNotFound` as "the log holds nothing at
+  or after that offset, which on a live log means the reader is ahead of the
+  writer". One file, two answers, and the wrong one sat where the decision is
+  made.
+
+  Verified rather than reasoned, since the arithmetic is exactly where this
+  package keeps getting caught: on a two-record log, an uncommitted reader at
+  `From(newest+1)` and at `From(newest+100)` are both refused with the sentinel,
+  while a COMMITTED reader at `From(newest+1)` is not — it is bounded by the
+  watermark, which never exceeds the tail, so it waits instead of failing. The
+  committed/uncommitted split is now stated, because it is the half a caller
+  cannot guess.
+
+- **A justification in `segment.go` still described the behaviour v0.96.0
+  replaced** (unexported; no API change). It argued that `findEntry` is never
+  reached with an out-of-range offset partly because "a watermark past the end
+  looked like a way in; `findSegment` answers nil at `newest+1` and `NewReader`
+  reports `ErrSegmentNotFound`". That was true until four commits earlier.
+  v0.96.0 made `committedReader` clamp the watermark to the last offset the log
+  holds and hand `getHWPos` the clamped value, so the out-of-range offset no
+  longer reaches the lookup at all. The guarantee still holds — by a stronger
+  mechanism than the one written down — but the sentence read as a live
+  description of what an over-set watermark does, which is now precisely what it
+  does not do.
+
 ## v0.96.0 — 2026-08-19
 
 A behaviour fix in the committed read path.

@@ -244,20 +244,34 @@ type CommitLog interface {
 	//   - a read ends when ReadMessage returns an error satisfying
 	//     errors.Is(err, io.EOF). The EOF is WRAPPED, so compare with errors.Is
 	//     and not ==.
-	//   - construction returns ErrSegmentNotFound only when the log holds no
-	//     segments at all. A start offset merely BELOW the oldest surviving
-	//     record is served FROM the oldest survivor, so reading from 0 over a
-	//     log that retention has since trimmed is fine and starts at the oldest
-	//     record present. Nothing clamps the requested offset — it is carried
-	//     verbatim, and segment lookup resolves it forward — so the read
-	//     silently starts LATER than asked. See From, which states what a
-	//     caller must do to notice.
+	//   - construction returns ErrSegmentNotFound in TWO cases: the log holds no
+	//     segments at all, and the start offset sits ABOVE the log's tail.
+	//     Segment lookup resolves an offset forward to the first segment that
+	//     could hold it, and there is no such segment at NewestOffset()+1, so an
+	//     uncommitted reader asked to start there is refused on a perfectly
+	//     healthy log. A COMMITTED reader is not: it is bounded by the
+	//     watermark, which never exceeds the tail, so it waits rather than
+	//     failing.
 	//
-	// So the single case a caller must handle itself is the empty log. That is
-	// deliberately an error rather than a reader that instantly ends: "there is
-	// nothing here" and "the range you asked for held nothing" are different
-	// answers, and collapsing them would let a sweep report success having
-	// covered no data at all.
+	//     A start offset merely BELOW the oldest surviving record is served FROM
+	//     the oldest survivor, so reading from 0 over a log that retention has
+	//     since trimmed is fine and starts at the oldest record present. Nothing
+	//     clamps the requested offset — it is carried verbatim, and segment
+	//     lookup resolves it forward — so the read silently starts LATER than
+	//     asked. See From, which states what a caller must do to notice.
+	//
+	// The two cases need OPPOSITE responses, which is why collapsing them was
+	// worth correcting: an empty log is a state to handle, while a start offset
+	// above the tail means the reader is ahead of the writer, and the remedy is
+	// to wait or read from a lower offset — the sentinel list on this interface
+	// has said exactly that all along. A caller that took this paragraph's
+	// earlier wording at face value ("the single case a caller must handle
+	// itself is the empty log") would read a resumable position as an empty log.
+	//
+	// The empty log is deliberately an error rather than a reader that instantly
+	// ends: "there is nothing here" and "the range you asked for held nothing"
+	// are different answers, and collapsing them would let a sweep report
+	// success having covered no data at all.
 	//
 	// KeyPrefix is refused together with Uncommitted unless the caller also
 	// passes Until or IncludeControl — see NewReader's own documentation for

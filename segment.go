@@ -51,9 +51,14 @@ var (
 	//     the last written record rather than returning the active segment for it:
 	//     committedReader's resync and getHWPos. Verified rather than reasoned —
 	//     SetHighWatermark takes an arbitrary int64 and only checks that it moves
-	//     forward, so a watermark past the end looked like a way in; findSegment
-	//     answers nil at newest+1 and NewReader reports ErrSegmentNotFound, which
-	//     IS in the remedy list.
+	//     forward, so a watermark past the end looked like a way in. Since
+	//     v0.96.0 it is not one even at findSegment: committedReader clamps the
+	//     watermark to the last offset the log holds and getHWPos is handed the
+	//     clamped value, so the out-of-range offset never reaches the lookup.
+	//     Before that the lookup was the backstop — it answered nil at newest+1
+	//     and failed the whole reader with ErrSegmentNotFound, which is the
+	//     behaviour v0.96.0 replaced, so do not read this bullet as a live
+	//     description of what an over-set watermark does.
 	//   - the offsets came from the segment's OWN keydigest, and loadKeyDigest
 	//     refuses a sidecar that is not this segment's current one: planRuns, via
 	//     prefixSource.fetch.
