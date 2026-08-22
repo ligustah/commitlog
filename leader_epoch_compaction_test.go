@@ -105,17 +105,23 @@ func TestAnEpochWithNoSurvivingRecordsIsStillInTheCache(t *testing.T) {
 	write(3, "c", "4") // offset 4, active segment
 	l.SetHighWatermark(l.NewestOffset())
 
-	require.EqualValues(t, 1, lastOffsetForEpoch(t, l, 1), "epoch 2 began at 1")
-	require.EqualValues(t, 3, lastOffsetForEpoch(t, l, 2), "epoch 3 began at 3")
+	require.EqualValues(t, 0, lastOffsetForEpoch(t, l, 1), "epoch 1's only record is offset 0")
+	require.EqualValues(t, 2, lastOffsetForEpoch(t, l, 2), "epoch 2's records are 1..2")
 
 	require.NoError(t, l.Clean())
 
 	require.EqualValues(t, 0, l.OldestOffset(), "the floor did not move")
 	require.EqualValues(t, 3, l.LastLeaderEpoch())
-	require.Len(t, l.leaderEpochCache.epochOffsets, 3,
+	// Epoch 2 is what this test is about and it is still here. Epoch 1's own
+	// entry is not: it anchors at -1, below the floor of 0, and ClearEarliest
+	// drops a sub-floor entry without re-adding it when the next entry already
+	// sits AT the floor. That costs nothing -- epoch 2's entry still states that
+	// epoch 1 ended at 0, which is the only thing a probe for epoch 1 needs, and
+	// where epoch 1 began is below the floor and no longer vouchable.
+	require.Len(t, l.leaderEpochCache.epochOffsets, 2,
 		"the epoch whose every record was compacted away was dropped from the cache")
-	// Unchanged: epoch 2 still owns [1, 3), which is where it led, however
-	// little of what it wrote is still on disk.
-	require.EqualValues(t, 1, lastOffsetForEpoch(t, l, 1))
-	require.EqualValues(t, 3, lastOffsetForEpoch(t, l, 2))
+	// Unchanged by the clean: epoch 2 still ends at 2, which is where it led,
+	// however little of what it wrote is still on disk.
+	require.EqualValues(t, 0, lastOffsetForEpoch(t, l, 1))
+	require.EqualValues(t, 2, lastOffsetForEpoch(t, l, 2))
 }

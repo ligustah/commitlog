@@ -17,17 +17,30 @@ func TestLeaderEpochCache(t *testing.T) {
 	l, err := newLeaderEpochCache("foo", dir)
 	require.NoError(t, err)
 
-	require.Equal(t, int64(-1), l.LastOffsetForLeaderEpoch(0))
+	// An empty cache cannot answer at all, which is a different thing from
+	// answering -1. The caller substitutes the log end for the first and obeys
+	// the second literally, so the flag is the whole difference between "keep
+	// everything" and "discard everything".
+	off, found := l.LastOffsetForLeaderEpoch(0)
+	require.False(t, found, "an empty cache has no entry to answer from")
+	require.Equal(t, int64(-1), off)
 	require.Equal(t, uint64(0), l.LastLeaderEpoch())
 
 	require.NoError(t, l.Assign(1, 0))
 
-	require.Equal(t, int64(-1), l.LastOffsetForLeaderEpoch(1))
-	require.Equal(t, int64(0), l.LastOffsetForLeaderEpoch(0))
+	off, found = l.LastOffsetForLeaderEpoch(1)
+	require.False(t, found, "nothing above epoch 1 is recorded, so there is no entry to read")
+	require.Equal(t, int64(-1), off)
+
+	off, found = l.LastOffsetForLeaderEpoch(0)
+	require.True(t, found, "epoch 1's entry answers a probe for epoch 0")
+	require.Equal(t, int64(0), off)
 
 	require.NoError(t, l.Assign(1, 10))
 
-	require.Equal(t, int64(0), l.LastOffsetForLeaderEpoch(0))
+	off, found = l.LastOffsetForLeaderEpoch(0)
+	require.True(t, found)
+	require.Equal(t, int64(0), off)
 
 	require.NoError(t, l.Assign(2, 10))
 	require.NoError(t, l.Assign(3, 15))

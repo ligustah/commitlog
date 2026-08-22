@@ -126,35 +126,43 @@ func (l *leaderEpochCache) Assign(epoch uint64, offset int64) error {
 }
 
 // LastOffsetForLeaderEpoch returns the INCLUSIVE last offset belonging to the
-// provided epoch, or -1 when no larger epoch is recorded.
+// provided epoch, and whether the cache could answer at all.
 //
 // It reads the entry for epoch+1, not for epoch. That is not an off-by-one:
 // assign stores NewestOffset(), so the successor's entry holds the offset the
 // log had reached when the successor opened -- the last record the provided
 // epoch wrote. See epochOffset.
 //
-// -1 is overloaded: it means "no successor recorded" here, and the caller
-// substitutes the log end for it, but it is ALSO the value assign records for
-// an epoch opened on an empty log. In practice the second reading rarely
-// reaches a caller, because ClearEarliest re-anchors sub-floor entries as the
-// log trims -- two epochs opened back to back on an empty log collapse into a
-// single entry at the surviving floor, and the earlier of the two stops
-// existing.
+// The bool exists because -1 is a REAL answer, not only a miss. An epoch opened
+// on an empty log records -1, and so does the first epoch of any log whose
+// first record is offset 0 -- the ordinary case, not a corner. Returning -1 for
+// both "no successor recorded" and "the successor opened before anything was
+// written" made those indistinguishable, and the caller substitutes the LOG END
+// for a miss. So a probe for an epoch that wrote nothing was answered with the
+// whole log: "you are level with me, keep everything", to a follower that
+// should have been told to discard all of it.
 //
-// Which is the honest caveat on the paragraph above: an epoch that wrote no
-// records is not preserved, so a probe naming one is answered from its
-// successor's re-anchored offset rather than with the -1 that would say "this
-// epoch wrote nothing". Whether that is reachable depends on the caller's
-// controller never issuing an epoch that writes nothing and then reappearing
-// on a follower -- a guarantee this package cannot make or check.
-func (l *leaderEpochCache) LastOffsetForLeaderEpoch(epoch uint64) int64 {
+// Not reachable before the append path was corrected to store the predecessor's
+// last offset, because it stored the new epoch's first offset instead and -1
+// could only arise from an epoch opened on a genuinely empty log. Widening the
+// arithmetic to be correct is what made the overload load-bearing.
+//
+// One caveat survives the split: an epoch that wrote no records is not always
+// preserved, because ClearEarliest re-anchors sub-floor entries as the log
+// trims -- two epochs opened back to back collapse into a single entry at the
+// surviving floor, and the earlier of the two stops existing. A probe naming it
+// is then answered from the successor's re-anchored offset. Whether that is
+// reachable depends on the caller's controller never issuing an epoch that
+// writes nothing and then reappearing on a follower -- a guarantee this package
+// cannot make or check.
+func (l *leaderEpochCache) LastOffsetForLeaderEpoch(epoch uint64) (int64, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	e := l.findEpoch(epoch + 1)
 	if e == nil {
-		return -1
+		return -1, false
 	}
-	return e.assignedAtOffset
+	return e.assignedAtOffset, true
 }
 
 // LastLeaderEpoch returns the latest leader epoch for the log.

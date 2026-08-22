@@ -5,6 +5,78 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.99.0 — 2026-08-22
+
+A correctness fix to the leader-epoch probe. The offset it returns changes for
+any log whose epoch transitions were recorded by the append path, so it is a
+minor rather than a patch even though no signature moved.
+
+### Fixed
+
+- **`LastOffsetForLeaderEpoch` could answer one offset too high, telling a
+  follower to KEEP the first record of the next epoch.** That record is the
+  divergent one the probe exists to make it discard.
+
+  There were two `Assign` call sites and they stored opposite values.
+  `NewLeaderEpoch` stores `NewestOffset()` — the last offset already written,
+  which is the invariant `epochOffset`'s doc names and the probe relies on, since
+  it answers a probe for E by reading E+1's entry and returning it unchanged.
+  `append` stored `entry.Offset`, the new epoch's FIRST offset, one higher.
+
+  It split by role, which is why it survived so long. A leader calls
+  `NewLeaderEpoch` at election, so by the time it appends,
+  `entry.LeaderEpoch > lastLeaderEpoch` is already false and the append arm never
+  fires. Only a follower ingesting already-stamped records through `Append` or
+  `AppendMessageSet` reached it. The same history therefore produced two
+  different checkpoints, and a follower's truncation point depended on which node
+  answered its probe.
+
+  `interface.go` had asserted the opposite as a fact — "there is no arm of this
+  that returns a first offset" — and the repo documented BOTH readings: the
+  published contract said inclusive, while `commitlog_test.go`'s comments
+  described the value as "where epoch 2's leadership began" and had a green
+  assertion that `LastOffsetForLeaderEpoch(1) == 5` for an epoch whose records
+  were offsets 0..4. The test asserting the defect is why it was never noticed.
+
+- **An epoch opening across a compacted HOLE anchored at an offset no record
+  occupied.** `checkAppendedSet` allows a set to start above the tail and to skip
+  offsets inside itself on purpose, because a compacted source has holes and a
+  follower resuming from one appends across them. Anchoring at "the new epoch's
+  first offset minus one" names a hole on exactly that boundary, and the probe
+  then hands a follower a hole as its truncation point — telling it to KEEP
+  records the leader compacted away, which this log can never correct because it
+  does not have them. The anchor is now the last record the log actually holds:
+  the tail before the batch, or the preceding entry for a change mid-batch.
+
+- **The cache's `-1` meant two different things, and the caller obeyed the wrong
+  one.** `-1` was returned both for "no successor epoch recorded" and as a real
+  stored anchor for an epoch that opened before anything was written. The caller
+  substitutes the LOG END for a miss, so a probe for an epoch that wrote nothing
+  was answered with the whole log — "you are level with me, keep everything" — to
+  a follower that should have been told to discard all of it.
+
+  Not reachable before this release, because the append path stored a first
+  offset and `-1` could only arise from an epoch opened on a genuinely empty log.
+  Correcting the arithmetic made it the ordinary recording for the first epoch of
+  any log whose first record is offset 0, which is what made the overload
+  load-bearing. The cache now reports "found" separately from the offset.
+
+### Changed
+
+- A clean can now drop a sub-floor epoch entry where it previously re-anchored
+  it, when the next entry already sits exactly AT the new floor —
+  `ClearEarliest`'s re-add is guarded by `offset < earliestOffset()`, and the
+  corrected anchors land a record lower, so that comparison can now be an
+  equality. Nothing is lost: the surviving entry still states where the dropped
+  epoch ended, which is all a probe for it needs, and where it BEGAN is below the
+  floor and no longer vouchable.
+
+  Found while auditing a consumer's live incident. Their capture showed a
+  follower's checkpoint holding epochs 2, 3 and 5 with no entry for 4, and the
+  probe for 4 being answered rather than refused — which turned out to be correct
+  behaviour under a doc that described it wrongly, and led to the two defects
+  above.
+
 ## v0.98.0 — 2026-08-22
 
 A behaviour fix on the committed read path: a record arriving below an

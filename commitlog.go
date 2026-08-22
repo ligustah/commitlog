@@ -1391,6 +1391,13 @@ func checkAppendedSet(tail int64, entries []*entry) error {
 }
 
 func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int64, error) {
+	// The log's tail BEFORE these records land. An epoch that opens with this
+	// batch anchors here, which is what NewLeaderEpoch would have stored, and
+	// WriteMessageSet below moves it -- so it has to be read first. On a segment
+	// the split just created this is still the log's tail, because an empty
+	// segment's NextOffset is its base and the base is the previous tail plus
+	// one.
+	tailBeforeBatch := segment.NextOffset() - 1
 	if err := segment.WriteMessageSet(ms, entries); err != nil {
 		return nil, err
 	}
@@ -1401,8 +1408,40 @@ func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int
 	for i, entry := range entries {
 		// Check if message is in a new leader epoch.
 		if entry.LeaderEpoch > lastLeaderEpoch {
-			// If it is, we need to assign the epoch offset.
-			if err := l.leaderEpochCache.Assign(entry.LeaderEpoch, entry.Offset); err != nil {
+			// The anchor is the last record already held, NOT entry.Offset. The
+			// cache stores where the log STOOD when an epoch opened, and
+			// LastOffsetForLeaderEpoch depends on exactly that: it answers a
+			// probe for E by reading E+1's entry and returning it unchanged as
+			// E's inclusive last offset. See epochOffset.
+			//
+			// This arm stored the new epoch's FIRST offset, one too high, so the
+			// probe answered one PAST the last record of the epoch asked about.
+			// interface.go tells the caller to keep up to and including the
+			// answer, which made it an instruction to KEEP the first record of
+			// the next epoch -- the divergent record the probe exists to discard.
+			//
+			// It split by role, which is why it survived. A leader calls
+			// NewLeaderEpoch at election, so `entry.LeaderEpoch > lastLeaderEpoch`
+			// is already false by the time it appends and this arm never fires;
+			// only a follower ingesting already-stamped records reached it. The
+			// same history therefore produced two different checkpoints, and a
+			// follower's truncation point depended on which node answered.
+			//
+			// Not entry.Offset-1 either, which is only the same thing when the
+			// offsets are contiguous. checkAppendedSet deliberately allows a set
+			// to start above the tail and to skip offsets inside itself, because
+			// a compacted source has holes and a follower resuming from one
+			// appends across them -- and across a hole, entry.Offset-1 names a
+			// record this log does not hold. Anchoring at the real preceding
+			// record keeps the answer to "where did the previous epoch end here"
+			// something this log can actually vouch for. A follower told a hole
+			// keeps offsets the leader compacted away and nothing ever corrects
+			// them.
+			anchor := tailBeforeBatch
+			if i > 0 {
+				anchor = entries[i-1].Offset
+			}
+			if err := l.leaderEpochCache.Assign(entry.LeaderEpoch, anchor); err != nil {
 				return nil, err
 			}
 			lastLeaderEpoch = entry.LeaderEpoch
@@ -2153,22 +2192,31 @@ func (l *commitLog) NewLeaderEpoch(epoch uint64) error {
 // discard.
 //
 // Inclusive on BOTH branches, and deliberately so: the fallback is
-// NextOffset()-1, not NextOffset(). The cache arm looks up epoch+1 because
-// NewLeaderEpoch anchors each epoch at NewestOffset(), so the successor's
-// recorded offset IS the named epoch's last record. Read either arm as an
-// exclusive next-epoch start and the follower keeps one record too many.
+// NextOffset()-1, not NextOffset(). The cache arm looks up epoch+1 because both
+// write paths anchor each epoch at the offset the log had ALREADY reached when
+// it opened, so the successor's recorded offset IS the named epoch's last
+// record. Read either arm as an exclusive next-epoch start and the follower
+// keeps one record too many.
 //
-// An Epoch that names nothing is refused with ErrUnknownLeaderEpoch. See Epoch
-// for why that is a refusal and not a default: the caller truncates to the
-// answer, so an offset returned to a question the log cannot actually answer is
-// a deletion instruction it invented.
+// The log end is substituted only when the cache has NO entry to answer from,
+// which is why the cache reports that separately rather than by returning -1.
+// -1 is a real answer -- the epoch wrote nothing, discard everything from 0 --
+// and it is the ordinary recording for the first epoch of any log. Conflating
+// the two answered "you are level with me, keep everything" to a follower that
+// should have been told to keep none of it.
+//
+// An Epoch that carries no epoch at all is refused with ErrUnknownLeaderEpoch.
+// See Epoch for why that is a refusal and not a default: the caller truncates
+// to the answer, so an offset returned to a question the log cannot actually
+// answer is a deletion instruction it invented. An epoch the cache has no entry
+// for is a different thing and IS answered, from the fallback above.
 func (l *commitLog) LastOffsetForLeaderEpoch(epoch Epoch) (int64, error) {
 	e, known := epoch.Get()
 	if !known {
 		return 0, ErrUnknownLeaderEpoch
 	}
-	offset := l.leaderEpochCache.LastOffsetForLeaderEpoch(e)
-	if offset == -1 {
+	offset, found := l.leaderEpochCache.LastOffsetForLeaderEpoch(e)
+	if !found {
 		offset = l.activeSegment().NextOffset() - 1
 	}
 	return offset, nil

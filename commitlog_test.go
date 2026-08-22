@@ -411,10 +411,17 @@ func TestCleanerDeleteLeaderEpochOffsets(t *testing.T) {
 
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
-	require.Equal(t, int64(0), lastOffsetForEpoch(t, l, 0))
-	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
-	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
-	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
+	// Epoch 1 holds 0..4, epoch 2 holds 5..9, epoch 3 holds 10..14, and each
+	// answer is the epoch's own LAST record. These used to read 0, 5, 10 -- the
+	// FIRST record of the epoch after the one asked about, one too high, which
+	// interface.go turns into an instruction to keep the first record of the
+	// next epoch.
+	require.Equal(t, int64(-1), lastOffsetForEpoch(t, l, 0),
+		"epoch 0 wrote nothing here, so a follower at epoch 0 must discard everything")
+	require.Equal(t, int64(4), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(9), lastOffsetForEpoch(t, l, 2))
+	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3),
+		"the newest epoch has no successor recorded, so the answer is the log end")
 
 	// Force a clean.
 	require.NoError(t, l.Clean())
@@ -490,9 +497,11 @@ func TestCleanerKeepsLeaderEpochOffsetsThroughCompaction(t *testing.T) {
 
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
-	require.Equal(t, int64(0), lastOffsetForEpoch(t, l, 0))
-	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
-	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
+	// Each epoch's own LAST record: epoch 1 holds 0..4, epoch 2 holds 5..9,
+	// epoch 3 holds 10..14.
+	require.Equal(t, int64(-1), lastOffsetForEpoch(t, l, 0))
+	require.Equal(t, int64(4), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(9), lastOffsetForEpoch(t, l, 2))
 	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
 
 	// Force a clean.
@@ -501,14 +510,20 @@ func TestCleanerKeepsLeaderEpochOffsetsThroughCompaction(t *testing.T) {
 	require.Equal(t, 3, len(l.segmentsSnapshot()))
 	require.Equal(t, int64(4), l.OldestOffset())
 	require.Equal(t, int64(14), l.NewestOffset())
-	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
+	// TWO entries, not three: epoch 2's anchor is 4 and the new floor is also 4,
+	// so ClearEarliest's re-add (`offset < earliestOffset()`) does not fire and
+	// epoch 1's own entry is dropped. Nothing is lost by it -- epoch 2's entry
+	// already states that epoch 1 ended at 4, and where epoch 1 BEGAN is below
+	// the floor and no longer vouchable. Under the old off-by-one anchors this
+	// landed a record apart (2 anchored at 5 against a floor of 4) and the
+	// re-add fired, which is the only reason a third entry used to survive.
+	require.Equal(t, 2, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
-	// Epoch 1 started at 0, which is now below the floor, so it is re-anchored
-	// there rather than dropped. Epochs 2 and 3 are untouched: a clean does not
-	// move where a leadership began.
-	require.Equal(t, int64(4), lastOffsetForEpoch(t, l, 0))
-	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
-	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
+	require.Equal(t, int64(4), lastOffsetForEpoch(t, l, 0),
+		"below the floor, so re-anchored to what the log can still vouch for")
+	require.Equal(t, int64(4), lastOffsetForEpoch(t, l, 1),
+		"epoch 1's last record is 4 and it survived compaction")
+	require.Equal(t, int64(9), lastOffsetForEpoch(t, l, 2))
 	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
 }
 
@@ -820,18 +835,23 @@ func TestTruncate(t *testing.T) {
 	require.Equal(t, int64(14), l.NewestOffset())
 	require.Equal(t, 3, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(3), l.LastLeaderEpoch())
-	require.Equal(t, int64(0), lastOffsetForEpoch(t, l, 0))
-	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
-	require.Equal(t, int64(10), lastOffsetForEpoch(t, l, 2))
+	// Each epoch's own LAST record: epoch 1 holds 0..4, epoch 2 holds 5..9,
+	// epoch 3 holds 10..14.
+	require.Equal(t, int64(-1), lastOffsetForEpoch(t, l, 0),
+		"epoch 0 wrote nothing here, so a follower at epoch 0 must discard everything")
+	require.Equal(t, int64(4), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(9), lastOffsetForEpoch(t, l, 2))
 	require.Equal(t, int64(14), lastOffsetForEpoch(t, l, 3))
 
 	require.NoError(t, l.Truncate(7))
 
 	require.Equal(t, int64(6), l.NewestOffset())
+	// ClearLatest(7) drops epoch 3, whose anchor of 9 is at or above the cut.
 	require.Equal(t, 2, len(l.leaderEpochCache.epochOffsets))
 	require.Equal(t, uint64(2), l.LastLeaderEpoch())
-	require.Equal(t, int64(0), lastOffsetForEpoch(t, l, 0))
-	require.Equal(t, int64(5), lastOffsetForEpoch(t, l, 1))
+	require.Equal(t, int64(-1), lastOffsetForEpoch(t, l, 0))
+	require.Equal(t, int64(4), lastOffsetForEpoch(t, l, 1),
+		"epoch 1's records are 0..4 and the cut at 7 left all of them")
 }
 
 // Ensure NotifyLEO returns a closed channel when the given offset is not the

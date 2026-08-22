@@ -91,7 +91,9 @@ func TestLeaderEpochZeroIsRecorded(t *testing.T) {
 
 	// The anchor a follower probes with is unchanged by the fix — measured, not
 	// assumed. Asserted so a future change to findEpoch cannot quietly move it.
-	require.EqualValues(t, 50, l.LastOffsetForLeaderEpoch(0))
+	off, found := l.LastOffsetForLeaderEpoch(0)
+	require.True(t, found)
+	require.EqualValues(t, 50, off)
 
 	// It has to survive a reopen, or the entry exists only in memory and the
 	// next process starts from the same empty cache the bug produced.

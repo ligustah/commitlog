@@ -168,9 +168,16 @@ package commitlog
 //     Resume from the oldest surviving record rather than the one you wanted.
 //   - ErrMessageSetRefused — the bytes handed to AppendMessageSet are not a
 //     whole, ascending message set. Fix the framing; the log wrote nothing.
-//   - ErrUnknownLeaderEpoch — the probe named an epoch this log has no record
-//     of. It is a question about a fact the log does not hold, not a failure to
-//     read one.
+//   - ErrUnknownLeaderEpoch — the probe carried NO epoch: the Epoch value was
+//     never set, so there is no question to answer. It does NOT mean "an epoch
+//     this log has no record of", which is a different thing and is ANSWERED —
+//     from the next RECORDED epoch's offset, or from the log end when none is
+//     larger. Both answers are correct: an epoch that wrote no records ended
+//     where its successor opened. So a caller branching on this sentinel to
+//     detect "the leader does not know this epoch" has written a branch that
+//     can never be taken, and falls through to truncating against an answer it
+//     meant to treat as unknown. Observed downstream: a checkpoint holding
+//     epochs 2, 3 and 5 answered a probe for 4 from epoch 5's entry.
 //   - ErrInvalidSidecarName — fix the name. It reaches os.Remove and an atomic
 //     write, so the log refuses rather than acts on a name you did not mean.
 //   - ErrNoLog — there is no log at that path. Returned by the inspect helpers,
@@ -719,9 +726,18 @@ type CommitLog interface {
 	//
 	// Inclusive on BOTH branches. A follower keeps offsets up to and including
 	// the answer and truncates from answer+1; it must not treat the return as
-	// the exclusive start of the next epoch. The cache stores each epoch's
-	// assignment point as NewestOffset() — the last offset already written —
-	// so there is no arm of this that returns a first offset.
+	// the exclusive start of the next epoch. Both write paths anchor each epoch
+	// at the offset the log had ALREADY reached when it opened, so there is no
+	// arm of this that returns a first offset. That was not true before v0.99.0:
+	// the follower-ingest path anchored at the new epoch's first offset, one
+	// higher, so this answered one PAST the last record of the epoch asked about
+	// and the caller kept the divergent record it had asked how to discard.
+	//
+	// -1 IS A VALID ANSWER AND MEANS DISCARD EVERYTHING. It says the named epoch
+	// wrote no records this log can vouch for, which is the correct reply to a
+	// follower probing with an epoch that opened before this log held anything.
+	// Handle it as the truncation instruction it is; clamping it to 0 keeps a
+	// record that belongs to no shared history.
 	//
 	// An Epoch that names nothing is refused with ErrUnknownLeaderEpoch rather
 	// than answered. The caller of this truncates to the answer, so an offset

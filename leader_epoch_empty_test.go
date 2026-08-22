@@ -57,7 +57,9 @@ func TestAnEpochThatWroteNothingIsNotPreserved(t *testing.T) {
 	// So the probe for epoch 1 is answered from epoch 2's re-anchored offset.
 	// The accurate answer would be -1: epoch 1 wrote nothing, so a follower that
 	// was at epoch 1 holds nothing this leader can vouch for.
-	require.EqualValues(t, 0, c.LastOffsetForLeaderEpoch(1),
+	off, found := c.LastOffsetForLeaderEpoch(1)
+	require.True(t, found, "epoch 2's surviving entry is what answers the probe")
+	require.EqualValues(t, 0, off,
 		"a probe for a write-nothing epoch is answered from its successor; "+
 			"see the Known limitation entry for v0.95.8")
 }
