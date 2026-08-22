@@ -5,6 +5,43 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.96.3 — 2026-08-22
+
+A documentation placement fix. No code changed and no API changed — the three
+fields moved within the struct, which is not part of its contract.
+
+### Documentation
+
+- **Two paragraphs about the retention limits were rendered as
+  `LocalRetentionAge`'s documentation.** The block explaining that `MaxLog*`
+  bounds LOCAL disk alone, and that `MaxSegmentBytes` and `MaxLogBytes` count
+  deliberately different bytes under compression, sat AFTER the fields it
+  describes and ran into the next field's doc with no blank line between them.
+  Go attaches a comment block to the declaration that follows it, so godoc gave
+  the whole thing to `LocalRetentionAge` — a field about offload scheduling,
+  which the two paragraphs never mention. A caller reading it got the retention
+  note first and had no way to tell it was misfiled; a caller reading
+  `MaxLogBytes` got "Retention by bytes ON DISK" and nothing else, with the
+  reasoning attached to a neighbour.
+
+  Fixed by moving the three fields BELOW the block and naming them in its
+  opening line, so the note documents what it is about and `LocalRetentionAge`
+  opens with itself. Verified through `go doc` rather than by reading the
+  source, because the source is where this is invisible: the block looks
+  correctly placed to a human eye scanning downward, and only the renderer says
+  where it actually lands. An intermediate attempt — separating the two with a
+  blank line — was WORSE and was rejected on the same evidence: it detached the
+  note from `LocalRetentionAge` and attached it to nothing, so godoc stopped
+  printing it at all, trading a misfiled paragraph for a missing one.
+
+  `hack/docdrift.sh` cannot catch this. It enforces exactly this rule — a doc
+  comment must open with the name of the thing it documents — but over
+  FUNCTIONS, and this is a struct field. A scan of every field in the
+  non-test tree for the same shape found no second instance: the remaining
+  candidates are group docs that legitimately cover the field they attach to
+  (`Tier`'s `Max*` budgets, `Message`'s framing fields), so this was a one-off
+  rather than a class to fix in bulk.
+
 ## v0.96.2 — 2026-08-22
 
 A build change: the toolchain moves off a release candidate onto the 1.27.0

@@ -391,13 +391,10 @@ type Options struct {
 	Path            string        // Path to log directory
 	MaxSegmentBytes int64         // Max UNCOMPRESSED bytes a Segment can contain before creating a new one
 	MaxSegmentAge   time.Duration // Max time before a new log segment is rolled out.
-	MaxLogBytes     int64         // Retention by bytes ON DISK
-	MaxLogMessages  int64         // Retention by messages
-	MaxLogAge       time.Duration // Retention by age
-	// MaxLog* above bound LOCAL disk alone and do not count offloaded
-	// segments — counting them would delete records to reclaim space that
-	// offloading already reclaimed. Each tier carries its own budget; see
-	// Tier.MaxBytes.
+	// MaxLogBytes, MaxLogMessages and MaxLogAge bound LOCAL disk alone and do
+	// not count offloaded segments — counting them would delete records to
+	// reclaim space that offloading already reclaimed. Each tier carries its
+	// own budget; see Tier.MaxBytes.
 	//
 	// MaxSegmentBytes and MaxLogBytes count DIFFERENT bytes when Compression is
 	// set, and the difference is deliberate rather than an oversight in one of
@@ -409,6 +406,10 @@ type Options struct {
 	// A compressed log therefore holds more records per segment-full than an
 	// uncompressed one and the same number of BYTES per retention limit, which is
 	// what both settings are for.
+	MaxLogBytes    int64         // Retention by bytes ON DISK
+	MaxLogMessages int64         // Retention by messages
+	MaxLogAge      time.Duration // Retention by age
+
 	// LocalRetentionAge is how long a record's bytes stay on local disk before
 	// the log offloads them to the tier. Zero never offloads.
 	//
