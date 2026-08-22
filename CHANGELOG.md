@@ -5,6 +5,37 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.97.1 — 2026-08-22
+
+A documentation addition. No code changed.
+
+### Documentation
+
+- **`SetHighWatermark` did not say what happens to a watermark set above the
+  tail.** That value is accepted and kept — a follower is told what the leader
+  committed before the records arrive, and since v0.96.0 readers are bounded by
+  what the log holds and wait for the rest rather than failing. But the claim
+  lives only as long as the log does: the next open clamps an overshooting
+  checkpoint down to the tail, so it does not survive a restart.
+
+  Both halves were already true and only one was written down, in different
+  places. `HighWatermark` documents the open-time reconciliation; v0.96.0
+  documented the read-time bound in this changelog and cited the open-time clamp
+  as the precedent for it — which invites a reader to expect the same ACTION in
+  both, when one preserves the caller's value and the other discards it. Nothing
+  at the setter said either.
+
+  The asymmetry is deliberate and now says so: a live caller's claim is worth
+  honouring because that caller is present to correct it, while a persisted one
+  is a file whose records demonstrably are not there, and a node adopting it
+  could be elected and claim a boundary it cannot serve. Measured before
+  writing — stored 51 against a tail of 1 while the log lives, 1 after reopen.
+
+  Written because a consumer is reasoning about exactly this today, having just
+  reported a partition wedge caused by the other half of recovery (see v0.97.0).
+  The question "what happens to my watermark across a restart" had no answer at
+  the method they would ask it of.
+
 ## v0.97.0 — 2026-08-22
 
 One new method on `CommitLog`: `RepairTail`, which is `RecoverTail`'s structural

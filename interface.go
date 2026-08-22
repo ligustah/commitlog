@@ -618,6 +618,20 @@ type CommitLog interface {
 	// Committed data does not become uncommitted just because a caller passed a
 	// smaller number, and a late or reordered call must not walk the watermark
 	// backwards under readers that have already been told what is committed.
+	//
+	// A value ABOVE the log's tail is accepted and KEPT — a follower is told what
+	// the leader committed before the records arrive, which is ordinary. Readers
+	// are bounded by what the log actually holds and wait for the rest; nothing
+	// fails. But the claim lives only as long as this log does: the next open
+	// clamps an overshooting checkpoint down to the tail, so it does NOT survive
+	// a restart. See HighWatermark, which documents that reconciliation.
+	//
+	// The asymmetry is deliberate. A live caller's claim is worth honouring
+	// because that caller is here to correct it; a persisted one is a file whose
+	// records demonstrably are not present, and a node that adopted it could be
+	// elected and claim a boundary it cannot serve. So a caller that needs the
+	// claim after a restart re-states it — for a follower that is the leader's
+	// next fetch response, which carries it anyway.
 	SetHighWatermark(hw int64)
 
 	// OverrideHighWatermark sets the high watermark using the given value, even
