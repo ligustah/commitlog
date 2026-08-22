@@ -5,6 +5,51 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.100.0 — 2026-08-22
+
+The forensic surface reports record headers, and stops panicking the process
+that inspects a damaged file.
+
+### Fixed
+
+- **`InspectSegment(...).Records(...)` panicked the caller on a damaged
+  record.** `SerializedMessage.Key` and `.Value` slice by a length that lives in
+  the payload, and no checksum vouches for payload — the frame header's CRC
+  covers the record's IDENTITY, not its contents. One flipped bit indexes off the
+  end of the buffer.
+
+  This is the same defect `parseHeadersAfterValue` was written for — its own doc
+  names it, "a key length of 1<<20 in a 51-byte record indexed straight off the
+  end" — fixed at the time on the reader path only. This sibling site kept the
+  unchecked version, and it is the worse place to keep it: the reader validates
+  before handing out a record, while the inspector exists to be pointed at files
+  that are ALREADY damaged, and is the one tool a caller may aim at a captured
+  production directory without rewriting it. The tool provided for finding out
+  what went wrong killed the process asking.
+
+  One bounds-checked parse now gates Key, Value and Headers together, because it
+  walks key and value to reach the headers; its success is exactly the guarantee
+  the reader relies on. A frame that fails it still reports offset, timestamp,
+  leader epoch and `CRCValid` — everything not steered by an unverified length —
+  so a damaged record is still SHOWN, which is the point of an inspector.
+
+  Found by a mutation sweep over every byte position, written for the header
+  parse and panicking in `Key` on its first run. A single hand-placed bad byte
+  tests whichever field it lands in and would have missed this.
+
+### Added
+
+- **`RecordInfo.Headers`.** The forensic surface reported offset, timestamp,
+  epoch, key and value but dropped headers, which is where a producer's identity
+  lives. A consumer reading a captured directory to decide whether two
+  byte-identical batches came from one writer retrying or from a broker fence
+  failing could see the bytes were identical and not see who wrote them — from
+  the only tool permitted to touch that directory.
+
+  `nil` means the header region could not be parsed; a record that genuinely
+  carries no headers gets an empty non-nil map. An inspector needs those to be
+  different findings.
+
 ## v0.99.0 — 2026-08-22
 
 A correctness fix to the leader-epoch probe. The offset it returns changes for

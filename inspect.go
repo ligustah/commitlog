@@ -73,6 +73,19 @@ type RecordInfo struct {
 	Attributes  int8
 	Key         []byte
 	Value       []byte
+	// Headers are the record's headers, decoded with the same bounds-checked
+	// parse the reader uses — NOT SerializedMessage.Headers, whose walk is
+	// unchecked and safe only on a frame that parse has already cleared. Here
+	// the frames are damaged by assumption, so the checked one is the only
+	// option: a header length is payload the CRC does not gate, so one flipped
+	// byte is enough to send an unchecked walk off the end of the buffer and
+	// panic the process of whoever is inspecting the file.
+	//
+	// nil means the header region could not be parsed. A record that genuinely
+	// carries no headers gets an empty non-nil map, so the two are distinct —
+	// which matters to an inspector, because "this record has no headers" and
+	// "this record's headers are damaged" are different findings.
+	Headers map[string][]byte
 	// CRCValid reports whether the record matches its own checksum. Records
 	// does NOT stop at a record that fails: an inspector's job is to show what
 	// is there, and a caller looking for damage needs to see the damaged one
@@ -343,11 +356,36 @@ func walkFrames(buf []byte, fn func(RecordInfo) error) error {
 			Timestamp:   ms.Timestamp(),
 			LeaderEpoch: ms.LeaderEpoch(),
 		}
-		if len(msg) >= 4 {
+		// crcMatches guards its own length and is the single most useful thing
+		// to report about a damaged record, so it is never gated behind a parse
+		// that damage is expected to fail.
+		rec.CRCValid = msg.crcMatches()
+		if len(msg) >= 6 {
 			rec.Attributes = msg.Attributes()
-			rec.Key = msg.Key()
-			rec.Value = msg.Value()
-			rec.CRCValid = msg.crcMatches()
+			// Key, Value and Headers ALL live in the length-driven region, and
+			// the lengths steering it are payload that no checksum vouches for
+			// -- the frame header's CRC covers the record's identity, not its
+			// contents. Key and Value slice by those lengths WITHOUT checking
+			// them, so a single flipped bit indexes off the end and panics the
+			// process of whoever is inspecting the file.
+			//
+			// This is the same defect parseHeadersAfterValue was written for
+			// ("a key length of 1<<20 in a 51-byte record"), fixed then on the
+			// reader path only; this sibling site kept the unchecked version.
+			// Found here by corrupting every byte position in turn, which
+			// panicked the test binary on the first pass.
+			//
+			// One checked parse covers all three, because it walks key and
+			// value to reach the headers. Its success is exactly the guarantee
+			// reader.go relies on before handing out a Raw, so the fast
+			// accessors are safe below it and only below it. A frame that fails
+			// still reports offset, timestamp, epoch and CRCValid -- everything
+			// that does not depend on an unverified length.
+			if h, err := parseHeadersAfterValue(msg); err == nil {
+				rec.Key = msg.Key()
+				rec.Value = msg.Value()
+				rec.Headers = h
+			}
 		}
 		if err := fn(rec); err != nil {
 			return err
