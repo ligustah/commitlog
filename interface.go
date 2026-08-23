@@ -751,11 +751,23 @@ type CommitLog interface {
 	// log trims — so the prober is stale rather than divergent and is answered
 	// from the earliest anchor. Missing from BETWEEN two recorded epochs cannot
 	// happen by trimming at either end, so it means this log was present across
-	// that range and took no part in that tenure: the answer is the last epoch
-	// actually held below it, and the prober discards everything above. That
-	// truncates wider than the disputed range, because this log cannot know
-	// where the prober's records under an epoch it never held begin. Refuse a
-	// cut below a replica's commit boundary rather than take it silently.
+	// that range and took no part in that tenure: the answer is the ANCHOR of
+	// the highest epoch it did hold below the one asked about.
+	//
+	// That anchor is a different shape of answer from the recorded branch, and
+	// the difference is easy to misread. An anchor is where the log stood when
+	// that epoch OPENED, so the floor epoch's own records sit above it and the
+	// prober discards those too: a checkpoint holding 11, 13 and 15 answers a
+	// probe for 14 with epoch 13's anchor, NOT with the end of epoch 13. It has
+	// to be, because the end of epoch 13 is epoch 15's anchor — the ceiling
+	// answer this replaced — and that is precisely where records written under
+	// the unheld tenure collide with this log's own.
+	//
+	// So it truncates wider than the disputed range, by the whole of the floor
+	// epoch's records, which the prober may well agree on. That is the tightest
+	// sound answer available: this log cannot know where the prober's records
+	// under an epoch it never held begin, only that they are not its own. Refuse
+	// a cut below a replica's commit boundary rather than take it silently.
 	//
 	// Since v0.101.0. Before it, a gap was answered from the epoch ABOVE, which
 	// told the prober its epoch ran past its own log end — discard nothing —

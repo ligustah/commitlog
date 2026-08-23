@@ -225,6 +225,48 @@ func TestAProbeForATenureThisLogNeverHeldTruncatesToTheOneItDid(t *testing.T) {
 	require.Equal(t, int64(-1), off)
 }
 
+// The floor answer is the floor epoch's ANCHOR, not the end of the floor epoch,
+// so the floor epoch's own records are discarded too.
+//
+// This needs THREE recorded epochs to be visible at all, which is why it is a
+// separate fixture. With only 13 and 15 recorded there is nothing below 13, so
+// "13's anchor" and "the end of whatever preceded 13" are the same number and a
+// test cannot tell which one the code returned. durable_streams read the
+// changelog's "the last epoch actually held below it" as the END of 13 and asked
+// whether that was intended; the phrase was wrong and this pins the answer the
+// prose now describes.
+//
+// It has to be the anchor. The end of epoch 13 IS epoch 15's anchor -- the
+// ceiling answer this release removed -- and that is exactly where a responder's
+// own epoch-13 records collide with a prober's epoch-14 records at the same
+// offsets. Stopping there keeps the fork.
+func TestTheFloorAnswerIsTheAnchorNotTheEndOfTheFloorEpoch(t *testing.T) {
+	l := &leaderEpochCache{name: "three"}
+	require.NoError(t, l.Assign(11, 0))
+	require.NoError(t, l.Assign(13, 1))
+	require.NoError(t, l.Assign(15, 3))
+
+	// Epoch 13's own records are offsets 2..3: from its anchor+1 up to and
+	// including the anchor of the next recorded epoch.
+	off, found := l.LastOffsetForLeaderEpoch(13)
+	require.True(t, found)
+	require.Equal(t, int64(3), off, "epoch 13 ran until 15 opened at 3")
+
+	off, found = l.LastOffsetForLeaderEpoch(14)
+	require.True(t, found)
+	require.Equal(t, int64(1), off,
+		"a probe for the unheld epoch 14 gets epoch 13's ANCHOR")
+	require.NotEqual(t, int64(3), off,
+		"3 is the END of epoch 13, which is epoch 15's anchor -- the ceiling "+
+			"answer, and where the divergent records live")
+
+	// The gap below the floor epoch behaves the same way: 12 is also unheld, and
+	// also answers from 13's predecessor rather than from 13's end.
+	off, found = l.LastOffsetForLeaderEpoch(12)
+	require.True(t, found)
+	require.Equal(t, int64(0), off, "epoch 12 is unheld; the floor below it is 11")
+}
+
 // A floor answer can never point below the oldest surviving record, which is
 // what stops the wider truncation from becoming a whole-log wipe.
 //

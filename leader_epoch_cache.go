@@ -165,7 +165,20 @@ func (l *leaderEpochCache) Assign(epoch uint64, offset int64) error {
 //     The only way to be missing there is never to have recorded it -- this log
 //     was present across that range and took no part in that tenure. The
 //     prober's records under it came from a history this log has none of, so it
-//     is answered from the FLOOR: the last epoch actually held below it.
+//     is answered from the ANCHOR of the floor epoch -- the highest epoch this
+//     log did hold below the one asked about.
+//
+// Read that ANCHOR literally, because it is not the same shape of answer as the
+// recorded branch above it. An anchor is the offset the log had ALREADY reached
+// when that epoch opened, so the floor epoch's OWN records sit above it and the
+// prober discards them too. A checkpoint holding 11, 13 and 15 answers a probe
+// for 14 with epoch 13's anchor, not with the end of epoch 13.
+//
+// It has to be the anchor. The end of epoch 13 is the next recorded entry's
+// anchor -- epoch 15's -- which is the ceiling answer this release removed, and
+// it is exactly where the divergent records live: a responder that wrote its own
+// records under 13 and a prober that wrote different ones at those offsets under
+// 14 disagree there. Stopping at the end of 13 keeps the fork.
 //
 // Answering an interior gap from ABOVE, as this did until v0.101.0, tells the
 // prober its own epoch runs past its log end -- discard nothing -- about offsets
@@ -175,11 +188,13 @@ func (l *leaderEpochCache) Assign(epoch uint64, offset int64) error {
 // both sides forever. See TestNoMutatorCanRemoveAnEpochFromTheMiddle, which pins
 // the property the split rests on.
 //
-// The floor answer truncates more than the disputed range, because the responder
-// cannot know where the prober's records under the unheld epoch begin -- only
-// that they are not its own. Discarding back to a known-shared point and
-// refetching is the price of that ignorance, and the caller is expected to refuse
-// a cut below a replica's commit boundary rather than take it silently.
+// So the answer truncates more than the disputed range, by the whole of the floor
+// epoch's own records -- which the prober may well agree on. That is deliberate
+// and it is the tightest sound answer this structure can give: the responder
+// cannot tell which of those records the prober shares, only that the unheld
+// tenure is not its own. Discarding back to a known-shared point and refetching
+// is the price of that ignorance, and the caller is expected to refuse a cut
+// below a replica's commit boundary rather than take it silently.
 func (l *leaderEpochCache) LastOffsetForLeaderEpoch(epoch uint64) (int64, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

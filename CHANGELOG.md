@@ -25,13 +25,25 @@ A probe for an epoch this log never held is answered from below it, not above.
   indistinguishable from "that epoch wrote nothing" — two cases wanting opposite
   answers.
 
-  An epoch missing from an interior gap is now answered from the FLOOR: the last
-  epoch actually held below it. The prober discards everything above and refetches.
-  That is wider than the disputed range, deliberately — this log cannot know where
-  the prober's records under a tenure it never held begin, only that they are not
-  its own. The caller is expected to refuse a cut below a replica's commit
-  boundary rather than take it silently, which turns a silent divergence into a
-  visible halt.
+  An epoch missing from an interior gap is now answered from the **anchor of the
+  floor epoch** — the highest epoch this log did hold below the one asked about.
+  The prober discards everything above it and refetches.
+
+  Read "anchor" literally; it is not the same shape of answer as the recorded
+  branch, and the difference has already been misread once. An anchor is where
+  the log stood when that epoch OPENED, so the floor epoch's own records sit
+  above it and go too: a checkpoint holding 11, 13 and 15 answers a probe for 14
+  with epoch 13's anchor, NOT with the end of epoch 13. It has to be the anchor,
+  because the end of epoch 13 is epoch 15's anchor — the ceiling answer this
+  release removes — and that is exactly where a responder's own epoch-13 records
+  collide with a prober's epoch-14 records at the same offsets.
+
+  So it truncates wider than the disputed range, by the whole of the floor
+  epoch's records, which the prober may well agree on. Deliberate, and the
+  tightest sound answer this structure can give: the responder cannot tell which
+  of those records the prober shares, only that the unheld tenure is not its own.
+  The caller is expected to refuse a cut below a replica's commit boundary rather
+  than take it silently, which turns a silent divergence into a visible halt.
 
   **Narrowed to the interior gap, and that narrowing is the whole safety
   argument.** An epoch missing BELOW the earliest recorded one is not divergence:
