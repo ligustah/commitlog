@@ -630,9 +630,13 @@ run_guard "interior gap answers from below" leader_epoch_cache.go \
 # has even odds of removing this one instead, which DOES change an answer: a
 # prober ahead of this log stops being told "nothing above you" and starts being
 # handed a floor offset, which is a truncation instruction.
+#
+# Neutralized with `|| true` rather than by deleting the comparison: dropping it
+# outright leaves `latest` unused and the package stops COMPILING, which
+# guardcheck reports as a harness error and not as coverage.
 run_guard "a prober ahead of the log is not truncated" leader_epoch_cache.go \
   '	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) {' \
-  '	if epoch > earliest && !l.holdsEpoch(epoch) {' \
+  '	if epoch > earliest && (epoch < latest || true) && !l.holdsEpoch(epoch) {' \
   '^TestWhereAnEpochIsMissingDecidesHowItIsAnswered$'
 
 # A clean raises the epoch cache's floor, and that is the whole of what it does
