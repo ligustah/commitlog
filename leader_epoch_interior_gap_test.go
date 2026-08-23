@@ -321,21 +321,30 @@ func TestAnEpochOpenedOnAnEmptyLogSurvivesACleanThatTrimsNothing(t *testing.T) {
 		"a floor above an entry still re-anchors it")
 }
 
-// No answer can point below the oldest surviving record, which is what stops any
-// truncation instruction from becoming a whole-log wipe.
+// No answer is an OFFSET below the oldest surviving record, which is what stops
+// a truncation instruction from becoming an accidental whole-log wipe.
 //
 // It matters because the caller obeys the offset it is given -- Truncate(answer+1)
 // on an offset under the log discards everything, because findSegment lands on
-// the first segment and the rewrite keeps nothing. So the question is whether an
-// answer can ever sit under the retention floor.
+// the first segment and the rewrite keeps nothing.
 //
-// It cannot, and the reason is structural rather than arithmetic: every non-(-1)
-// answer is some recorded entry's anchor, and retention re-anchors the earliest
+// The reason is structural rather than arithmetic: every answer that is an offset
+// is some recorded entry's anchor, and retention re-anchors the earliest
 // surviving entry AT the floor rather than leaving it below. So the smallest
-// answer available is the floor itself. Pinned here because the property lives
-// in two files -- the trim in this one, the truncation in commitlog.go -- and
-// neither states it alone.
-func TestNoAnswerPointsBelowTheOldestSurvivingRecord(t *testing.T) {
+// offset available is the floor itself. Pinned here because the property lives in
+// two files -- the trim in this one, the truncation in commitlog.go -- and neither
+// states it alone.
+//
+// READ THE WORD "OFFSET". -1 is a sentinel meaning "nothing preceded this epoch",
+// and it is a legitimate answer that DOES instruct a whole-log discard -- see the
+// second half below. The property is about answers that denote a position, and
+// stating it without that qualifier is how this file used to read. It was
+// over-claimed rather than wrong: the fixture trims first, so every anchor in it
+// is a real offset and no assertion could ever reach the sentinel. In a codebase
+// where reading -1 as an offset has now caused two separate incidents
+// (v0.102.0's ClearEarliest, v0.101.0's floor rule), a test whose prose covers a
+// case its fixture excludes is worth more than the bug it currently pins.
+func TestNoAnswerIsAnOffsetBelowTheOldestSurvivingRecord(t *testing.T) {
 	l := &leaderEpochCache{name: "floorbound"}
 	require.NoError(t, l.Assign(5, 10))
 	require.NoError(t, l.Assign(6, 20))
@@ -349,6 +358,9 @@ func TestNoAnswerPointsBelowTheOldestSurvivingRecord(t *testing.T) {
 		"retention re-anchors the earliest survivor AT the floor")
 
 	// Every epoch anyone could name, well past both ends of what is recorded.
+	// Nothing here can answer -1-with-found, because the trim above left every
+	// anchor at a real offset -- which is exactly the fixture's blind spot, and
+	// why the untrimmed case gets its own half.
 	for probe := uint64(0); probe <= 20; probe++ {
 		off, found := l.LastOffsetForLeaderEpoch(probe)
 		if !found {
@@ -360,6 +372,31 @@ func TestNoAnswerPointsBelowTheOldestSurvivingRecord(t *testing.T) {
 			"probe %d answered %d, below the oldest surviving record; the caller would "+
 				"truncate to it and discard the whole log", probe, off)
 	}
+
+	// The other half: an UNTRIMMED log whose first epoch opened on an empty one.
+	// Its earliest anchor IS the -1 sentinel, so the answer sits below every
+	// record the log holds -- and that is correct, not a violation. Epoch 0 wrote
+	// nothing here, and "discard everything" is the truthful reply.
+	//
+	// This is b1's cache from the v0.103.0 regression, and it is the shape the
+	// first half structurally cannot build. Kept adjacent so the two readings of
+	// a sub-floor answer stay visible together: one is a bug and one is the
+	// contract.
+	fresh := &leaderEpochCache{name: "untrimmed"}
+	require.NoError(t, fresh.Assign(1, -1))
+	require.NoError(t, fresh.Assign(3, 79))
+
+	off, found := fresh.LastOffsetForLeaderEpoch(0)
+	require.True(t, found, "epoch 0 is answerable: epoch 1's entry records where it ended")
+	require.Equal(t, int64(-1), off,
+		"epoch 0 wrote nothing, so -1 is the truthful answer and it means discard "+
+			"everything -- a sentinel, not an offset under the log")
+
+	// And the probe next to it is an ordinary offset again, so the sentinel is
+	// confined to the one entry that carries it rather than leaking upward.
+	off, found = fresh.LastOffsetForLeaderEpoch(2)
+	require.True(t, found)
+	require.Equal(t, int64(79), off)
 }
 
 // ClearEarliest re-anchors the HIGHEST epoch it removes, and that specific
