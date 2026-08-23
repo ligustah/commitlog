@@ -112,14 +112,17 @@ func TestAnEpochWithNoSurvivingRecordsIsStillInTheCache(t *testing.T) {
 
 	require.EqualValues(t, 0, l.OldestOffset(), "the floor did not move")
 	require.EqualValues(t, 3, l.LastLeaderEpoch())
-	// Epoch 2 is what this test is about and it is still here. Epoch 1's own
-	// entry is not: it anchors at -1, below the floor of 0, and ClearEarliest
-	// drops a sub-floor entry without re-adding it when the next entry already
-	// sits AT the floor. That costs nothing -- epoch 2's entry still states that
-	// epoch 1 ended at 0, which is the only thing a probe for epoch 1 needs, and
-	// where epoch 1 began is below the floor and no longer vouchable.
-	require.Len(t, l.leaderEpochCache.epochOffsets, 2,
-		"the epoch whose every record was compacted away was dropped from the cache")
+	// Epoch 2 is what this test is about and it is still here. So is epoch 1's
+	// own entry, anchored at -1.
+	//
+	// It used to be dropped: -1 compared as sub-floor against a floor of 0 and
+	// ClearEarliest removed it. That reading was wrong -- -1 is the sentinel for
+	// "nothing preceded this epoch", not an offset -- and a floor of 0 means
+	// nothing was trimmed at all, which line 113 asserts directly. ClearEarliest
+	// now does nothing at a floor of 0, so the entry survives and the cache holds
+	// three.
+	require.Len(t, l.leaderEpochCache.epochOffsets, 3,
+		"nothing was trimmed at a floor of 0, so no entry should have been removed")
 	// Unchanged by the clean: epoch 2 still ends at 2, which is where it led,
 	// however little of what it wrote is still on disk.
 	require.EqualValues(t, 0, lastOffsetForEpoch(t, l, 1))

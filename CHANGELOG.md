@@ -5,6 +5,50 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.102.0 — 2026-08-23
+
+A clean that removed no records no longer rewrites the leader epoch cache.
+
+### Fixed
+
+- **`ClearEarliest` treated the `-1` anchor as an offset below the floor.** `-1`
+  is what `NewestOffset` answers on an empty log, so an epoch that opened before
+  anything was written anchors there, meaning "nothing preceded this epoch". It
+  is a SENTINEL, not an offset — but compared numerically it looks sub-floor
+  against a floor of 0, and the entry was re-anchored to `0`, which asserts the
+  opposite: that exactly one record preceded that epoch.
+
+  The damage lands on the PREDECESSOR's probe. With epoch 1 anchored at `-1`, a
+  probe for epoch 0 answers `-1` — discard everything, correct, because epoch 0
+  wrote nothing. Re-anchored to `0` it answers `0`: keep offset 0, a record that
+  belongs to epoch 1. The follower keeps a record from the very tenure it was
+  asking how to discard.
+
+  It also ran when there was nothing to do. A floor of 0 means the oldest
+  surviving record is the first one ever written, so no record has been removed
+  and no entry can be below it. The pass had no work and mutated the cache
+  anyway. `ClearEarliest` now returns early at a floor of 0 or below; a floor
+  that really moved still re-anchors exactly as before.
+
+  Found as a flake, not a failure. `TestTruncate` writes an epoch on an empty log
+  and asserts a probe for epoch 0 answers `-1`; it went red only when a cleaner
+  tick happened to land inside it, so it failed on the first run in a process and
+  passed on the next four. Present since at least v0.100.0, confirmed by running
+  that release in a separate worktree rather than inferring it.
+
+### Changed
+
+- **Half of the v0.95.8 known limitation is gone.** An epoch that wrote no
+  records now survives a clean that trims nothing, and a probe naming it answers
+  `-1` — "this epoch wrote nothing" — instead of the successor's re-anchored
+  offset. `TestAnEpochThatWroteNothingSurvivesACleanThatTrimsNothing` pins it.
+
+  The other half stands: once retention has genuinely moved, both entries are
+  below a real floor, the higher is re-anchored, and the probe is answered from
+  it. That is correct on its own terms — the records really are gone — but the
+  probe is inexact in the same way. Now pinned rather than only described, by
+  `TestAnEpochThatWroteNothingIsStillLostToARealTrim`.
+
 ## v0.101.0 — 2026-08-23
 
 A probe for an epoch this log never held is answered from below it, not above.
@@ -562,6 +606,10 @@ A documentation fix and an unexported rename. No behaviour changed.
   format is untouched and files round-trip across the rename.
 
 ### Known limitation, now documented rather than fixed
+
+> **Half fixed in v0.102.0.** A clean that trims nothing no longer collapses
+> these entries, so the case below now answers `-1` correctly. It still holds
+> once retention has genuinely moved the floor. See that release.
 
 - An epoch that writes **no** records is not preserved: `ClearEarliest`
   re-anchors sub-floor entries as the log trims, so two epochs opened back to

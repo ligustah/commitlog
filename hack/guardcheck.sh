@@ -639,6 +639,26 @@ run_guard "a prober ahead of the log is not truncated" leader_epoch_cache.go \
   '	if epoch > earliest && (epoch < latest || true) && !l.holdsEpoch(epoch) {' \
   '^TestWhereAnEpochIsMissingDecidesHowItIsAnswered$'
 
+# A floor of 0 trims no record, so it must trim no epoch entry. Without this the
+# -1 anchor of an epoch opened on an empty log compares as sub-floor and is
+# re-anchored to 0, which asserts that one record preceded that epoch -- and the
+# PREDECESSOR's probe then answers 0, "keep offset 0", where the truthful answer
+# is -1, "discard everything".
+#
+# Two lines in the pattern: `if l.earliestOffset() >= offset {` follows it and is
+# the guard this one was added in front of, so a one-line pattern would leave the
+# reader unable to see which of the two was neutralized.
+run_guard "a floor of zero trims nothing" leader_epoch_cache.go \
+  '	if offset <= 0 {
+		return nil
+	}
+	if l.earliestOffset() >= offset {' \
+  '	if offset <= 0 && false {
+		return nil
+	}
+	if l.earliestOffset() >= offset {' \
+  '^TestAnEpochOpenedOnAnEmptyLogSurvivesACleanThatTrimsNothing$'
+
 # A clean raises the epoch cache's floor, and that is the whole of what it does
 # to it. Note which test this is registered against: removing the call leaves
 # the cache untouched, which still KEEPS every epoch, so the tests named for the

@@ -277,9 +277,33 @@ func (l *leaderEpochCache) ClearLatest(offset int64) error {
 // ClearEarliest searches for the oldest leader epoch < offset, updates the
 // saved epoch offset to the given offset, then removes any previous epoch
 // entries.
+//
+// A floor of 0 does nothing at all, because a floor of 0 means the oldest
+// surviving record is the first one ever written -- nothing has been trimmed,
+// so nothing in the cache can be below it. See the guard for why that has to be
+// stated rather than left to the comparison.
 func (l *leaderEpochCache) ClearEarliest(offset int64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// -1 is a SENTINEL here, not an offset. It is what NewestOffset answers on an
+	// empty log, so an epoch that opened before anything was written anchors
+	// there, meaning "nothing preceded this epoch". Compared numerically it looks
+	// like an offset below a floor of 0, and the entry was re-anchored to 0 --
+	// which asserts the opposite, that exactly one record preceded the epoch.
+	//
+	// The damage is to the PREDECESSOR's probe. With epoch 1 anchored at -1, a
+	// probe for epoch 0 answers -1: discard everything, correct, because epoch 0
+	// wrote nothing. Re-anchored to 0 it answers 0: keep offset 0 -- a record
+	// that belongs to epoch 1. The follower keeps a record from a tenure it was
+	// asking how to discard.
+	//
+	// It also fired when there was nothing to do: at floor 0 no record has been
+	// removed, so this pass had no work and mutated the cache anyway. That is
+	// what made it a flake rather than a failure -- it needed a cleaner tick to
+	// land inside a test that had written an epoch on an empty log.
+	if offset <= 0 {
+		return nil
+	}
 	if l.earliestOffset() >= offset {
 		return nil
 	}

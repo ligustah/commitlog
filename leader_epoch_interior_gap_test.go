@@ -225,6 +225,49 @@ func TestAProbeForATenureThisLogNeverHeldTruncatesToTheOneItDid(t *testing.T) {
 	require.Equal(t, int64(-1), off)
 }
 
+// An epoch that opened on an empty log anchors at -1, and a clean that trims
+// nothing must leave it there.
+//
+// -1 is a sentinel meaning "nothing preceded this epoch", not an offset, but it
+// compares as one: against a floor of 0 it looks sub-floor, and ClearEarliest
+// re-anchored it to 0 -- asserting that exactly one record DID precede the
+// epoch. The cost lands on the predecessor's probe, which is what this asserts.
+//
+// Found as a flake rather than a failure. TestTruncate writes epoch 1 on an
+// empty log and then asserts a probe for epoch 0 answers -1; it went red only
+// when a cleaner tick happened to land inside the test, which is why it failed
+// on the first run in a process and passed on the next four. Present since at
+// least v0.100.0, confirmed by running that release in a worktree.
+func TestAnEpochOpenedOnAnEmptyLogSurvivesACleanThatTrimsNothing(t *testing.T) {
+	l := &leaderEpochCache{name: "sentinel"}
+	require.NoError(t, l.Assign(1, -1))
+	require.NoError(t, l.Assign(2, 4))
+	require.NoError(t, l.Assign(3, 9))
+
+	off, found := l.LastOffsetForLeaderEpoch(0)
+	require.True(t, found)
+	require.Equal(t, int64(-1), off,
+		"epoch 0 wrote nothing, so its probe means discard everything")
+
+	// The floor a clean passes when the whole log survives.
+	require.NoError(t, l.ClearEarliest(0))
+
+	require.Len(t, l.epochOffsets, 3, "a floor of 0 trims no record, so it must trim no entry")
+	require.Equal(t, int64(-1), l.epochOffsets[0].assignedAtOffset,
+		"epoch 1 still opened on an empty log; re-anchoring to 0 invents a record before it")
+
+	off, found = l.LastOffsetForLeaderEpoch(0)
+	require.True(t, found)
+	require.Equal(t, int64(-1), off,
+		"answering 0 here tells a follower to KEEP offset 0, which belongs to epoch 1")
+
+	// A real floor still trims, so the no-op is scoped to "nothing was removed"
+	// rather than switching the pass off.
+	require.NoError(t, l.ClearEarliest(5))
+	require.Equal(t, int64(5), l.epochOffsets[0].assignedAtOffset,
+		"a floor above an entry still re-anchors it")
+}
+
 // The floor answer is the floor epoch's ANCHOR, not the end of the floor epoch,
 // so the floor epoch's own records are discarded too.
 //
