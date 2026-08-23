@@ -5,6 +5,31 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.104.1 — 2026-08-23
+
+A repeated leader epoch assignment is no longer reported as a dropped one.
+
+### Fixed
+
+- **One warning covered an idempotent repeat and a real disagreement.** "The
+  epoch is already recorded" is two different events. An assignment IDENTICAL to
+  the one held — same epoch, same offset — changes nothing, and is the ordinary
+  result of a double notification during a takeover. An assignment of the same
+  epoch at a DIFFERENT offset is a genuine disagreement about where that epoch
+  began; the first anchor wins and the second is discarded.
+
+  Both said `this assignment was dropped`, which is false for the first: nothing
+  was dropped, because the cache already held exactly what the call asked for. A
+  cluster soak logged 21 of the benign kind across three nodes in one run, and a
+  peer reading them had to ask what the line meant before they could rule it out.
+
+  The two now say what happened. Both still log at WARN — the reason that arm
+  exists is that silence here once cost a downstream team an investigation, and
+  this changes the wording rather than the volume.
+
+  Same class as the two fixes above it: one negative result standing for two
+  distinguishable causes. Here it cost a reader's time rather than data.
+
 ## v0.104.0 — 2026-08-23
 
 `RepairTail` no longer amputates a tail it could not read.

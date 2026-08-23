@@ -398,11 +398,18 @@ func (l *leaderEpochCache) flush() error {
 func (l *leaderEpochCache) warn(epoch, latestEpoch uint64, offset, latestOffset int64) {
 	msg := slog.String("message", l.epochChangeMsg(epoch, latestEpoch, offset, latestOffset))
 
-	// Every refusal logs, including the one no arm anticipated. The two named
+	// Every refusal logs, including the one no arm anticipated. The two ordering
 	// cases below are strict comparisons, so an assignment of the epoch already
 	// latest at an offset at or after its own — a reassignment, which the doc on
 	// Assign says is not allowed — fell between them and produced NOTHING: no
 	// entry written, no line logged, and a nil error returned.
+	//
+	// FOUR ARMS, NOT THREE, because "the epoch is already recorded" is two
+	// different events. An IDENTICAL repeat changes nothing and is the ordinary
+	// result of a double notification during a takeover. A repeat at a DIFFERENT
+	// offset is a real disagreement about where that epoch began, and the first
+	// answer wins. Both were one message, which told a peer reading 21 identical
+	// benign lines that an assignment had been "dropped".
 	//
 	// That is indistinguishable from a successful assign at the call site and
 	// afterwards, and it cost a downstream team an investigation: their side
@@ -422,10 +429,33 @@ func (l *leaderEpochCache) warn(epoch, latestEpoch uint64, offset, latestOffset 
 			"for the most recently stored leader epoch. This implies messages have arrived out of order.",
 			msg,
 		)
+	case epoch == latestEpoch && offset == latestOffset:
+		// The benign half of what used to be one arm: the caller asked for
+		// exactly what is already recorded. Nothing was refused in any sense the
+		// caller cares about -- the cache holds what the call requested -- and
+		// the old wording ("this assignment was dropped") was simply false here.
+		//
+		// It stays at WARN and it stays logged, because the reason the default
+		// arm exists at all is that silence here once cost a downstream team an
+		// investigation. What was wrong was the WORDING, not the volume: one
+		// message covered an idempotent repeat and a genuine disagreement about
+		// where an epoch began, and only the second is worth acting on.
+		//
+		// Not hypothetical. A cluster soak produced 21 of these across three
+		// nodes in one run, every one byte-identical, and a peer had to ask what
+		// the line meant before they could rule it out -- an ordinary double
+		// notification during a takeover, which is what an idempotent assign is
+		// FOR.
+		slog.Warn("Ignored a repeated log leader epoch assignment identical to the "+
+			"one already recorded. Nothing changed and nothing was dropped: this "+
+			"is an idempotent repeat, not a conflict",
+			msg,
+		)
 	default:
 		slog.Warn("Refused a log leader epoch assignment that would reassign an epoch "+
-			"already recorded. An epoch's start offset is fixed once assigned, so "+
-			"this assignment was dropped",
+			"already recorded at a DIFFERENT offset. An epoch's start offset is "+
+			"fixed once assigned, so the recorded offset was kept and this "+
+			"assignment was dropped",
 			msg,
 		)
 	}

@@ -113,3 +113,60 @@ func TestLeaderEpochZeroIsRecorded(t *testing.T) {
 		"the re-anchored entry lost its epoch, so records from offset 20 no "+
 			"longer report the epoch they were written under")
 }
+
+// "The epoch is already recorded" is two different events, and one message for
+// both told readers the wrong thing about the common one.
+//
+// An IDENTICAL repeat -- same epoch, same offset -- changes nothing. It is the
+// ordinary result of a double notification during a takeover, and an idempotent
+// assign is exactly what should absorb it. A repeat at a DIFFERENT offset is a
+// real disagreement about where that epoch began, the first answer wins, and
+// something asked for an answer it did not get.
+//
+// Both used to say "this assignment was dropped", which is false for the first:
+// nothing was dropped, because the cache already held what the call asked for. A
+// cluster soak logged 21 of the benign kind across three nodes in one run and a
+// peer had to ask what the line meant before they could rule it out.
+//
+// Neither is silent, which is the property this must not regress -- see
+// TestLeaderEpochZeroIsRecorded, where the absence of a line for a refused
+// assignment cost a downstream team an investigation.
+func TestARepeatedEpochAssignmentIsNotReportedAsADroppedOne(t *testing.T) {
+	t.Run("identical repeat says nothing changed", func(t *testing.T) {
+		l := &leaderEpochCache{name: "idempotent"}
+		require.NoError(t, l.Assign(6, 77))
+
+		warnings := captureWarnings(t)
+		require.NoError(t, l.Assign(6, 77))
+		require.Len(t, l.epochOffsets, 1, "fixture: the repeat must not append")
+
+		out := warnings.String()
+		require.Contains(t, out, "idempotent repeat",
+			"an identical assignment must be named as one, or every reader has to "+
+				"compare New and Previous by eye to find out whether it mattered")
+		// The precise phrase, not the substring: this arm's own message says
+		// "nothing was dropped", which a looser assertion trips over.
+		require.NotContains(t, out, "this assignment was dropped",
+			"nothing was dropped: the cache already held exactly what was asked for")
+		require.Contains(t, out, "epoch:6",
+			"the line must name the assignment, or it cannot be ruled out")
+	})
+
+	t.Run("a different offset is still reported as dropped", func(t *testing.T) {
+		l := &leaderEpochCache{name: "conflict"}
+		require.NoError(t, l.Assign(6, 77))
+
+		warnings := captureWarnings(t)
+		require.NoError(t, l.Assign(6, 90))
+		require.Len(t, l.epochOffsets, 1)
+		require.EqualValues(t, 77, l.epochOffsets[0].assignedAtOffset,
+			"the first anchor wins; an epoch's start offset is fixed once assigned")
+
+		out := warnings.String()
+		require.Contains(t, out, "this assignment was dropped",
+			"this assignment really was dropped and the caller's answer differs "+
+				"from the recorded one")
+		require.NotContains(t, out, "idempotent repeat",
+			"a disagreement about where epoch 6 began must not read as a no-op")
+	})
+}

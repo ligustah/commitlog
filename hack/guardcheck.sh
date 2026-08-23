@@ -792,6 +792,21 @@ run_guard "every refused epoch assignment logs" leader_epoch_cache.go   '	defaul
 		slog.Warn("Refused a log leader epoch assignment that would reassign an epoch "+' '	case false:
 		slog.Warn("Refused a log leader epoch assignment that would reassign an epoch "+'   '^TestLeaderEpochZeroIsRecorded$'
 
+# An IDENTICAL repeated assignment is reported as one, not as a dropped one.
+# Neutralizing the arm sends a byte-identical repeat to the default, which says
+# "this assignment was dropped" -- false, since the cache already holds exactly
+# what the call asked for. A cluster soak logged 21 of these across three nodes in
+# one run and a peer had to ask what the line meant before ruling it out.
+#
+# Kept SEPARATE from "every refused epoch assignment logs" above, which pins that
+# the arm exists at all. This one pins what it SAYS, and the two fail for
+# different reasons: delete the default and refusals go silent, merge this into
+# the default and they lie instead.
+run_guard "a repeated assignment is not called a dropped one" leader_epoch_cache.go \
+  '	case epoch == latestEpoch && offset == latestOffset:' \
+  '	case false:' \
+  '^TestARepeatedEpochAssignmentIsNotReportedAsADroppedOne$'
+
 # A leader epoch arriving from the checkpoint file must be parsed as UNSIGNED.
 # The neutralization restores the old parse-then-convert, which is the whole bug:
 # "-1" is a valid int64, becomes 2^64-1 as a uint64, and that is a well-formed
