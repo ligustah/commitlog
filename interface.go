@@ -375,6 +375,15 @@ type CommitLog interface {
 	// correction. SetHighWatermark cannot walk back down, so the correction
 	// would have to be OverrideHighWatermark, and that leaves a window in which
 	// the log reports records as committed that are not.
+	//
+	// AN ERROR MEANS NOTHING WAS TRUNCATED, and retrying is safe. Read "torn or
+	// phantom" above strictly: this removes records only when the log can be
+	// read and they are not there. If it cannot read the tail at all — the log
+	// closing or deleted underneath it, a compaction swap outlasting the
+	// reader's retries — it reports that and leaves the log alone, because such
+	// an error is a fact about the reader and not about what is on disk. Since
+	// v0.104.0; before it, every one of those amputated the whole
+	// above-watermark tail, silently.
 	RepairTail() (lastGood int64, err error)
 
 	// ActiveSegmentBase returns the base offset of the active (unsealed)

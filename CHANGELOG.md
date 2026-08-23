@@ -5,6 +5,50 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.104.0 — 2026-08-23
+
+`RepairTail` no longer amputates a tail it could not read.
+
+### Fixed
+
+- **A failure to LOOK at the tail was treated as a tail that is not there.** When
+  `RepairTail` cannot build its recovery reader it calls `Truncate(hw + 1)`,
+  discarding every record above the commit boundary. That is correct for a
+  PHANTOM tail — the index claiming offsets the log does not hold — and
+  `ErrSegmentNotFound` is the only error that says so.
+
+  Every other error reaching that arm means something else entirely.
+  `newSourceReader` answers a log closing or deleted underneath recovery with
+  `ErrCommitLogClosed` or `ErrCommitLogDeleted`, and a compaction swap that
+  outlasts its eight retries with `ErrSegmentClosed` or `ErrSegmentReplaced`.
+  None of those is a statement about what is on disk, and all of them amputated.
+
+  On a replicated partition that tail is not spare capacity. A follower fetches
+  before records commit, so everything between the commit boundary and the log
+  end is ordinary replicated content on every open — which is precisely why
+  `RepairTail` exists as the half that sets no watermark. Those errors now reach
+  the caller and nothing is truncated; a tail this could not read is still on
+  disk, and retrying is the caller's call.
+
+  Same shape as the leader-epoch defect reverted in v0.103.0, one layer down: an
+  ABSENCE (no successful read) read as a FACT about the world (no record). It is
+  a fact about the reader.
+
+- **The amputation was silent.** It logged nothing at all, so an operator was
+  left with a shorter log and no line naming the step that shortened it — while
+  the neighbouring EOF path is chatty. It now warns with the offset, watermark,
+  tail and error. durable_streams chose `RepairTail` over `RecoverTail` on its
+  "truncates a torn or phantom suffix" contract and reported both halves of this;
+  when the phantom arm fires it should say so.
+
+### Notes
+
+- `RepairTail` was checked against a healthy log at eight watermark and segment
+  layouts — unset watermark, watermark at a segment boundary, an empty active
+  segment above the tail — and keeps every record in all of them
+  (`TestRepairTailKeepsEveryRecordOnAHealthyLog`). The reachable causes of the
+  bad arm are concurrent teardown and compaction, not an ordinary restart.
+
 ## v0.103.0 — 2026-08-23
 
 Reverts v0.101.0. An epoch with no cache entry is answered by its successor

@@ -1715,7 +1715,44 @@ func (l *commitLog) RepairTail() (int64, error) {
 	// overshoots the log actually on disk, this terminates instead of hanging.
 	r, err := l.newRecoveryReader(start)
 	if err != nil {
-		// Nothing readable above the checkpoint: keep the old amputation.
+		// The amputation below is for a PHANTOM tail: the index claims offsets
+		// above the checkpoint that the log does not contain, so there is
+		// nothing to scan and nothing to keep. ErrSegmentNotFound is the log
+		// saying exactly that, and it is the only error here that does.
+		//
+		// EVERY OTHER FAILURE MEANS "I COULD NOT LOOK", NOT "THERE IS NOTHING
+		// THERE", and the two must not share an arm. newSourceReader answers a
+		// log closing or deleted underneath recovery with ErrCommitLogClosed or
+		// ErrCommitLogDeleted, and a compaction swap that outlasted its eight
+		// retries with ErrSegmentClosed or ErrSegmentReplaced. None of those is
+		// a statement about the tail.
+		//
+		// Amputating on them is not a conservative default, it is data loss. On
+		// a replicated partition the above-watermark tail is not spare capacity
+		// -- a follower fetches before records commit, so everything between the
+		// commit boundary and the log end is ordinary replicated content on
+		// every open. Truncate(hw+1) discards all of it to resolve an error that
+		// was never about it. Report instead and let the caller retry; a tail
+		// this could not read is still on disk.
+		//
+		// Same shape as the leader-epoch defect reverted in v0.103.0: an ABSENCE
+		// (no successful read) was being read as a FACT about the world (no
+		// record). It is a fact about the reader.
+		if !errors.Is(err, ErrSegmentNotFound) {
+			return l.NewestOffset(), err
+		}
+		// The phantom case is destructive and used to be silent, which left an
+		// operator with a shorter log and nothing naming the step that shortened
+		// it. durable_streams chose RepairTail over RecoverTail specifically on
+		// its "truncates a torn or phantom suffix" contract; when this fires it
+		// is that contract being exercised, and it should say so.
+		slog.Warn("commitlog: no readable record above the checkpoint; amputating the tail",
+			slog.String("path", l.Path),
+			slog.Int64("from", start),
+			slog.Int64("high_watermark", hw),
+			slog.Int64("newest", newest),
+			slog.Any("err", err),
+		)
 		if terr := l.Truncate(hw + 1); terr != nil {
 			return l.NewestOffset(), terr
 		}

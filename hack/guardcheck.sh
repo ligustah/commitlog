@@ -643,6 +643,24 @@ run_guard "an absent epoch answers from its successor" leader_epoch_cache.go \
 }' \
   '^TestWhereAnEpochIsMissingDecidesHowItIsAnswered$'
 
+# RepairTail amputates the whole above-watermark tail when it cannot build a
+# recovery reader. That is right for a PHANTOM tail -- the index claiming offsets
+# the log does not hold, which is what ErrSegmentNotFound says -- and wrong for
+# every other error, which mean "I could not look": a log closing or deleted
+# underneath recovery, or a compaction swap outlasting newSourceReader's retries.
+# Without this arm a replicated partition loses its replicated-but-uncommitted
+# tail to an error that was never about it.
+#
+# The anchor test asserts the WARNING, not the returned error and not the
+# surviving records. Truncate on a closed log fails too, so the neutralized arm
+# still returns ErrCommitLogClosed and still destroys nothing -- both obvious
+# assertions pass either way, and the first draft of that test was vacuous. What
+# separates the arms is whether the amputation is ATTEMPTED.
+run_guard "a tail it could not read is not amputated" commitlog.go \
+  '		if !errors.Is(err, ErrSegmentNotFound) {' \
+  '		if !errors.Is(err, ErrSegmentNotFound) && false {' \
+  '^TestRepairTailDoesNotAmputateWhenItCannotRead$'
+
 # A floor of 0 trims no record, so it must trim no epoch entry. Without this the
 # -1 anchor of an epoch opened on an empty log compares as sub-floor and is
 # re-anchored to 0, which asserts that one record preceded that epoch -- and the
