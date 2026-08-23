@@ -612,6 +612,29 @@ run_guard "truncate clamps the watermark" commitlog.go \
 		slog.Warn("commitlog: truncation cut below the high watermark; clamping",' \
   '^TestTruncateBelowTheWatermarkClampsIt$'
 
+# An epoch missing from between two recorded ones is answered from BELOW. Without
+# this arm the probe falls through to the ceiling search and answers from above --
+# which reads as "your epoch runs past your own log end, discard nothing" about
+# offsets the two logs disagree on. That is the durable_streams partition fork.
+run_guard "interior gap answers from below" leader_epoch_cache.go \
+  '	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) {
+		if floor := l.floorEpoch(epoch); floor != nil {' \
+  '	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) && false {
+		if floor := l.floorEpoch(epoch); floor != nil {' \
+  '^TestAProbeForATenureThisLogNeverHeldTruncatesToTheOneItDid$'
+
+# The upper bound on that arm, registered separately because the two bounds are
+# not equally load-bearing and the redundant one is the tempting one to keep.
+# `epoch > earliest` can be dropped with no visible effect -- floorEpoch answers
+# nil below the earliest entry anyway -- so a reader simplifying the condition
+# has even odds of removing this one instead, which DOES change an answer: a
+# prober ahead of this log stops being told "nothing above you" and starts being
+# handed a floor offset, which is a truncation instruction.
+run_guard "a prober ahead of the log is not truncated" leader_epoch_cache.go \
+  '	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) {' \
+  '	if epoch > earliest && !l.holdsEpoch(epoch) {' \
+  '^TestWhereAnEpochIsMissingDecidesHowItIsAnswered$'
+
 # A clean raises the epoch cache's floor, and that is the whole of what it does
 # to it. Note which test this is registered against: removing the call leaves
 # the cache untouched, which still KEEPS every epoch, so the tests named for the

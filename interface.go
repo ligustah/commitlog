@@ -170,14 +170,20 @@ package commitlog
 //     whole, ascending message set. Fix the framing; the log wrote nothing.
 //   - ErrUnknownLeaderEpoch — the probe carried NO epoch: the Epoch value was
 //     never set, so there is no question to answer. It does NOT mean "an epoch
-//     this log has no record of", which is a different thing and is ANSWERED —
-//     from the next RECORDED epoch's offset, or from the log end when none is
-//     larger. Both answers are correct: an epoch that wrote no records ended
-//     where its successor opened. So a caller branching on this sentinel to
-//     detect "the leader does not know this epoch" has written a branch that
-//     can never be taken, and falls through to truncating against an answer it
-//     meant to treat as unknown. Observed downstream: a checkpoint holding
-//     epochs 2, 3 and 5 answered a probe for 4 from epoch 5's entry.
+//     this log has no record of", which is a different thing and is ANSWERED.
+//     So a caller branching on this sentinel to detect "the leader does not
+//     know this epoch" has written a branch that can never be taken, and falls
+//     through to truncating against an answer it meant to treat as unknown.
+//     Which answer it gets depends on WHERE the epoch is missing, and the two
+//     are opposite: below the earliest recorded epoch it is answered from the
+//     earliest anchor, because retention destroyed the entry and the prober is
+//     merely stale; in a gap between two recorded epochs it is answered from
+//     the epoch BELOW it, because nothing here can produce such a gap and the
+//     prober's records under it belong to a tenure this log never held. Since
+//     v0.101.0 — before it, the gap case answered from ABOVE and told the
+//     prober to keep records the two logs disagreed on. Observed downstream:
+//     a checkpoint holding epochs 2, 3 and 5 answers a probe for 4 from epoch
+//     3's entry, and answered it from 5's until that release.
 //   - ErrInvalidSidecarName — fix the name. It reaches os.Remove and an atomic
 //     write, so the log refuses rather than acts on a name you did not mean.
 //   - ErrNoLog — there is no log at that path. Returned by the inspect helpers,
@@ -738,6 +744,25 @@ type CommitLog interface {
 	// follower probing with an epoch that opened before this log held anything.
 	// Handle it as the truncation instruction it is; clamping it to 0 keeps a
 	// record that belongs to no shared history.
+	//
+	// AN EPOCH THIS LOG HAS NO ENTRY FOR IS STILL ANSWERED, and the answer
+	// depends on where it is missing. Below the earliest recorded epoch is
+	// retention's doing — entries under the surviving floor are collapsed as the
+	// log trims — so the prober is stale rather than divergent and is answered
+	// from the earliest anchor. Missing from BETWEEN two recorded epochs cannot
+	// happen by trimming at either end, so it means this log was present across
+	// that range and took no part in that tenure: the answer is the last epoch
+	// actually held below it, and the prober discards everything above. That
+	// truncates wider than the disputed range, because this log cannot know
+	// where the prober's records under an epoch it never held begin. Refuse a
+	// cut below a replica's commit boundary rather than take it silently.
+	//
+	// Since v0.101.0. Before it, a gap was answered from the epoch ABOVE, which
+	// told the prober its epoch ran past its own log end — discard nothing —
+	// about offsets the two logs did not agree on. durable_streams lost a
+	// partition to it: a node holding epochs 13 and 15, probed for 14, answered
+	// from 15's anchor, which sat above the fork, and the divergent records
+	// survived on both sides permanently.
 	//
 	// An Epoch that names nothing is refused with ErrUnknownLeaderEpoch rather
 	// than answered. The caller of this truncates to the answer, so an offset

@@ -147,22 +147,90 @@ func (l *leaderEpochCache) Assign(epoch uint64, offset int64) error {
 // could only arise from an epoch opened on a genuinely empty log. Widening the
 // arithmetic to be correct is what made the overload load-bearing.
 //
-// One caveat survives the split: an epoch that wrote no records is not always
-// preserved, because ClearEarliest re-anchors sub-floor entries as the log
-// trims -- two epochs opened back to back collapse into a single entry at the
-// surviving floor, and the earlier of the two stops existing. A probe naming it
-// is then answered from the successor's re-anchored offset. Whether that is
-// reachable depends on the caller's controller never issuing an epoch that
-// writes nothing and then reappearing on a follower -- a guarantee this package
-// cannot make or check.
+// An epoch this log has NO entry for is two different situations, and they want
+// opposite answers. Which one it is depends entirely on where the missing epoch
+// falls:
+//
+//   - BELOW the earliest recorded epoch. Retention did this. ClearEarliest
+//     collapses every entry under the surviving floor into one, so epochs the log
+//     genuinely lived through stop existing as the log trims. The prober is
+//     merely stale, not divergent, and is answered from the earliest anchor --
+//     the same answer this gave before the floor rule, and the reason that rule
+//     stops at the earliest entry.
+//
+//   - In an INTERIOR gap, strictly between two recorded epochs. Nothing in this
+//     package can produce that. ClearEarliest removes a prefix and re-adds the
+//     HIGHEST epoch it removed, ClearLatest removes a suffix, and assign only
+//     appends, so retention can never leave a hole above the earliest survivor.
+//     The only way to be missing there is never to have recorded it -- this log
+//     was present across that range and took no part in that tenure. The
+//     prober's records under it came from a history this log has none of, so it
+//     is answered from the FLOOR: the last epoch actually held below it.
+//
+// Answering an interior gap from ABOVE, as this did until v0.101.0, tells the
+// prober its own epoch runs past its log end -- discard nothing -- about offsets
+// the two do not agree on. durable_streams lost a partition to exactly that: a
+// node holding epochs 13 and 15 answered a probe for 14 from epoch 15's anchor,
+// which sat above the divergence, and the two records at the fork survived on
+// both sides forever. See TestNoMutatorCanRemoveAnEpochFromTheMiddle, which pins
+// the property the split rests on.
+//
+// The floor answer truncates more than the disputed range, because the responder
+// cannot know where the prober's records under the unheld epoch begin -- only
+// that they are not its own. Discarding back to a known-shared point and
+// refetching is the price of that ignorance, and the caller is expected to refuse
+// a cut below a replica's commit boundary rather than take it silently.
 func (l *leaderEpochCache) LastOffsetForLeaderEpoch(epoch uint64) (int64, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	if len(l.epochOffsets) == 0 {
+		return -1, false
+	}
+	var (
+		earliest = l.epochOffsets[0].leaderEpoch
+		latest   = l.epochOffsets[len(l.epochOffsets)-1].leaderEpoch
+	)
+	// Strictly between two recorded epochs, and not one of them: at or below the
+	// earliest is retention's doing, above the latest is a prober ahead of this
+	// log, and neither is a tenure this log declined to take part in.
+	//
+	// The two bounds are NOT equally load-bearing, which matters to anyone
+	// tempted to simplify. `epoch < latest` is: without it a prober ahead of this
+	// log gets a floor offset — a truncation instruction — where it must get
+	// "nothing recorded above you, keep everything". `epoch > earliest` is belt
+	// and braces, because floorEpoch already answers nil when nothing is below;
+	// it stays because it states the rule the doc above describes, and dropping
+	// the wrong one of the two is silent.
+	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) {
+		if floor := l.floorEpoch(epoch); floor != nil {
+			return floor.assignedAtOffset, true
+		}
+	}
 	e := l.findEpoch(epoch + 1)
 	if e == nil {
 		return -1, false
 	}
 	return e.assignedAtOffset, true
+}
+
+// holdsEpoch reports whether this log recorded the given epoch itself, as
+// opposed to merely spanning it. findEpoch is a ceiling search, so it answers an
+// absent epoch with its successor; the equality is what makes this exact.
+func (l *leaderEpochCache) holdsEpoch(epoch uint64) bool {
+	e := l.findEpoch(epoch)
+	return e != nil && e.leaderEpoch == epoch
+}
+
+// floorEpoch returns the highest recorded epoch strictly below the given one, or
+// nil when this log recorded none.
+func (l *leaderEpochCache) floorEpoch(epoch uint64) *epochOffset {
+	i := sort.Search(len(l.epochOffsets), func(i int) bool {
+		return l.epochOffsets[i].leaderEpoch >= epoch
+	})
+	if i == 0 {
+		return nil
+	}
+	return l.epochOffsets[i-1]
 }
 
 // LastLeaderEpoch returns the latest leader epoch for the log.

@@ -5,6 +5,68 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.101.0 — 2026-08-23
+
+A probe for an epoch this log never held is answered from below it, not above.
+
+### Fixed
+
+- **`LastOffsetForLeaderEpoch` answered an epoch missing from between two
+  recorded ones with the offset of the epoch ABOVE it.** `findEpoch` is a ceiling
+  search, so a checkpoint holding 13 and 15, probed for 14, returned epoch 15's
+  anchor. To the follower that reads as "your epoch runs past your own log end,
+  discard nothing" — about offsets the two logs do not agree on.
+
+  Ceiling is sound only if the responder's cache records every epoch it has lived
+  through. Kafka's does, because records carry a leader epoch and a replicating
+  follower records epochs it never led, so an absent epoch there genuinely never
+  existed. A cache that records only the tenures its own node took part in is
+  SPARSE, gaps are the normal shape rather than corruption, and the gap is
+  indistinguishable from "that epoch wrote nothing" — two cases wanting opposite
+  answers.
+
+  An epoch missing from an interior gap is now answered from the FLOOR: the last
+  epoch actually held below it. The prober discards everything above and refetches.
+  That is wider than the disputed range, deliberately — this log cannot know where
+  the prober's records under a tenure it never held begin, only that they are not
+  its own. The caller is expected to refuse a cut below a replica's commit
+  boundary rather than take it silently, which turns a silent divergence into a
+  visible halt.
+
+  **Narrowed to the interior gap, and that narrowing is the whole safety
+  argument.** An epoch missing BELOW the earliest recorded one is not divergence:
+  `ClearEarliest` collapses every entry under the surviving floor as the log
+  trims, so epochs this node genuinely lived through stop existing. Answering
+  those from below would tell a merely-stale follower to discard its whole log.
+  They keep the previous answer — the earliest anchor — as does a probe above the
+  latest recorded epoch, which is a prober ahead of this log with nothing to
+  discard. Three of the four cases are unchanged.
+
+  What makes the split decidable is that no mutator here can remove an epoch from
+  the MIDDLE: `ClearEarliest` removes a prefix and re-adds the HIGHEST epoch it
+  removed, `ClearLatest` removes a suffix, and `assign` only appends. So retention
+  can never leave a hole above the earliest survivor, and a hole there can only
+  mean the tenure was never recorded. `TestNoMutatorCanRemoveAnEpochFromTheMiddle`
+  sweeps both trims in both orders over every boundary to pin it.
+
+  Found in a live three-node cluster, not by inspection: one partition forked at
+  two offsets and stayed forked, with the majority version on two nodes and the
+  minority on the node that was leader. Reported by durable_streams and sqlcdc,
+  who supplied the timeline, ran the discriminators that ruled out segment layout
+  first, and asked for this shape of fix.
+
+  Also corrected: the `ErrUnknownLeaderEpoch` bullet in the package doc still
+  described the ceiling answer as correct, citing a checkpoint holding 2, 3 and 5
+  answering a probe for 4 from epoch 5's entry. It now answers from 3's.
+
+### Notes
+
+- The `epoch > earliest` half of the new condition is redundant — `floorEpoch`
+  answers nil below the earliest entry anyway — and is kept because it states the
+  rule rather than merely implementing it. `epoch < latest` is NOT redundant, and
+  the two are registered as separate guards so that simplifying the wrong one is
+  not silent.
+
 ## v0.100.0 — 2026-08-22
 
 The forensic surface reports record headers, and stops panicking the process
