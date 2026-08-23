@@ -5,6 +5,59 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.103.0 — 2026-08-23
+
+Reverts v0.101.0. An epoch with no cache entry is answered by its successor
+again, wherever it is missing.
+
+**Upgrade from v0.101.0 or v0.102.0.** Both break an ordinary three-way
+leadership handover. v0.102.0's unrelated `ClearEarliest` fix is kept.
+
+### Fixed
+
+- **v0.101.0's interior-gap rule told an ordinary follower to discard its whole
+  log.** It answered a probe for an epoch missing from BETWEEN two recorded ones
+  from the epoch below, on the premise that such a gap can only mean "this node
+  took no part in that tenure". The premise is wrong, and the error is in what
+  an entry means.
+
+  This cache is SPARSE: only a leader assigns, so an entry says "I LED this
+  tenure" and says nothing either way about tenures the node merely lived
+  through. A node that FOLLOWED during an epoch holds every record of it and has
+  no entry for it. So an interior gap has two producers that this structure
+  cannot tell apart — a follower that agrees with the prober about everything,
+  and a deposed leader that forked — and v0.101.0 chose the second reading
+  unconditionally.
+
+  durable_streams reported it against a deterministic reproducer: b1 leads at
+  epoch 1, b2 at 2, b1 again at 3, leaving b1 with `{1@-1, 3@79}` and all of b2's
+  records. A probe for epoch 2 answered `-1`, because the floor was the log's
+  FIRST entry and its anchor is the "nothing preceded this" sentinel — so the
+  answer was "discard your entire log", to a node holding an identical one. Their
+  follower refused the cut as below its commit boundary, which turned silent
+  whole-log deletion into a permanent replication halt: 12 of them, on a suite
+  that passes in 5.9s at v0.100.0 and times out at 361s from v0.101.0. Five of
+  their modules were pinned back.
+
+  That is a second place the `-1` sentinel was read as an offset, a month after
+  the same mistake in `ClearEarliest` (v0.102.0). But narrowing the branch to
+  never answer `-1` would only have quieted the loudest case: with b1's first
+  epoch anchored at 5 instead, the floor answer discards 74 records the two nodes
+  agree on.
+
+### Changed
+
+- **The fork case is documented as a limitation rather than fixed.** A responder
+  that was deposed and kept appending under its stale epoch is still answered
+  above the fork, so the divergent records survive on both sides. It is not
+  detectable from this side: separating it from the handover above needs an epoch
+  recorded for a tenure the node did not lead, which is what Kafka's per-record
+  epochs provide and a sparse cache cannot. The fix belongs upstream, where a
+  deposed leader is stopped from appending — see the v0.95.8 known limitation.
+  `TestAForkedTenureIsAnsweredAboveTheForkAndCannotBeDetectedHere` asserts the
+  unsound answer deliberately, next to the handover fixture it is
+  indistinguishable from, so the next attempt at v0.101.0 starts by reading both.
+
 ## v0.102.0 — 2026-08-23
 
 A clean that removed no records no longer rewrites the leader epoch cache.
@@ -50,6 +103,14 @@ A clean that removed no records no longer rewrites the leader epoch cache.
   `TestAnEpochThatWroteNothingIsStillLostToARealTrim`.
 
 ## v0.101.0 — 2026-08-23
+
+> **Withdrawn. Reverted in v0.103.0 — do not run this release or v0.102.0.**
+> Everything below rests on "a gap between two recorded epochs means this node
+> took no part in that tenure". It does not: only a leader writes an entry, so a
+> node that FOLLOWED holds all of an epoch's records and has no entry for it. The
+> rule below therefore tells an ordinary follower to discard a log that has not
+> diverged. Read v0.103.0 instead; the fork this was meant to close is a
+> limitation, not a bug that is fixable from here.
 
 A probe for an epoch this log never held is answered from below it, not above.
 
@@ -610,6 +671,11 @@ A documentation fix and an unexported rename. No behaviour changed.
 > **Half fixed in v0.102.0.** A clean that trims nothing no longer collapses
 > these entries, so the case below now answers `-1` correctly. It still holds
 > once retention has genuinely moved the floor. See that release.
+>
+> **And it is where the fork belongs.** v0.101.0 tried to make the probe detect a
+> deposed leader's divergent records and had to be reverted, because a sparse
+> epoch cache cannot see the difference between that and a node that followed.
+> Stopping a deposed leader from appending is the fix; see v0.103.0.
 
 - An epoch that writes **no** records is not preserved: `ClearEarliest`
   re-anchors sub-floor entries as the log trims, so two epochs opened back to

@@ -612,31 +612,35 @@ run_guard "truncate clamps the watermark" commitlog.go \
 		slog.Warn("commitlog: truncation cut below the high watermark; clamping",' \
   '^TestTruncateBelowTheWatermarkClampsIt$'
 
-# An epoch missing from between two recorded ones is answered from BELOW. Without
-# this arm the probe falls through to the ceiling search and answers from above --
-# which reads as "your epoch runs past your own log end, discard nothing" about
-# offsets the two logs disagree on. That is the durable_streams partition fork.
-run_guard "interior gap answers from below" leader_epoch_cache.go \
-  '	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) {
-		if floor := l.floorEpoch(epoch); floor != nil {' \
-  '	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) && false {
-		if floor := l.floorEpoch(epoch); floor != nil {' \
-  '^TestAProbeForATenureThisLogNeverHeldTruncatesToTheOneItDid$'
-
-# The upper bound on that arm, registered separately because the two bounds are
-# not equally load-bearing and the redundant one is the tempting one to keep.
-# `epoch > earliest` can be dropped with no visible effect -- floorEpoch answers
-# nil below the earliest entry anyway -- so a reader simplifying the condition
-# has even odds of removing this one instead, which DOES change an answer: a
-# prober ahead of this log stops being told "nothing above you" and starts being
-# handed a floor offset, which is a truncation instruction.
+# Every epoch with no entry is answered by its SUCCESSOR's anchor, whatever its
+# position. v0.101.0 gave an interior gap its own arm answering from below, on
+# the premise that a gap means this node took no part in that tenure -- which is
+# false for a node that FOLLOWED, since only a leader records an epoch. That told
+# ordinary followers to discard logs that had not diverged, and it was reverted in
+# v0.103.0.
 #
-# Neutralized with `|| true` rather than by deleting the comparison: dropping it
-# outright leaves `latest` unused and the package stops COMPILING, which
-# guardcheck reports as a harness error and not as coverage.
-run_guard "a prober ahead of the log is not truncated" leader_epoch_cache.go \
-  '	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) {' \
-  '	if epoch > earliest && (epoch < latest || true) && !l.holdsEpoch(epoch) {' \
+# The +1 is the whole rule, so this guard is the ceiling search itself: drop it
+# and the probe answers about the epoch asked for rather than the one after it,
+# which is off by an entire tenure.
+#
+# Anchored on the table rather than on the follower test, because the follower
+# fixture cannot see this mutation: with {1@-1, 3@79} a probe for 2 reaches entry
+# 3 either way. The table has a RECORDED epoch in it, which is the row that moves.
+# What pins the revert itself is the follower test, and no guard can express it --
+# guardcheck neutralizes code, and the revert is the absence of some.
+run_guard "an absent epoch answers from its successor" leader_epoch_cache.go \
+  '	e := l.findEpoch(epoch + 1)
+	if e == nil {
+		return -1, false
+	}
+	return e.assignedAtOffset, true
+}' \
+  '	e := l.findEpoch(epoch)
+	if e == nil {
+		return -1, false
+	}
+	return e.assignedAtOffset, true
+}' \
   '^TestWhereAnEpochIsMissingDecidesHowItIsAnswered$'
 
 # A floor of 0 trims no record, so it must trim no epoch entry. Without this the

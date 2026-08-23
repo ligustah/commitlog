@@ -174,16 +174,10 @@ package commitlog
 //     So a caller branching on this sentinel to detect "the leader does not
 //     know this epoch" has written a branch that can never be taken, and falls
 //     through to truncating against an answer it meant to treat as unknown.
-//     Which answer it gets depends on WHERE the epoch is missing, and the two
-//     are opposite: below the earliest recorded epoch it is answered from the
-//     earliest anchor, because retention destroyed the entry and the prober is
-//     merely stale; in a gap between two recorded epochs it is answered from
-//     the epoch BELOW it, because nothing here can produce such a gap and the
-//     prober's records under it belong to a tenure this log never held. Since
-//     v0.101.0 — before it, the gap case answered from ABOVE and told the
-//     prober to keep records the two logs disagreed on. Observed downstream:
-//     a checkpoint holding epochs 2, 3 and 5 answers a probe for 4 from epoch
-//     3's entry, and answered it from 5's until that release.
+//     The answer is the next RECORDED epoch's anchor, wherever the missing one
+//     falls: a checkpoint holding epochs 2, 3 and 5 answers a probe for 4 from
+//     epoch 5's entry. v0.101.0 and v0.102.0 answered a gap between two
+//     recorded epochs from the epoch BELOW instead; v0.103.0 reverted that.
 //   - ErrInvalidSidecarName — fix the name. It reaches os.Remove and an atomic
 //     write, so the log refuses rather than acts on a name you did not mean.
 //   - ErrNoLog — there is no log at that path. Returned by the inspect helpers,
@@ -745,36 +739,34 @@ type CommitLog interface {
 	// Handle it as the truncation instruction it is; clamping it to 0 keeps a
 	// record that belongs to no shared history.
 	//
-	// AN EPOCH THIS LOG HAS NO ENTRY FOR IS STILL ANSWERED, and the answer
-	// depends on where it is missing. Below the earliest recorded epoch is
-	// retention's doing — entries under the surviving floor are collapsed as the
-	// log trims — so the prober is stale rather than divergent and is answered
-	// from the earliest anchor. Missing from BETWEEN two recorded epochs cannot
-	// happen by trimming at either end, so it means this log was present across
-	// that range and took no part in that tenure: the answer is the ANCHOR of
-	// the highest epoch it did hold below the one asked about.
+	// AN EPOCH THIS LOG HAS NO ENTRY FOR IS STILL ANSWERED, from the next
+	// RECORDED epoch's anchor — the offset this log had reached when that epoch
+	// opened. Wherever the missing epoch falls, the answer is the same shape: a
+	// checkpoint holding 11, 13 and 15 answers a probe for 12 or 14 from epoch
+	// 15's entry, because 15 is the next epoch recorded above either.
 	//
-	// That anchor is a different shape of answer from the recorded branch, and
-	// the difference is easy to misread. An anchor is where the log stood when
-	// that epoch OPENED, so the floor epoch's own records sit above it and the
-	// prober discards those too: a checkpoint holding 11, 13 and 15 answers a
-	// probe for 14 with epoch 13's anchor, NOT with the end of epoch 13. It has
-	// to be, because the end of epoch 13 is epoch 15's anchor — the ceiling
-	// answer this replaced — and that is precisely where records written under
-	// the unheld tenure collide with this log's own.
+	// The entries here are SPARSE and that is worth knowing before writing a
+	// caller. Only a leader records an epoch, so an entry means "I LED this
+	// tenure" and its absence does NOT mean "I was not here for it": a node that
+	// followed holds every record of a tenure it has no entry for. An ordinary
+	// three-way handover — b1, b2, b1 — leaves b1 with entries for its own two
+	// tenures, a gap where b2's was, and all of b2's records.
 	//
-	// So it truncates wider than the disputed range, by the whole of the floor
-	// epoch's records, which the prober may well agree on. That is the tightest
-	// sound answer available: this log cannot know where the prober's records
-	// under an epoch it never held begin, only that they are not its own. Refuse
-	// a cut below a replica's commit boundary rather than take it silently.
+	// KNOWN LIMITATION, and the reason this reads the way it does. If the
+	// responder was instead the DEPOSED leader of the epoch below the gap and
+	// kept appending under it, its records at those offsets are its own and the
+	// prober's are different. The answer above then sits ABOVE the fork and the
+	// divergent records survive on both sides. This cannot be detected here: the
+	// two situations produce the same cache, and separating them needs an epoch
+	// recorded for a tenure the node did not lead, which a sparse cache has no
+	// way to write. Stop a deposed leader from appending; see the v0.95.8 known
+	// limitation in CHANGELOG.md.
 	//
-	// Since v0.101.0. Before it, a gap was answered from the epoch ABOVE, which
-	// told the prober its epoch ran past its own log end — discard nothing —
-	// about offsets the two logs did not agree on. durable_streams lost a
-	// partition to it: a node holding epochs 13 and 15, probed for 14, answered
-	// from 15's anchor, which sat above the fork, and the divergent records
-	// survived on both sides permanently.
+	// v0.101.0 tried to close that from this side, by answering a gap between two
+	// recorded epochs from the epoch BELOW it. That reading is unsound in the far
+	// commoner direction: it told the b1 above to discard a log identical to the
+	// prober's, and where the epoch below was the log's first, its -1 anchor made
+	// that the whole log. Reverted in v0.103.0.
 	//
 	// An Epoch that names nothing is refused with ErrUnknownLeaderEpoch rather
 	// than answered. The caller of this truncates to the answer, so an offset

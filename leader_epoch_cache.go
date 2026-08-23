@@ -147,105 +147,54 @@ func (l *leaderEpochCache) Assign(epoch uint64, offset int64) error {
 // could only arise from an epoch opened on a genuinely empty log. Widening the
 // arithmetic to be correct is what made the overload load-bearing.
 //
-// An epoch this log has NO entry for is two different situations, and they want
-// opposite answers. Which one it is depends entirely on where the missing epoch
-// falls:
+// An epoch this log has NO entry for is answered by the ceiling -- the next
+// recorded epoch's anchor -- whether the gap sits below the earliest entry or
+// between two of them. v0.101.0 answered an INTERIOR gap from the floor instead;
+// v0.103.0 reverted that, and the reason is worth keeping because the floor rule
+// looked sound and was not.
 //
-//   - BELOW the earliest recorded epoch. Retention did this. ClearEarliest
-//     collapses every entry under the surviving floor into one, so epochs the log
-//     genuinely lived through stop existing as the log trims. The prober is
-//     merely stale, not divergent, and is answered from the earliest anchor --
-//     the same answer this gave before the floor rule, and the reason that rule
-//     stops at the earliest entry.
+// This cache is SPARSE. Only assign writes it, and only a leader assigns, so an
+// entry means "I LED this tenure" and never "I lived through it". An interior
+// gap therefore has two producers that this structure cannot tell apart:
 //
-//   - In an INTERIOR gap, strictly between two recorded epochs. Nothing in this
-//     package can produce that. ClearEarliest removes a prefix and re-adds the
-//     HIGHEST epoch it removed, ClearLatest removes a suffix, and assign only
-//     appends, so retention can never leave a hole above the earliest survivor.
-//     The only way to be missing there is never to have recorded it -- this log
-//     was present across that range and took no part in that tenure. The
-//     prober's records under it came from a history this log has none of, so it
-//     is answered from the ANCHOR of the floor epoch -- the highest epoch this
-//     log did hold below the one asked about.
+//   - This log FOLLOWED during that tenure. It replicated every record the
+//     legitimate leader wrote and holds them all; it simply never recorded an
+//     epoch it did not lead. Nothing has diverged, and the prober must be told to
+//     keep its log. This is an ORDINARY three-way handover -- b1 leads, b2 leads,
+//     b1 leads again -- and it is the common case by a wide margin.
 //
-// Read that ANCHOR literally, because it is not the same shape of answer as the
-// recorded branch above it. An anchor is the offset the log had ALREADY reached
-// when that epoch opened, so the floor epoch's OWN records sit above it and the
-// prober discards them too. A checkpoint holding 11, 13 and 15 answers a probe
-// for 14 with epoch 13's anchor, not with the end of epoch 13.
+//   - This log was the DEPOSED leader and kept appending under its old epoch
+//     while the tenure it has no entry for ran elsewhere. Its records at those
+//     offsets are its own, the prober's are different, and they have forked. The
+//     prober must be told to cut below the fork.
 //
-// It has to be the anchor. The end of epoch 13 is the next recorded entry's
-// anchor -- epoch 15's -- which is the ceiling answer this release removed, and
-// it is exactly where the divergent records live: a responder that wrote its own
-// records under 13 and a prober that wrote different ones at those offsets under
-// 14 disagree there. Stopping at the end of 13 keeps the fork.
+// Both look identical from here: a checkpoint holding X and Z with Y missing.
+// {1@-1, 3@79} is the first and {13@7000, 15@7439} is the second, and no
+// predicate over epoch numbers and anchors separates them. The floor rule chose
+// the second reading unconditionally, so it told a follower that agreed with the
+// prober about every record to discard its whole log -- and when the floor was
+// the log's FIRST entry, whose anchor is the -1 sentinel, "discard" meant all of
+// it. durable_streams caught 12 permanent replication halts on an ordinary
+// handover and pinned back; see
+// TestAFollowerDuringAnAbsentTenureIsNotToldToDiscardIt.
 //
-// Answering an interior gap from ABOVE, as this did until v0.101.0, tells the
-// prober its own epoch runs past its log end -- discard nothing -- about offsets
-// the two do not agree on. durable_streams lost a partition to exactly that: a
-// node holding epochs 13 and 15 answered a probe for 14 from epoch 15's anchor,
-// which sat above the divergence, and the two records at the fork survived on
-// both sides forever. See TestNoMutatorCanRemoveAnEpochFromTheMiddle, which pins
-// the property the split rests on.
-//
-// So the answer truncates more than the disputed range, by the whole of the floor
-// epoch's own records -- which the prober may well agree on. That is deliberate
-// and it is the tightest sound answer this structure can give: the responder
-// cannot tell which of those records the prober shares, only that the unheld
-// tenure is not its own. Discarding back to a known-shared point and refetching
-// is the price of that ignorance, and the caller is expected to refuse a cut
-// below a replica's commit boundary rather than take it silently.
+// The ceiling reading is not merely the safer guess. An entry ABOVE the gap is
+// this log's own statement that its records reached that anchor before that
+// epoch opened, by writing or by replicating, so the ceiling is a bound the log
+// actually vouches for. It is wrong only in the forked case, and that case is
+// not reachable from here: telling the two apart needs an epoch recorded for a
+// tenure this node did not lead, which a sparse cache does not have and Kafka
+// gets from per-record epochs. Preventing a deposed leader from appending is the
+// caller's job, upstream of this answer -- see the known limitation in
+// CHANGELOG.md under v0.95.8.
 func (l *leaderEpochCache) LastOffsetForLeaderEpoch(epoch uint64) (int64, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	if len(l.epochOffsets) == 0 {
-		return -1, false
-	}
-	var (
-		earliest = l.epochOffsets[0].leaderEpoch
-		latest   = l.epochOffsets[len(l.epochOffsets)-1].leaderEpoch
-	)
-	// Strictly between two recorded epochs, and not one of them: at or below the
-	// earliest is retention's doing, above the latest is a prober ahead of this
-	// log, and neither is a tenure this log declined to take part in.
-	//
-	// The two bounds are NOT equally load-bearing, which matters to anyone
-	// tempted to simplify. `epoch < latest` is: without it a prober ahead of this
-	// log gets a floor offset — a truncation instruction — where it must get
-	// "nothing recorded above you, keep everything". `epoch > earliest` is belt
-	// and braces, because floorEpoch already answers nil when nothing is below;
-	// it stays because it states the rule the doc above describes, and dropping
-	// the wrong one of the two is silent.
-	if epoch > earliest && epoch < latest && !l.holdsEpoch(epoch) {
-		if floor := l.floorEpoch(epoch); floor != nil {
-			return floor.assignedAtOffset, true
-		}
-	}
 	e := l.findEpoch(epoch + 1)
 	if e == nil {
 		return -1, false
 	}
 	return e.assignedAtOffset, true
-}
-
-// holdsEpoch reports whether this log recorded the given epoch itself, as
-// opposed to merely spanning it. findEpoch is a ceiling search, so it answers an
-// absent epoch with its successor; the equality is what makes this exact.
-func (l *leaderEpochCache) holdsEpoch(epoch uint64) bool {
-	e := l.findEpoch(epoch)
-	return e != nil && e.leaderEpoch == epoch
-}
-
-// floorEpoch returns the highest recorded epoch strictly below the given one, or
-// nil when this log recorded none.
-func (l *leaderEpochCache) floorEpoch(epoch uint64) *epochOffset {
-	i := sort.Search(len(l.epochOffsets), func(i int) bool {
-		return l.epochOffsets[i].leaderEpoch >= epoch
-	})
-	if i == 0 {
-		return nil
-	}
-	return l.epochOffsets[i-1]
 }
 
 // LastLeaderEpoch returns the latest leader epoch for the log.
