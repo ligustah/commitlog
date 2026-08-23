@@ -5,6 +5,51 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.104.2 — 2026-08-23
+
+Two public `-1` returns now say they are `-1`. Documentation and tests only; no
+behaviour changed.
+
+### Changed
+
+- **`HighWatermark()` and `RepairTail`'s `lastGood` document their `-1`.** Both
+  can return it — a log never told a watermark, or one whose `Truncate` emptied
+  it, commits nothing; a log with nothing above a watermark of `-1` has no good
+  record to name. Every other `-1` this interface returns already said so, and
+  these two were found by an audit rather than by a caller, which is the luckier
+  of the two ways.
+
+  The arithmetic was always sound (`hw+1` is the first uncommitted offset in
+  every case, `0` when nothing is committed). What was missing was permission to
+  rely on it, and a consumer has previously shipped defensive clamps against
+  commitlog behaviour that was correct but undocumented.
+
+- **`TestTheDocumentedMinusOnesAreReal` pins all four claims**, including the
+  trap `NewestOffset`'s doc calls out: on a log trimmed to a non-zero base and
+  then emptied, it returns a NON-NEGATIVE offset naming a record that is gone,
+  while `OldestOffset` correctly answers `-1`. A caller testing `NewestOffset < 0`
+  for emptiness concludes "not empty" and reads at a tail holding nothing. A doc
+  nobody executes drifts.
+
+### Notes
+
+- **The audit behind this found no bugs, and that is the result.** Every producer
+  and consumer of `-1` in the package was enumerated and cross-checked. The six
+  meanings in use — empty, not-found, no-verified-floor, absent wire field,
+  error-return placeholder, and plain arithmetic — agree at every site, and the
+  ambiguous ones resolve in the safe direction: `ClearLatest` cannot remove a
+  `-1` anchor unless asked to cut at or below `-1`, and `reconcileIndexTail(-1)`
+  disables the torn-tail floor only where `discardTornTail` would cut nothing
+  anyway.
+
+  Prompted by three `-1` collisions in one afternoon, two of them here (v0.101.0
+  reading a `-1` anchor as an offset, v0.102.0 comparing one against a floor).
+  `-1` defeats types and validation because it arrives as HONEST ARITHMETIC and
+  never as a marker anyone chose: `NextOffset()-1`, a truncation clamping to the
+  new log end, a consumer's `slowest-1` over follower positions. There is no
+  declaration site to annotate, which is why the class needs an audit rather than
+  a type.
+
 ## v0.104.1 — 2026-08-23
 
 A repeated leader epoch assignment is no longer reported as a dropped one.

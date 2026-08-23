@@ -384,6 +384,16 @@ type CommitLog interface {
 	// an error is a fact about the reader and not about what is on disk. Since
 	// v0.104.0; before it, every one of those amputated the whole
 	// above-watermark tail, silently.
+	//
+	// lastGood IS -1 WHEN THE LOG IS EMPTY AFTERWARDS, which is a real outcome
+	// and not a failure: a log holding nothing above a watermark of -1 has no
+	// good record to name. Treat it as an offset and there is no record there;
+	// the resumable position is lastGood+1, which is 0, and that is correct.
+	//
+	// Read it together with the surrounding advice to call SetHighWatermark with
+	// your own bound. That bound is yours to compute — passing lastGood back
+	// unexamined is RecoverTail spelled with two calls, which is the thing a
+	// replica must not do.
 	RepairTail() (lastGood int64, err error)
 
 	// ActiveSegmentBase returns the base offset of the active (unsealed)
@@ -723,6 +733,19 @@ type CommitLog interface {
 	// watermark" as "I read everything". Observed downstream as a cached view
 	// frozen one record behind, permanently, on the node that had just become the
 	// authority for it.
+	//
+	// -1 MEANS NOTHING IS COMMITTED, and it is not an error. A log that has never
+	// been told a watermark reports it, and so does one whose Truncate emptied it
+	// — that call lowers the watermark to the new end of the log, which is -1 when
+	// nothing is left. Offset 0 is a real record, so 0 cannot carry this meaning
+	// and the sentinel has to be negative.
+	//
+	// The arithmetic stays sound either way: hw+1 is the first uncommitted offset
+	// in every case, 0 when nothing is committed. What is NOT sound is using this
+	// as an offset — there is no record at -1 — or reading a negative as failure.
+	// Documented because every other -1 this interface returns says so, and the
+	// two that did not were found by an audit rather than by a caller, which is
+	// the luckier of the two ways.
 	HighWatermark() int64
 
 	// NewLeaderEpoch indicates the log is entering a new leader epoch.
