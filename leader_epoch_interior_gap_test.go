@@ -225,6 +225,49 @@ func TestAProbeForATenureThisLogNeverHeldTruncatesToTheOneItDid(t *testing.T) {
 	require.Equal(t, int64(-1), off)
 }
 
+// A floor answer can never point below the oldest surviving record, which is
+// what stops the wider truncation from becoming a whole-log wipe.
+//
+// The concern is specific to the floor rule: answering from BELOW deliberately
+// truncates past the disputed range, and the caller obeys the offset it is given
+// — Truncate(answer+1) on an offset under the log discards everything, because
+// findSegment lands on the first segment and the rewrite keeps nothing. So the
+// question the fix has to survive is whether an answer can sit under the
+// retention floor.
+//
+// It cannot, and the reason is structural rather than arithmetic: every non-(-1)
+// answer is some recorded entry's anchor, and retention re-anchors the earliest
+// surviving entry AT the floor rather than leaving it below. So the smallest
+// answer available is the floor itself. Pinned here because the property lives
+// in two files -- the trim in this one, the truncation in commitlog.go -- and
+// neither states it alone.
+func TestNoAnswerPointsBelowTheOldestSurvivingRecord(t *testing.T) {
+	l := &leaderEpochCache{name: "floorbound"}
+	require.NoError(t, l.Assign(5, 10))
+	require.NoError(t, l.Assign(6, 20))
+	require.NoError(t, l.Assign(7, 30))
+	require.NoError(t, l.Assign(13, 100))
+	require.NoError(t, l.Assign(15, 140))
+
+	const retentionFloor = 50
+	require.NoError(t, l.ClearEarliest(retentionFloor))
+	require.Equal(t, int64(retentionFloor), l.epochOffsets[0].assignedAtOffset,
+		"retention re-anchors the earliest survivor AT the floor")
+
+	// Every epoch anyone could name, well past both ends of what is recorded.
+	for probe := uint64(0); probe <= 20; probe++ {
+		off, found := l.LastOffsetForLeaderEpoch(probe)
+		if !found {
+			require.Equal(t, int64(-1), off,
+				"probe %d: an unanswerable probe reports -1 and the caller substitutes the log end", probe)
+			continue
+		}
+		require.GreaterOrEqual(t, off, int64(retentionFloor),
+			"probe %d answered %d, below the oldest surviving record; the caller would "+
+				"truncate to it and discard the whole log", probe, off)
+	}
+}
+
 // ClearEarliest re-anchors the HIGHEST epoch it removes, and that specific
 // choice is what keeps retention from ever opening an interior gap.
 //
