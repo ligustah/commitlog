@@ -80,7 +80,7 @@ func TestRepairTailKeepsEveryRecordOnAHealthyLog(t *testing.T) {
 				// above all its data -- the layout a partition has after a roll
 				// that no append has followed yet.
 				cl := l.(*commitLog)
-			require.NoError(t, cl.split(cl.activeSegment()))
+				require.NoError(t, cl.split(cl.activeSegment()))
 			}
 			require.NoError(t, l.Close())
 
