@@ -2656,6 +2656,40 @@ run_guard "a version-3 log with no codec is block-framed" segment.go   $'		s.blo
 # The inspector decodes a version-3 block as its framing; without the arm it
 # decompresses the payload as if it were version 2 and walks records.
 run_guard "the inspector walks version-3 blocks" inspect.go   $'		if info.Version == blockv3.Version {
+
+# The block-aware rewrite. An identity-bearing or control version-3 block that
+# the pass keeps whole is copied verbatim; one it does not keep whole has its
+# survivors isolated between two flushes; consolidation schedules on the
+# blocks it may merge, and what may merge is decided by the flags, which the
+# block table and both open paths carry.
+run_guard "a whole identity-bearing block passes a rewrite verbatim" compact_cleaner.go   $'		if whole(frames) && bw.seg.BlockMode() {'   $'		if false {'   '^TestACleanCarriesIdentityBearingBlocksWhole$'
+
+run_guard "a block that does not pass whole is kept apart" compact_cleaner.go   $'		for _, ms := range frames {
+			if err := keep(ms); err != nil {
+				return err
+			}
+		}
+		if err := bw.flush(); err != nil {'   $'		for _, ms := range frames {
+			if err := keep(ms); err != nil {
+				return err
+			}
+		}
+		if err := error(nil); err != nil {'   '^TestACleanCarriesIdentityBearingBlocksWhole$'
+
+run_guard "an identity-bearing or control block is not mergeable" block.go   $'	return b.version != blockv3.Version ||
+		(b.flags&blockv3.FlagStripped != 0 && b.flags&blockv3.FlagControl == 0)'   $'	return true || b.version != blockv3.Version'   '^TestAConsolidationMergesStrippedBlocksOnly$'
+
+run_guard "consolidation schedules on mergeable blocks" segment.go   $'		if b.mergeable() {
+			mergeable++'   $'		if b.mergeable() || true {
+			mergeable++'   '^TestAConsolidationMergesStrippedBlocksOnly$'
+
+run_guard "a written block's flags reach its ref" segment.go   $'		flags = h.Flags'   $'		flags = 0'   '^TestAConsolidationMergesStrippedBlocksOnly$'
+
+run_guard "a walked block's flags reach its ref" segment.go   $'		flags:        h.Flags,'   $'		flags:        0,'   '^TestBlockFlagsSurviveAReopen$/^walk=true$'
+
+run_guard "the block table writes each block's flags" block_table.go   $'			buf[at+14] = b.flags'   $'			buf[at+14] = 0'   '^TestTheBlockTableCarriesEachBlocksFormat$'
+
+run_guard "the block table reads each block's flags" block_table.go   $'			version, flags = body[at+13], body[at+14]'   $'			version, flags = body[at+13], 0'   '^TestTheBlockTableCarriesEachBlocksFormat$'
 			// The framing a version-3 block decodes to'   $'		if false {
 			// The framing a version-3 block decodes to'   '^TestVersion3WithNoCodecIsBlockFramed$'
 
