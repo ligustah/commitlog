@@ -1,11 +1,8 @@
-package commitlog
+package compress
 
 import (
 	"bytes"
 	"testing"
-
-	"github.com/ligustah/commitlog/compress"
-	"github.com/stretchr/testify/require"
 )
 
 // DecompressInto puts the result in dst, for every codec.
@@ -26,20 +23,25 @@ import (
 func TestDecompressIntoNeverAliasesItsInput(t *testing.T) {
 	payload := bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog "), 64)
 
-	for _, c := range []compress.Codec{compress.None, compress.Snappy, compress.S2, compress.Zstd} {
+	for _, c := range []Codec{None, Snappy, S2, Zstd} {
 		// A recycled scratch buffer, as the scan paths use.
 		src := append([]byte(nil), c.Compress(payload)...)
 		dst := make([]byte, 0, len(payload))
 
 		got, err := c.DecompressInto(dst, src)
-		require.NoErrorf(t, err, "codec %s", c)
-		require.Equalf(t, payload, got, "codec %s: wrong bytes back", c)
+		if err != nil {
+			t.Fatalf("codec %s: %v", c, err)
+		}
+		if !bytes.Equal(payload, got) {
+			t.Fatalf("codec %s: wrong bytes back", c)
+		}
 
 		// Refill the source buffer, as the next block's read would.
 		for i := range src {
 			src[i] = 0xEE
 		}
-		require.Equalf(t, payload, got, "codec %s: the result aliased its input "+
-			"and changed when the input buffer was reused", c)
+		if !bytes.Equal(payload, got) {
+			t.Fatalf("codec %s: the result aliased its input and changed when the input buffer was reused", c)
+		}
 	}
 }
