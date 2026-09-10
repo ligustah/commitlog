@@ -183,27 +183,9 @@ func (l *commitLog) AppendPreframed(block []byte) ([]int64, error) {
 	// Decoded once, before the lock: the offsets and the per-record checks
 	// below need the records, and a reader would otherwise be the first to
 	// find a payload that does not parse. The bytes written are still block.
-	h, recs, err := blockv3.DecodeBlock(block)
+	h, recs, err := decodeV3ForAppend(block)
 	if err != nil {
-		return nil, errors.Wrapf(ErrMessageSetRefused, "block: %v", err)
-	}
-	if h.Flags&blockv3.FlagStripped == 0 {
-		// Sequence is by index while the identity stands, so the records must
-		// BE their indexes. Asserted, not assumed: a producer that skipped a
-		// delta would have its later records answer to the wrong sequence.
-		for i, r := range recs {
-			if r.OffsetDelta != uint32(i) {
-				return nil, errors.Wrapf(ErrMessageSetRefused,
-					"record %d has offset delta %d; an identity-bearing block is sequence-by-index", i, r.OffsetDelta)
-			}
-		}
-	}
-	if (h.Flags&blockv3.FlagTransactional != 0) != (h.TxNonce != 0) {
-		// The reader emits the nonce on the flag; a block where the two
-		// disagree would store a transaction it does not report, or report
-		// one it cannot name.
-		return nil, errors.Wrapf(ErrMessageSetRefused,
-			"transactional flag %t with nonce %d", h.Flags&blockv3.FlagTransactional != 0, h.TxNonce)
+		return nil, err
 	}
 
 	l.appendMu.Lock()
@@ -219,6 +201,34 @@ func (l *commitLog) AppendPreframed(block []byte) ([]int64, error) {
 		return nil, errors.Wrapf(ErrMessageSetRefused, "block: %v", err)
 	}
 	return l.writeV3(segment, block, h, recs)
+}
+
+// decodeV3ForAppend decodes a version-3 block about to be appended and runs
+// the checks its header makes possible; every failure is ErrMessageSetRefused.
+func decodeV3ForAppend(block []byte) (blockv3.Header, []blockv3.Record, error) {
+	h, recs, err := blockv3.DecodeBlock(block)
+	if err != nil {
+		return h, nil, errors.Wrapf(ErrMessageSetRefused, "block: %v", err)
+	}
+	if h.Flags&blockv3.FlagStripped == 0 {
+		// Sequence is by index while the identity stands, so the records must
+		// BE their indexes. Asserted, not assumed: a producer that skipped a
+		// delta would have its later records answer to the wrong sequence.
+		for i, r := range recs {
+			if r.OffsetDelta != uint32(i) {
+				return h, nil, errors.Wrapf(ErrMessageSetRefused,
+					"record %d has offset delta %d; an identity-bearing block is sequence-by-index", i, r.OffsetDelta)
+			}
+		}
+	}
+	if (h.Flags&blockv3.FlagTransactional != 0) != (h.TxNonce != 0) {
+		// The reader emits the nonce on the flag; a block where the two
+		// disagree would store a transaction it does not report, or report
+		// one it cannot name.
+		return h, nil, errors.Wrapf(ErrMessageSetRefused,
+			"transactional flag %t with nonce %d", h.Flags&blockv3.FlagTransactional != 0, h.TxNonce)
+	}
+	return h, recs, nil
 }
 
 // writeV3 appends one version-3 block, h being its header as stored and recs

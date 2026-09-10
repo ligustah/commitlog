@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ligustah/commitlog/blockv3"
 	"github.com/ligustah/commitlog/compress"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
@@ -247,7 +248,7 @@ func TestAppendBlockRefusalsWriteNothing(t *testing.T) {
 		"at or below the tail": {blocks[0], ErrMessageSetRefused},
 		"bad magic":            {damaged(func(d []byte) []byte { d[0] ^= 0xff; return d }), ErrMessageSetRefused},
 		"a format version this build does not write": {
-			damaged(func(d []byte) []byte { d[1] = BlockFormatVersion + 1; return d }), ErrBlockFormat},
+			damaged(func(d []byte) []byte { d[1] = blockv3.Version + 1; return d }), ErrBlockFormat},
 		"shorter than the header promises":    {damaged(func(d []byte) []byte { return d[:len(d)-1] }), ErrMessageSetRefused},
 		"longer than the header promises":     {damaged(func(d []byte) []byte { return append(d, 0) }), ErrMessageSetRefused},
 		"a payload that does not decode":      {damaged(func(d []byte) []byte { d[blockHeaderLen] ^= 0xff; return d }), ErrMessageSetRefused},

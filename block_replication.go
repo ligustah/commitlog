@@ -5,6 +5,8 @@ import (
 	"io"
 	"sort"
 
+	"github.com/ligustah/commitlog/blockv3"
+
 	"github.com/pkg/errors"
 )
 
@@ -25,7 +27,9 @@ type Block struct {
 	LastOffset int64
 	// Records is how many records the block holds, from its header.
 	Records int
-	// LogicalLen is the payload's uncompressed length, from its header.
+	// LogicalLen is the length of the framing the block's records occupy in
+	// the log's logical byte space: a version-2 payload's uncompressed length,
+	// or the framing a version-3 block decodes to.
 	LogicalLen int
 }
 
@@ -175,6 +179,21 @@ func readFramesBetween(seg *segment, offset, start, end int64) ([]byte, error) {
 // AppendBlock is AppendMessageSet for a block obtained from ReadBlocks on
 // another log. See the interface doc for the contract.
 func (l *commitLog) AppendBlock(b Block) ([]int64, error) {
+	if len(b.Data) > 1 && b.Data[0] == blockMagic && b.Data[1] == blockv3.Version {
+		// The header is the leader's and stays so: offsets, epoch, timestamp
+		// and identity are what the source stored, checked against this
+		// log's tail exactly as a version-2 block's framing is.
+		h, recs, err := decodeV3ForAppend(b.Data)
+		if err != nil {
+			return nil, err
+		}
+		l.appendMu.Lock()
+		defer l.appendMu.Unlock()
+		if _, err := l.checkAndPerformSplit(); err != nil {
+			return nil, err
+		}
+		return l.writeV3(l.activeSegment(), b.Data, h, recs)
+	}
 	codec, uLen, cLen, records, err := parseBlockHeader(b.Data)
 	if err != nil {
 		if errors.Is(err, ErrBlockFormat) {

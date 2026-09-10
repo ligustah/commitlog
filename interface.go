@@ -928,9 +928,11 @@ type CommitLog interface {
 	// A header that does not parse, a length that disagrees with len(Data), a
 	// payload that does not decode to the length the header promises, or a
 	// record count the payload does not bear out is ErrMessageSetRefused, and
-	// nothing is written. A block format version this build does not write is
-	// ErrBlockFormat: the bytes are what another build meant, and the remedy
-	// is that build.
+	// nothing is written. A version-3 block is taken as it is, header
+	// included, under AppendPreframed's checks as well; Options.BlockFormat
+	// does not gate it, since the block is the leader's word. A block format
+	// version this build does not read is ErrBlockFormat: the bytes are what
+	// another build meant, and the remedy is that build.
 	AppendBlock(b Block) ([]int64, error)
 
 	// Clean applies retention and compaction rules against the log, if
