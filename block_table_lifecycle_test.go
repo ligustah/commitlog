@@ -88,7 +88,7 @@ func TestInstallingARewriteDropsTheReplacedBlockTable(t *testing.T) {
 	sidecar := localBlockTablePath(source)
 	require.FileExists(t, sidecar, "sealing should have persisted the source's table")
 
-	rewrite, err := newWorkingSegment(dir, 0, 1<<20, cleanedSuffix, compress.Snappy)
+	rewrite, err := newWorkingSegment(dir, 0, 1<<20, cleanedSuffix, compress.Snappy, BlockFormatVersion)
 	require.NoError(t, err)
 	rms, rentries, err := newMessageSetFromProto(0, 0,
 		[]*Message{{Value: []byte("rewritten and a good deal longer")}})

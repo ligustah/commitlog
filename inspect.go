@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/ligustah/commitlog/blockv3"
 	"github.com/ligustah/commitlog/compress"
 	"github.com/pkg/errors"
 )
@@ -45,6 +46,8 @@ import (
 type BlockInfo struct {
 	// Offset of the block header within the file.
 	FileOffset int64
+	// Version is the block's format: BlockFormatVersion or blockv3.Version.
+	Version byte
 	// Codec the payload is compressed with; compress.None for a stored block.
 	Codec compress.Codec
 	// UncompressedLen and CompressedLen are the header's own claims, not
@@ -121,7 +124,7 @@ type SegmentFormat struct {
 // A flat segment is always readable here — this concerns block framing only,
 // and says nothing about whether the records inside are intact.
 func (f SegmentFormat) Readable() bool {
-	return !f.Blocked || f.Version == BlockFormatVersion
+	return !f.Blocked || f.Version == BlockFormatVersion || f.Version == blockv3.Version
 }
 
 // ClassifySegment reports how a segment .log file is framed, reading only its
@@ -245,19 +248,12 @@ func (s *SegmentFile) Blocks() ([]BlockInfo, error) {
 		pos int64
 	)
 	for pos < int64(len(s.raw)) {
-		if rem := int64(len(s.raw)) - pos; rem < blockHeaderLen {
-			return out, errors.Errorf(
-				"commitlog: truncated block header at %d (%d bytes left, need %d)",
-				pos, rem, blockHeaderLen)
-		}
-		codec, uLen, cLen, records, err := parseBlockHeader(s.raw[pos : pos+blockHeaderLen])
+		info, err := inspectBlockHeader(s.raw, pos)
 		if err != nil {
 			return out, errors.Wrapf(err, "%s: block at %d", s.path, pos)
 		}
-		out = append(out, BlockInfo{
-			FileOffset: pos, Codec: codec, UncompressedLen: uLen, CompressedLen: cLen,
-			Records: records,
-		})
+		out = append(out, info)
+		cLen := info.CompressedLen
 		// The payload has to BE there. Without this the walk simply added cLen to
 		// pos, and a header claiming more bytes than the file holds stepped clean
 		// over the end — the loop condition then ended the walk and reported
@@ -274,15 +270,58 @@ func (s *SegmentFile) Blocks() ([]BlockInfo, error) {
 		// the note at the top of this file is about, reproduced between two
 		// functions in the same package rather than between two repos. Same bound
 		// and same wording as recordsBlocked, so they cannot drift apart again.
-		start := pos + blockHeaderLen
+		start := pos + blockHeaderLenOf(info.Version)
 		if end := start + int64(cLen); end > int64(len(s.raw)) {
 			return out, errors.Errorf(
 				"commitlog: %s: block at %d claims %d payload bytes, file holds %d",
 				s.path, pos, cLen, int64(len(s.raw))-start)
 		}
-		pos += blockHeaderLen + int64(cLen)
+		pos = start + int64(cLen)
 	}
 	return out, nil
+}
+
+// inspectBlockHeader reads the header at pos in either format, reporting a
+// truncated one rather than parsing past the file.
+func inspectBlockHeader(raw []byte, pos int64) (BlockInfo, error) {
+	rem := int64(len(raw)) - pos
+	if rem >= 2 && raw[pos] == blockMagic && raw[pos+1] == blockv3.Version {
+		if rem < blockv3.HeaderLen {
+			return BlockInfo{}, errors.Errorf(
+				"commitlog: truncated block header at %d (%d bytes left, need %d)",
+				pos, rem, blockv3.HeaderLen)
+		}
+		h, err := blockv3.DecodeHeader(raw[pos : pos+blockv3.HeaderLen])
+		if err != nil {
+			return BlockInfo{}, err
+		}
+		return BlockInfo{
+			FileOffset: pos, Version: blockv3.Version, Codec: h.Codec,
+			UncompressedLen: h.UncompressedLen, CompressedLen: h.CompressedLen,
+			Records: h.Records,
+		}, nil
+	}
+	if rem < blockHeaderLen {
+		return BlockInfo{}, errors.Errorf(
+			"commitlog: truncated block header at %d (%d bytes left, need %d)",
+			pos, rem, blockHeaderLen)
+	}
+	codec, uLen, cLen, records, err := parseBlockHeader(raw[pos : pos+blockHeaderLen])
+	if err != nil {
+		return BlockInfo{}, err
+	}
+	return BlockInfo{
+		FileOffset: pos, Version: BlockFormatVersion, Codec: codec,
+		UncompressedLen: uLen, CompressedLen: cLen, Records: records,
+	}, nil
+}
+
+// blockHeaderLenOf is the header length of a block of the given format.
+func blockHeaderLenOf(version byte) int64 {
+	if version == blockv3.Version {
+		return blockv3.HeaderLen
+	}
+	return blockHeaderLen
 }
 
 // Records calls fn for every record in the file, in offset order, decompressing
@@ -301,28 +340,35 @@ func (s *SegmentFile) Records(fn func(RecordInfo) error) error {
 func (s *SegmentFile) recordsBlocked(fn func(RecordInfo) error) error {
 	var pos int64
 	for pos < int64(len(s.raw)) {
-		if rem := int64(len(s.raw)) - pos; rem < blockHeaderLen {
-			return errors.Errorf("commitlog: truncated block header at %d", pos)
-		}
-		codec, uLen, cLen, _, err := parseBlockHeader(s.raw[pos : pos+blockHeaderLen])
+		info, err := inspectBlockHeader(s.raw, pos)
 		if err != nil {
 			return errors.Wrapf(err, "block at %d", pos)
 		}
-		start := pos + blockHeaderLen
+		cLen := info.CompressedLen
+		start := pos + blockHeaderLenOf(info.Version)
 		end := start + int64(cLen)
 		if end > int64(len(s.raw)) {
 			return errors.Errorf(
 				"commitlog: block at %d claims %d payload bytes, file holds %d",
 				pos, cLen, int64(len(s.raw))-start)
 		}
-		payload, derr := codec.Decompress(s.raw[start:end])
-		if derr != nil {
-			return errors.Wrapf(derr, "decompress block at %d", pos)
-		}
-		if uint32(len(payload)) != uLen {
-			return errors.Errorf(
-				"commitlog: block at %d decompressed to %d bytes, header claims %d",
-				pos, len(payload), uLen)
+		var payload []byte
+		if info.Version == blockv3.Version {
+			// The framing a version-3 block decodes to, which is what the
+			// log's readers walk; the decode checks both CRCs and the lengths.
+			if payload, err = decodeV3Block(s.raw[pos:end], nil); err != nil {
+				return errors.Wrapf(err, "decode block at %d", pos)
+			}
+		} else {
+			payload, err = info.Codec.Decompress(s.raw[start:end])
+			if err != nil {
+				return errors.Wrapf(err, "decompress block at %d", pos)
+			}
+			if uint32(len(payload)) != info.UncompressedLen {
+				return errors.Errorf(
+					"commitlog: block at %d decompressed to %d bytes, header claims %d",
+					pos, len(payload), info.UncompressedLen)
+			}
 		}
 		if err := walkFrames(payload, fn); err != nil {
 			return err

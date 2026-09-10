@@ -840,6 +840,38 @@ type CommitLog interface {
 	// writing them again is how a replica ends up holding one record twice.
 	AppendMessageSet(ms []byte) ([]int64, error)
 
+	// AppendBatch is Append for a batch with a producer identity: record i is
+	// sequence meta.BaseSequence+i of meta.ProducerID at meta.ProducerEpoch,
+	// in transaction meta.Nonce when that is non-zero. Readers get the
+	// identity back through MessageMetadata whichever block format stored it.
+	//
+	// On a log writing block format 3 the batch is one version-3 block, so it
+	// carries one timestamp — the first non-zero Message.Timestamp, or the
+	// append clock, written back to every message that had none — one
+	// LeaderEpoch, and is either all control records or none. On a log
+	// writing format 2 the identity goes on each record as the headers
+	// "pid", "epoch", "seq" and "nonce", so those names are refused on the
+	// messages under either format. A batch that breaks any of this is
+	// ErrMessageSetRefused, and nothing is written. Identity-less batches use
+	// Append, which never writes a version-3 block.
+	AppendBatch(meta BatchMeta, msgs []*Message) ([]int64, error)
+
+	// AppendPreframed appends a version-3 block a producer built with
+	// blockv3.EncodeBlock, without decompressing it on the way to disk. The
+	// log assigns the block's base offset, leader epoch and timestamp by
+	// rewriting its header IN PLACE — block is modified — and stores it
+	// verbatim; the producer's identity fields and flags are kept as given.
+	// Returns the offsets appended, as Append does.
+	//
+	// The payload is decoded once to check it: a block whose header or
+	// payload CRC fails, whose records do not parse, whose transactional flag
+	// disagrees with its nonce, or — unless FlagStripped is set — whose offset
+	// deltas are not 0, 1, 2, … is ErrMessageSetRefused, and nothing is
+	// written. A log whose Options.BlockFormat is not 3 refuses every block
+	// the same way. On an active segment that is not block-framed the decoded
+	// framing is written as a message set instead.
+	AppendPreframed(block []byte) ([]int64, error)
+
 	// ReadMessageSet returns the log's own framing VERBATIM, starting at
 	// offset — the read counterpart to AppendMessageSet, so a follower can
 	// replicate bytes without reconstructing the framing itself. The frames

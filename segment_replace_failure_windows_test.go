@@ -35,7 +35,7 @@ func TestAFailedReplaceLeavesTheSourceReadable(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, source.WriteMessageSet(ms, entries))
 
-	rewrite, err := newWorkingSegment(dir, 0, 1<<20, cleanedSuffix, compress.None)
+	rewrite, err := newWorkingSegment(dir, 0, 1<<20, cleanedSuffix, compress.None, BlockFormatVersion)
 	require.NoError(t, err)
 	rms, rentries, err := newMessageSetFromProto(0, 0,
 		[]*Message{{Value: []byte("rewritten")}})

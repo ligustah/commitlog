@@ -224,7 +224,11 @@ type segment struct {
 	// position stays logical; physPosition tracks the actual file size. blocks
 	// maps logical ranges to physical block locations for reads. codec is the
 	// configured codec for new blocks (per-block codec is recorded in headers).
-	codec        compress.Codec
+	codec compress.Codec
+	// format is the block version the log writes into this segment; it decides
+	// only whether an EMPTY segment is block-framed, since every block on disk
+	// names its own version.
+	format       byte
 	blockMode    bool
 	blocks       []blockRef
 	physPosition int64
@@ -619,6 +623,7 @@ func emptySegment(path string, baseOffset, maxBytes int64, codec compress.Codec)
 		lastOffset:  -1,
 		path:        path,
 		codec:       codec,
+		format:      BlockFormatVersion,
 		waiters:     make(map[interface{}]chan struct{}),
 	}
 }
@@ -629,7 +634,12 @@ func emptySegment(path string, baseOffset, maxBytes int64, codec compress.Codec)
 // existing file means two segments believe they own one base offset, and the
 // second would append into the first's records.
 func newSegment(path string, baseOffset, maxBytes int64, codec compress.Codec) (*segment, error) {
-	return newSegmentWith(path, baseOffset, maxBytes, true, "", codec)
+	return newSegmentWith(path, baseOffset, maxBytes, true, "", codec, BlockFormatVersion)
+}
+
+// newSegmentFormat is newSegment for a log writing block format version.
+func newSegmentFormat(path string, baseOffset, maxBytes int64, codec compress.Codec, format byte) (*segment, error) {
+	return newSegmentWith(path, baseOffset, maxBytes, true, "", codec, format)
 }
 
 // openSegment adopts the segment already at baseOffset, and creates one if the
@@ -638,7 +648,12 @@ func newSegment(path string, baseOffset, maxBytes int64, codec compress.Codec) (
 // this call, and an empty segment is the same thing the directory would have
 // produced a moment earlier.
 func openSegment(path string, baseOffset, maxBytes int64, codec compress.Codec) (*segment, error) {
-	return newSegmentWith(path, baseOffset, maxBytes, false, "", codec)
+	return newSegmentWith(path, baseOffset, maxBytes, false, "", codec, BlockFormatVersion)
+}
+
+// openSegmentFormat is openSegment for a log writing block format version.
+func openSegmentFormat(path string, baseOffset, maxBytes int64, codec compress.Codec, format byte) (*segment, error) {
+	return newSegmentWith(path, baseOffset, maxBytes, false, "", codec, format)
 }
 
 // newSegmentWith is the shared body. The two booleans-worth of choice stay
@@ -646,9 +661,10 @@ func openSegment(path string, baseOffset, maxBytes int64, codec compress.Codec) 
 // decision that matters — refuse an existing file, or adopt it — sat behind a
 // bare `true` that read as noise at all 25 of them, next to an empty string
 // that never varied except through newWorkingSegment.
-func newSegmentWith(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec) (*segment, error) {
+func newSegmentWith(path string, baseOffset, maxBytes int64, isNew bool, suffix string, codec compress.Codec, format byte) (*segment, error) {
 	s := emptySegment(path, baseOffset, maxBytes, codec)
 	s.suffix = suffix
+	s.format = format
 	s.dirtyData = true
 	s.dirtyIndex = true
 	// If this is a new segment, ensure the file doesn't already exist.
@@ -885,8 +901,9 @@ func (s *segment) fetchBlockTable() ([]blockRef, error) {
 
 // initPositions inspects the (already-open) log file, detects whether it uses
 // block compression, and initializes position/physPosition/blocks. A fresh
-// (empty) segment uses the block format only when a codec is configured, so a
-// None codec writes raw message-set frames with no wrapper at all. An existing
+// (empty) segment uses the block format when a codec is configured or the log
+// writes version-3 blocks, so a None codec under version 2 writes raw
+// message-set frames with no wrapper at all. An existing
 // segment is classified by its first byte: blockMagic means a compressed
 // segment (scan its block headers), anything else is a raw one, which stays raw
 // even if a codec is now configured so the two formats never mix in one file.
@@ -899,7 +916,7 @@ func (s *segment) initPositions() error {
 	s.cache = newBlockCache()
 	s.blocks = s.blocks[:0]
 	if size == 0 {
-		s.blockMode = s.codec != compress.None
+		s.blockMode = s.codec != compress.None || s.format == blockv3.Version
 		s.position = 0
 		return nil
 	}
@@ -2600,14 +2617,14 @@ func (s *segment) closeSegment(durable bool) error {
 // leaving the source segment's index still mapped, so every later attempt to
 // remove it fails on Windows with a sharing violation. Discarding the leftover
 // is always safe — a working copy holds no committed data until its rename.
-func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, codec compress.Codec) (*segment, error) {
+func newWorkingSegment(path string, baseOffset, maxBytes int64, suffix string, codec compress.Codec, format byte) (*segment, error) {
 	for _, stem := range []string{logSuffix, indexSuffix} {
 		p := filepath.Join(path, fmt.Sprintf(fileFormat, baseOffset, stem+suffix))
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return nil, errors.Wrap(err, "remove stale rewrite working copy")
 		}
 	}
-	return newSegmentWith(path, baseOffset, maxBytes, false, suffix, codec)
+	return newSegmentWith(path, baseOffset, maxBytes, false, suffix, codec, format)
 }
 
 // objectKeysLocked returns the store objects this segment currently consists
@@ -2840,7 +2857,7 @@ func (s *segment) swapReplacement(fresh *segment, meta offloadMeta) error {
 
 // Cleaned creates a cleaned segment for this segment.
 func (s *segment) Cleaned() (*segment, error) {
-	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, cleanedSuffix, s.codec)
+	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, cleanedSuffix, s.codec, s.format)
 }
 
 // retireIntoJoin takes this OFFLOADED segment out of its tier because a join has
@@ -2938,19 +2955,19 @@ func (s *segment) retireIntoJoin(joined *segment) []pendingReclaim {
 // it in the run are what actually cease to exist, and they are retired by
 // SupersededBy rather than by a rename.
 func (s *segment) Joined() (*segment, error) {
-	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, joinedSuffix, s.codec)
+	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, joinedSuffix, s.codec, s.format)
 }
 
 // Truncated creates a truncated segment for this segment.
 func (s *segment) Truncated() (*segment, error) {
-	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, truncatedSuffix, s.codec)
+	return newWorkingSegment(s.path, s.BaseOffset, s.maxBytes, truncatedSuffix, s.codec, s.format)
 }
 
 // Trimmed creates a new segment at baseOffset with trimmedSuffix, used when
 // rewriting a segment to drop records before a given offset during TruncateBefore.
 // The new segment has a different BaseOffset than the receiver.
 func (s *segment) Trimmed(baseOffset int64) (*segment, error) {
-	return newWorkingSegment(s.path, baseOffset, s.maxBytes, trimmedSuffix, s.codec)
+	return newWorkingSegment(s.path, baseOffset, s.maxBytes, trimmedSuffix, s.codec, s.format)
 }
 
 // Finalize promotes a trimmed segment (one with trimmedSuffix) to its final

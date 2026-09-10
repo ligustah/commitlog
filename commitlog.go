@@ -17,6 +17,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/ligustah/commitlog/blockv3"
 	"github.com/ligustah/commitlog/compress"
 	"github.com/pkg/errors"
 )
@@ -629,6 +630,12 @@ type Options struct {
 	// byte-for-byte compatible with logs written before compression existed;
 	// existing segments keep whatever format they were written in.
 	Compression compress.Codec
+	// BlockFormat is the block format version AppendBatch and AppendPreframed
+	// write: 0 or BlockFormatVersion for this build's default, blockv3.Version
+	// to opt in. Under version 3 every new segment is block-framed even with
+	// Compression none. Append writes BlockFormatVersion blocks whatever this
+	// says, and both versions are read back regardless of it.
+	BlockFormat byte
 	// Tiers is the chain of stores below local disk that OffloadBefore moves
 	// sealed segments' log bytes into, nearest first. Reads of an offloaded
 	// segment go through its tier transparently. Empty disables tiering (the
@@ -697,6 +704,13 @@ func New(opts Options) (_ CommitLog, err error) {
 	// in; checking it where it arrives is the whole fix.
 	if !opts.Compression.Valid() {
 		return nil, errors.Wrapf(ErrInvalidOptions, "unknown compression codec %d", byte(opts.Compression))
+	}
+	switch opts.BlockFormat {
+	case 0:
+		opts.BlockFormat = BlockFormatVersion
+	case BlockFormatVersion, blockv3.Version:
+	default:
+		return nil, errors.Wrapf(ErrInvalidOptions, "unknown block format %d", opts.BlockFormat)
 	}
 	// Checked where it arrives, for the same reason as the codec above: every
 	// place further in that meets a nameless or storeless tier meets it after
@@ -1053,7 +1067,7 @@ func (l *commitLog) open() error {
 			if err != nil {
 				return err
 			}
-			segment, err := openSegment(l.Path, int64(baseOffset), l.MaxSegmentBytes, l.Compression)
+			segment, err := openSegmentFormat(l.Path, int64(baseOffset), l.MaxSegmentBytes, l.Compression, l.BlockFormat)
 			if err != nil {
 				return err
 			}
@@ -1147,14 +1161,14 @@ func (l *commitLog) open() error {
 	// directory, so give it one starting where the tier ends.
 	if n := len(l.segments); n > 0 && l.segments[n-1].isOffloaded() {
 		next := l.segments[n-1].NextOffset()
-		segment, err := newSegment(l.Path, next, l.MaxSegmentBytes, l.Compression)
+		segment, err := newSegmentFormat(l.Path, next, l.MaxSegmentBytes, l.Compression, l.BlockFormat)
 		if err != nil {
 			return err
 		}
 		l.segments = append(l.segments, segment)
 	}
 	if len(l.segments) == 0 {
-		segment, err := newSegment(l.Path, 0, l.MaxSegmentBytes, l.Compression)
+		segment, err := newSegmentFormat(l.Path, 0, l.MaxSegmentBytes, l.Compression, l.BlockFormat)
 		if err != nil {
 			return err
 		}
@@ -3180,7 +3194,7 @@ func (l *commitLog) checkAndPerformSplit() (bool, error) {
 
 func (l *commitLog) split(oldActiveSegment *segment) error {
 	offset := l.NewestOffset() + 1
-	segment, err := newSegment(l.Path, offset, l.MaxSegmentBytes, l.Compression)
+	segment, err := newSegmentFormat(l.Path, offset, l.MaxSegmentBytes, l.Compression, l.BlockFormat)
 	if err != nil {
 		return err
 	}

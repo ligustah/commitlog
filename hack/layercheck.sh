@@ -43,7 +43,7 @@ commitlog.go interface.go
 clean.go clean_join.go compact_cleaner.go delete_cleaner.go
 manifest.go tier.go tier_move.go tier_state.go copy_tier.go
 reader.go prefix_read.go prefix_source.go read_options.go
-block_replication.go blockv3_read.go
+block_replication.go blockv3_read.go append_batch.go
 sidecar.go
 "
 
