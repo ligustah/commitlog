@@ -5,6 +5,91 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.106.0 — 2026-09-10
+
+The log writes version-3 blocks. Requested by durable_streams; the format is
+theirs (spec: block format v3, "compress once, copy everywhere"), the version
+byte is 3 because the block header this replaces already stamps 2.
+
+### Added
+
+- **`Options.BlockFormat`.** 0 or 2 is this build's default; 3 opts a log
+  into version-3 blocks, under which every new segment is block-framed even
+  with `Compression: None`. Any other value is `ErrInvalidOptions`. `Append`
+  keeps writing version-2 blocks whatever this says — a version-2 block
+  carries each record's own timestamp and epoch, a version-3 header holds
+  one of each — and both formats are read regardless of the option.
+
+- **`AppendBatch(BatchMeta, msgs)`.** Append with a producer identity:
+  record i is sequence `BaseSequence+i` of `ProducerID` at `ProducerEpoch`,
+  in transaction `Nonce` when non-zero. Under format 3 the batch is one
+  version-3 block (one timestamp, one epoch, all control or none — anything
+  else is `ErrMessageSetRefused`); under format 2 the identity goes on each
+  record as the `pid`/`epoch`/`seq`/`nonce` headers durable_streams writes
+  today, so `MessageMetadata` answers the same from either. Those four header
+  names are refused on the messages. A zero `BatchMeta` is no identity at
+  all: a stripped block under 3, plain `Append` under 2.
+
+- **`AppendPreframed(block)`.** A block a producer built with
+  `blockv3.EncodeBlock` is stored without decompressing it: the log rewrites
+  its base offset, leader epoch and timestamp in place — the caller's slice is
+  modified — and keeps the producer's identity, flags and codec. The payload
+  is decoded once to check it; a CRC or length failure, a record that does
+  not parse, a transactional flag disagreeing with the nonce, or offset
+  deltas that are not `0,1,2,…` on an identity-bearing block is
+  `ErrMessageSetRefused`. A log whose `BlockFormat` is not 3 refuses every
+  block the same way.
+
+- **`AppendBlock` takes version-3 blocks.** A follower stores the leader's
+  version-3 blocks verbatim, header included, under the same checks;
+  `Options.BlockFormat` does not gate it, since the block is the leader's
+  word. `Block.LogicalLen` for a version-3 block is the framing its records
+  decode to.
+
+- **A strip spec runs on a log without compaction.** A `CleanSpec` naming
+  `StripBelow` and `StripHeaders` on a log without `Options.Compact` runs the
+  compaction pass with the key removals turned off: decided records lose
+  their headers, markers below the boundary go, nothing is removed for its
+  key, and the stripped blocks consolidate. Until this, a non-compacted log
+  had no way to make its identity-bearing blocks mergeable.
+
+- **Inspect walks version-3 blocks.** `BlockInfo.Version`; `Blocks()` and
+  `Records()` read both formats; `SegmentFormat.Readable()` is true for 3.
+
+- **Nested modules.** `github.com/ligustah/commitlog/blockv3` (v0.1.0, depends
+  on `compress` only) and `github.com/ligustah/commitlog/compress` (v0.1.0)
+  are their own modules, so an engine-free client decodes blocks without the
+  commitlog module. A committed `go.work` spans all three for development;
+  CI names the modules, since `./...` stops at a nested module's boundary.
+
+### Changed
+
+- **A rewrite carries identity-bearing and control version-3 blocks whole.**
+  Compaction and consolidation walk a segment by block. A version-3 block
+  that still bears its producer identity, or is a control block, is copied
+  byte for byte when the pass keeps every record in it; when it does not —
+  stripped, thinned, or a control block partly below the strip boundary —
+  its records go the way the pass sends them, and a control block's
+  survivors never share an output block with a neighbour's. Version-2 blocks
+  and stripped version-3 blocks merge at the 256KB target as before, into
+  version-2 blocks: merged output keeps every record's own timestamp and
+  epoch, which one version-3 header cannot. Consolidation is scheduled on the
+  blocks it may merge, so a segment of identity-bearing blocks is not
+  rewritten every tick.
+
+- **Block table version 4.** The sidecar carries each version-3 block's flags
+  beside its format, which is what lets a rewrite decide what it may merge
+  without reading a block. Version-2 tables are still read, and still
+  written for a segment holding no version-3 block. The flagless version-3
+  layout of v0.105.0 — never written by that release outside this package's
+  tests, since nothing in it wrote a version-3 block — is refused, and a
+  local segment holding one rebuilds its table from the file.
+
+### Notes
+
+- Validated against durable_streams' broker suites before tagging, as
+  v0.105.0 was.
+
 ## v0.105.0 — 2026-09-10
 
 Replication in the units the log is stored in, and a Follow reader that can
