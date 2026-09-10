@@ -242,8 +242,14 @@ func TestATornVersion3TailIsDiscardedAndADamagedOneRefused(t *testing.T) {
 			cl := l.(*commitLog)
 			writeV3(t, cl, v3Header(compress.Snappy), v3Records(40, "x"))
 			second := writeV3(t, cl, v3Header(compress.Snappy), v3Records(40, "y"))
-			logPath := cl.activeSegment().logPath()
+			seg := cl.activeSegment()
+			logPath := seg.logPath()
 			require.NoError(t, l.Close())
+			// Close sealed the segment and wrote its table; without it the open
+			// walks the blocks, which is the path under test. (With it, the cut
+			// cases reach the walk anyway through the table's size check, and
+			// the damaged case is refused later, by the tail reconciliation.)
+			require.NoError(t, os.Remove(localBlockTablePath(seg)))
 
 			f, err := os.ReadFile(logPath)
 			require.NoError(t, err)

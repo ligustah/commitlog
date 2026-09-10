@@ -2605,11 +2605,11 @@ run_guard "a damaged version-3 block refuses the open" segment.go   $'	framing, 
 	}'   '^TestATornVersion3TailIsDiscardedAndADamagedOneRefused$/^payload_damaged$'
 
 # The block table refuses a format byte this build does not read, zero included.
-run_guard "a block table entry names a format this build reads" block_table.go   $'		if version != BlockFormatVersion && version != blockv3.Version {'   $'		if false {'   '^TestTheBlockTableCarriesEachBlocksFormat$'
+run_guard "a block table entry names a format this build reads" block_table.go   $'		if version != BlockFormatVersion && version != blockv3.Version {'   $'		if false && version != BlockFormatVersion && version != blockv3.Version {'   '^TestTheBlockTableCarriesEachBlocksFormat$'
 
 # A record has identity only when all three identity headers are present and
 # sized; without the check every record claims one.
-run_guard "identity needs all three headers" blockv3_read.go   $'	if !hasPID || !hasEpoch || !hasSeq || len(p) != 8 || len(e) != 4 || len(s) != 4 {'   $'	if false {'   '^TestAVersion3BlockReadsAsItsRecords$'
+run_guard "identity needs all three headers" blockv3_read.go   $'	if !hasPID || !hasEpoch || !hasSeq || len(p) != 8 || len(e) != 4 || len(s) != 4 {'   $'	if false && (!hasPID || !hasEpoch || !hasSeq || len(p) != 8 || len(e) != 4 || len(s) != 4) {'   '^TestAVersion3BlockReadsAsItsRecords$'
 
 
 echo
