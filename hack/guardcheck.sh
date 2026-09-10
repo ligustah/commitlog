@@ -1922,15 +1922,22 @@ run_guard "a failed rewrite drops its working copy" compact_cleaner.go   '	defer
 	bw.reset(cleaned)
 	var ('   '^TestAFailedCompactionPassPublishesTheRewritesItInstalled$'
 
-# The consolidation pass must tell io.EOF from a read failure. Neutralized into
-# the loop it replaced -- `for ms, _, err := ss.Scan(); err == nil; ...` -- which
-# ends on either, and what follows the loop is the install. That is a truncated
+# A rewrite walk must not end short of the table. Neutralized into a loop that
+# ends on a read failure, and what follows the walk is the install: a truncated
 # copy renamed over a segment whose original still held the records, with the
-# pass returning nil. Reached on the DEFAULT config: this is the else-branch of
-# `if l.Compact`.
-run_guard "a consolidation read failure stops the pass" compact_cleaner.go   '			if !errors.Is(err, io.EOF) {
-				return nil, fmt.Errorf("%w: consolidation of segment %d: %w",' '			if false {
-				return nil, fmt.Errorf("%w: consolidation of segment %d: %w",'   '^TestConsolidationRefusesASegmentItCannotReadToTheEnd$'
+# pass returning nil. Reached on the DEFAULT config: consolidation is the
+# else-branch of `if l.Compact`.
+run_guard "a consolidation read failure stops the pass" compact_cleaner.go   '		if b.mergeable() {
+			for ss.pos < end {
+				ms, _, err := ss.Scan()
+				if err != nil {
+					return unreadable(err)
+				}' '		if b.mergeable() {
+			for ss.pos < end {
+				ms, _, err := ss.Scan()
+				if err != nil {
+					break
+				}'   '^TestConsolidationRefusesASegmentItCannotReadToTheEnd$'
 
 # The same partial-result duty as the compaction branch, at the consolidation
 # call site. Neutralized by the line that was there, which republished the delete
@@ -2656,6 +2663,8 @@ run_guard "a version-3 log with no codec is block-framed" segment.go   $'		s.blo
 # The inspector decodes a version-3 block as its framing; without the arm it
 # decompresses the payload as if it were version 2 and walks records.
 run_guard "the inspector walks version-3 blocks" inspect.go   $'		if info.Version == blockv3.Version {
+			// The framing a version-3 block decodes to'   $'		if false {
+			// The framing a version-3 block decodes to'   '^TestVersion3WithNoCodecIsBlockFramed$'
 
 # The block-aware rewrite. An identity-bearing or control version-3 block that
 # the pass keeps whole is copied verbatim; one it does not keep whole has its
@@ -2690,8 +2699,6 @@ run_guard "a walked block's flags reach its ref" segment.go   $'		flags:        
 run_guard "the block table writes each block's flags" block_table.go   $'			buf[at+14] = b.flags'   $'			buf[at+14] = 0'   '^TestTheBlockTableCarriesEachBlocksFormat$'
 
 run_guard "the block table reads each block's flags" block_table.go   $'			version, flags = body[at+13], body[at+14]'   $'			version, flags = body[at+13], 0'   '^TestTheBlockTableCarriesEachBlocksFormat$'
-			// The framing a version-3 block decodes to'   $'		if false {
-			// The framing a version-3 block decodes to'   '^TestVersion3WithNoCodecIsBlockFramed$'
 
 
 echo
