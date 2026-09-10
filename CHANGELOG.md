@@ -44,6 +44,22 @@ start at the tail. Both requested by durable_streams.
   begin the read below the offset the caller named, and a bounded read of a
   range that holds nothing is a different answer from an empty log.
 
+- **`blockv3`, a leaf package for the next block format.** A 76-byte
+  uncompressed header — offsets, leader epoch, timestamp, producer identity,
+  record count, lengths, a CRC over the compressed payload and one over the
+  header — above a payload of delta-encoded records with no per-record CRC,
+  timestamp, epoch or identity. `EncodeBlock`/`DecodeBlock` build and read one;
+  `Rewrite`, `Restamp` and `Strip` change the header in place for the log, a
+  mirror and compaction respectively; `VerifyPayload` checks a block without
+  decompressing it. Depends on `compress` only, so a client can compress once
+  and hand the broker bytes it never decodes.
+
+  The version byte is 3, not the 2 the spec first said: the header this
+  package's predecessor writes already stamps 2. Nothing in the log reads or
+  writes version 3 yet — today's builds refuse it with `ErrBlockFormat`, which
+  is the rollout order the spec wants — and the layout is fixed here first so
+  both repositories encode the same bytes.
+
 ### Fixed
 
 - **A message set cut inside a frame panicked the library.** The framing parse
