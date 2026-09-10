@@ -2692,7 +2692,7 @@ run_guard "consolidation schedules on mergeable blocks" segment.go   $'		if b.me
 			mergeable++'   $'		if b.mergeable() || true {
 			mergeable++'   '^TestAConsolidationMergesStrippedBlocksOnly$'
 
-run_guard "a written block's flags reach its ref" segment.go   $'		flags = h.Flags'   $'		flags = 0'   '^TestAConsolidationMergesStrippedBlocksOnly$'
+run_guard "a written block's flags reach its ref" segment.go   $'		flags = h.Flags'   $'		flags = h.Flags &^ 0xff'   '^TestAConsolidationMergesStrippedBlocksOnly$'
 
 run_guard "a walked block's flags reach its ref" segment.go   $'		flags:        h.Flags,'   $'		flags:        0,'   '^TestBlockFlagsSurviveAReopen$/^walk=true$'
 

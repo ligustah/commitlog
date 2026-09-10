@@ -63,17 +63,17 @@ func TestACleanCarriesIdentityBearingBlocksWhole(t *testing.T) {
 	_, err := l.AppendBatch(meta(7), keyed("a", 40, "old"))
 	require.NoError(t, err)
 	// B: two markers straddling the boundary — the first is removed, the
-	// second survives on its own.
+	// second survives on its own, apart from E behind it.
 	_, err = marker(7, 2)
+	require.NoError(t, err)
+	// E: identity-less, thinned by F — merged.
+	_, err = l.AppendBatch(BatchMeta{}, keyed("e", 40, "old"))
 	require.NoError(t, err)
 	// C: identity-bearing, every record kept — verbatim.
 	_, err = l.AppendBatch(meta(9), keyed("c", 40, "kept"))
 	require.NoError(t, err)
 	// D: a control block above the boundary — verbatim.
 	_, err = marker(9, 1)
-	require.NoError(t, err)
-	// E: identity-less, thinned by F — merged.
-	_, err = l.AppendBatch(BatchMeta{}, keyed("e", 40, "old"))
 	require.NoError(t, err)
 	// F: identity-bearing, supersedes ten of E's keys, itself kept whole.
 	_, err = l.AppendBatch(meta(11), keyed("e", 10, "new"))
@@ -92,12 +92,12 @@ func TestACleanCarriesIdentityBearingBlocksWhole(t *testing.T) {
 	})
 
 	after := v3BlocksOf(t, l, 0)
-	require.Equal(t, map[int64][]byte{42: before[42], 82: before[82], 123: before[123]}, after,
+	require.Equal(t, map[int64][]byte{82: before[82], 122: before[122], 123: before[123]}, after,
 		"C, D and F pass whole and untouched; A, B and E are rewritten")
 	got := readFrom(t, l)
 	for off := int64(0); off <= 132; off++ {
 		switch {
-		case off == 40, off >= 83 && off < 93:
+		case off == 40, off >= 42 && off < 52:
 			require.NotContains(t, got, off, "offset %d is removed", off)
 		default:
 			require.Equal(t, beforeRecords[off], got[off], "offset %d", off)
@@ -110,8 +110,8 @@ func TestACleanCarriesIdentityBearingBlocksWhole(t *testing.T) {
 	}
 	require.False(t, byOffset[5].hasIdentity, "A was stripped")
 	require.True(t, byOffset[41].hasIdentity, "the surviving marker keeps its identity")
-	require.Equal(t, uint64(9), byOffset[50].pid, "C keeps its identity")
-	require.Equal(t, int32(8), byOffset[50].seq)
+	require.Equal(t, uint64(9), byOffset[90].pid, "C keeps its identity")
+	require.Equal(t, int32(8), byOffset[90].seq)
 	require.Equal(t, uint64(11), byOffset[125].pid)
 
 	_, blocks, err := l.ReadBlocks(0, 1<<30)
@@ -121,12 +121,12 @@ func TestACleanCarriesIdentityBearingBlocksWhole(t *testing.T) {
 		shape = append(shape, fmt.Sprintf("v%d@%d+%d", b.Data[1], b.FirstOffset, b.Records))
 	}
 	require.Equal(t, []string{
-		"v2@0+40",  // A, stripped
-		"v2@41+1",  // B's survivor, alone
-		"v3@42+40", // C
-		"v3@82+1",  // D
-		"v2@93+30", // E's survivors
-		"v3@123+10",
+		"v2@0+40",   // A, stripped
+		"v2@41+1",   // B's survivor, alone
+		"v2@52+30",  // E's survivors
+		"v3@82+40",  // C
+		"v3@122+1",  // D
+		"v3@123+10", // F
 	}, shape)
 }
 
