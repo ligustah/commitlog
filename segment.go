@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	stderrors "errors"
 	"fmt"
+	"github.com/ligustah/commitlog/blockv3"
 	"io"
 	"log/slog"
 	"os"
@@ -951,6 +952,23 @@ func (s *segment) scanBlocks(size int64) error {
 		if _, err := s.backing.ReadAt(hdr[:], phys); err != nil {
 			return errors.Wrap(err, "read block header failed")
 		}
+		if hdr[0] == blockMagic && hdr[1] == blockv3.Version {
+			// A version-3 block: the header does not carry the logical length,
+			// which is the length of the framing its records decode to. This is
+			// the one place a sealed segment's table spares us — an unsealed one
+			// pays one decode per version-3 block at open.
+			b, done, err := s.scanV3Block(phys, logical, size)
+			if err != nil {
+				return errors.Wrapf(err, "block header at byte %d of %d", phys, size)
+			}
+			if done {
+				break
+			}
+			s.blocks = append(s.blocks, b)
+			phys += b.physLen
+			logical += b.logicalLen
+			continue
+		}
 		codec, uLen, cLen, records, err := parseBlockHeader(hdr[:])
 		if err != nil {
 			// Every refusal is wrapped with its position, including the version
@@ -999,6 +1017,7 @@ func (s *segment) scanBlocks(size int64) error {
 			physLen:      physLen,
 			codec:        codec,
 			records:      int64(records),
+			version:      BlockFormatVersion,
 		})
 		phys += physLen
 		logical += int64(uLen)
@@ -1020,6 +1039,46 @@ func (s *segment) scanBlocks(size int64) error {
 	// a segment whose table came from its sidecar walks nothing and reports 0.
 	s.blocksWalked = len(s.blocks)
 	return nil
+}
+
+// scanV3Block resolves the version-3 block at phys during scanBlocks. done
+// reports a torn tail: the header or the payload it promises is not all there,
+// which ends the walk as a torn version-2 block does. A block that is all there
+// and does not decode is damage and is refused, for the reason scanBlocks gives
+// for a corrupt header.
+func (s *segment) scanV3Block(phys, logical, size int64) (b blockRef, done bool, err error) {
+	if size-phys < blockv3.HeaderLen {
+		return blockRef{}, true, nil
+	}
+	var hdr [blockv3.HeaderLen]byte
+	if _, err := s.backing.ReadAt(hdr[:], phys); err != nil {
+		return blockRef{}, false, errors.Wrap(err, "read block header failed")
+	}
+	h, err := blockv3.DecodeHeader(hdr[:])
+	if err != nil {
+		return blockRef{}, false, err
+	}
+	physLen := int64(blockv3.HeaderLen) + int64(h.CompressedLen)
+	if phys+physLen > size {
+		return blockRef{}, true, nil
+	}
+	raw := make([]byte, physLen)
+	if _, err := s.backing.ReadAt(raw, phys); err != nil {
+		return blockRef{}, false, errors.Wrap(err, "read block failed")
+	}
+	framing, err := decodeV3Block(raw, nil)
+	if err != nil {
+		return blockRef{}, false, err
+	}
+	return blockRef{
+		logicalStart: logical,
+		logicalLen:   int64(len(framing)),
+		physStart:    phys,
+		physLen:      physLen,
+		codec:        h.Codec,
+		records:      int64(h.Records),
+		version:      blockv3.Version,
+	}, false, nil
 }
 
 // discardTornTail removes the unresolvable bytes at the end of a segment — a
@@ -1863,7 +1922,7 @@ func (s *segment) WriteBlock(data []byte, codec compress.Codec, logicalLen int64
 	}
 	s.dirtyData = true
 	s.dirtyIndex = true
-	if err := s.appendBlockBytes(data, codec, logicalLen, len(entries)); err != nil {
+	if err := s.appendBlockBytes(data, codec, logicalLen, len(entries), data[1]); err != nil {
 		return err
 	}
 	s.noteWrittenLocked(entries)
@@ -1938,12 +1997,12 @@ func (s *segment) appendBlock(p []byte, records int) error {
 	buf := make([]byte, 0, len(hdr)+len(payload))
 	buf = append(buf, hdr...)
 	buf = append(buf, payload...)
-	return s.appendBlockBytes(buf, codec, int64(len(p)), records)
+	return s.appendBlockBytes(buf, codec, int64(len(p)), records, BlockFormatVersion)
 }
 
 // appendBlockBytes writes an already-framed block (header and payload) to the
 // backing and enters it in the block table. The caller holds s.Lock.
-func (s *segment) appendBlockBytes(buf []byte, codec compress.Codec, logicalLen int64, records int) error {
+func (s *segment) appendBlockBytes(buf []byte, codec compress.Codec, logicalLen int64, records int, version byte) error {
 	n, err := s.backing.Write(buf)
 	if err != nil {
 		return errors.Wrap(err, "block write failed")
@@ -1955,6 +2014,7 @@ func (s *segment) appendBlockBytes(buf []byte, codec compress.Codec, logicalLen 
 		physLen:      int64(n),
 		codec:        codec,
 		records:      int64(records),
+		version:      version,
 	})
 	s.position += logicalLen
 	s.physPosition += int64(n)
@@ -2249,17 +2309,37 @@ func (s *segment) blockCopyIntoCache(c *blockCache, st *scanStream, dst []byte, 
 // raw — raw (codec None) payloads are copied — so callers may recycle the two
 // buffers independently.
 func (s *segment) decodeBlock(st *scanStream, b blockRef, rawBuf, dataBuf []byte) (raw, data []byte, err error) {
-	need := int(b.payloadLen())
-	if cap(rawBuf) < need {
-		rawBuf = make([]byte, need)
-	}
-	raw = rawBuf[:need]
 	// Through the sweep's stream when there is one: a scan visits blocks in
 	// ascending physical order, so these are exactly the reads that stream.
 	readAt := s.backing.ReadAt
 	if st != nil {
 		readAt = st.ReadAt
 	}
+	if b.version == blockv3.Version {
+		// The whole block, header included: the header is what the frames are
+		// synthesized from, and the payload CRC is checked against it.
+		need := int(b.physLen)
+		if cap(rawBuf) < need {
+			rawBuf = make([]byte, need)
+		}
+		raw = rawBuf[:need]
+		if _, err := readAt(raw, b.physStart); err != nil {
+			return raw, nil, errors.Wrap(err, "read block failed")
+		}
+		data, err = decodeV3Block(raw, dataBuf)
+		if err != nil {
+			return raw, nil, errors.Wrap(err, "decode block failed")
+		}
+		if int64(len(data)) != b.logicalLen {
+			return raw, nil, fmt.Errorf("commitlog: block decoded to %d bytes, want %d", len(data), b.logicalLen)
+		}
+		return raw, data, nil
+	}
+	need := int(b.payloadLen())
+	if cap(rawBuf) < need {
+		rawBuf = make([]byte, need)
+	}
+	raw = rawBuf[:need]
 	if _, err := readAt(raw, b.payloadStart()); err != nil {
 		return raw, nil, errors.Wrap(err, "read block payload failed")
 	}

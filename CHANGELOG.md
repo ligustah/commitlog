@@ -60,6 +60,28 @@ start at the tail. Both requested by durable_streams.
   is the rollout order the spec wants — and the layout is fixed here first so
   both repositories encode the same bytes.
 
+- **The log reads version-3 blocks.** A version-3 block decodes to the log's
+  own framing — one version-2 frame per record, carrying the block's offsets,
+  timestamp and epoch, with its producer identity as the `pid`/`epoch`/`seq`/
+  `nonce` headers durable_streams already writes — so every reader, repair and
+  rewrite in the package walks it unchanged, and one identity accessor serves
+  both formats. `MessageMetadata` gains `ProducerID`, `ProducerEpoch`,
+  `Sequence`, `Nonce` and `HasIdentity`, read from those headers whichever
+  format wrote them. `ReadBlocks` hands a version-3 block out verbatim;
+  `ReadMessageSet` hands out its framing, which a version-2 log appends.
+
+  A version-3 header does not carry the block's logical length, which is the
+  length of that framing. The block table sidecar now records each block's
+  format (table version 3; version-2 tables still read), so a sealed segment
+  opens without a decode; an unsealed one decodes each version-3 block once at
+  open, which is the cost durable_streams chose over teaching every walker a
+  second format. A torn version-3 tail ends the walk like a torn version-2
+  block; a version-3 block that is all there and does not decode refuses the
+  open, like a corrupt version-2 header.
+
+  Nothing writes version-3 blocks yet: `AppendBatch` and `AppendPreframed`
+  follow.
+
 ### Fixed
 
 - **A message set cut inside a frame panicked the library.** The framing parse

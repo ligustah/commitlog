@@ -17,9 +17,9 @@ import (
 // says the accumulation agrees with what scanBlocks produced in the first place.
 func TestABlockTableRoundTripsItsDerivedStarts(t *testing.T) {
 	in := []blockRef{
-		{logicalStart: 0, logicalLen: 4096, physStart: 0, physLen: 1200, codec: compress.Snappy, records: 12},
-		{logicalStart: 4096, logicalLen: 8192, physStart: 1200, physLen: 2400, codec: compress.Snappy, records: 30},
-		{logicalStart: 12288, logicalLen: 100, physStart: 3600, physLen: 120, codec: compress.None, records: 1},
+		{logicalStart: 0, logicalLen: 4096, physStart: 0, physLen: 1200, codec: compress.Snappy, records: 12, version: BlockFormatVersion},
+		{logicalStart: 4096, logicalLen: 8192, physStart: 1200, physLen: 2400, codec: compress.Snappy, records: 30, version: BlockFormatVersion},
+		{logicalStart: 12288, logicalLen: 100, physStart: 3600, physLen: 120, codec: compress.None, records: 1, version: BlockFormatVersion},
 	}
 	out, err := decodeBlockTable(encodeBlockTable(in))
 	require.NoError(t, err)
@@ -49,8 +49,8 @@ func TestABlockTableRoundTripsItsDerivedStarts(t *testing.T) {
 // with an error.
 func TestADamagedBlockTableIsRefused(t *testing.T) {
 	good := encodeBlockTable([]blockRef{
-		{logicalStart: 0, logicalLen: 4096, physStart: 0, physLen: 1200, codec: compress.Snappy, records: 12},
-		{logicalStart: 4096, logicalLen: 8192, physStart: 1200, physLen: 2400, codec: compress.Snappy, records: 30},
+		{logicalStart: 0, logicalLen: 4096, physStart: 0, physLen: 1200, codec: compress.Snappy, records: 12, version: BlockFormatVersion},
+		{logicalStart: 4096, logicalLen: 8192, physStart: 1200, physLen: 2400, codec: compress.Snappy, records: 30, version: BlockFormatVersion},
 	})
 
 	corrupt := func(mut func([]byte) []byte) []byte {
@@ -87,15 +87,15 @@ func TestADamagedBlockTableIsRefused(t *testing.T) {
 			b[blockTableHeaderLen] ^= 0xff
 			return b
 		}), "crc "},
-		"trailing byte": {append(append([]byte{}, good...), 0), "object is 37"},
+		"trailing byte": {append(append([]byte{}, good...), 0), "object is 39"},
 		"a block shorter than its own header": {encodeBlockTable([]blockRef{
-			{logicalLen: 10, physLen: 1, codec: compress.None, records: 1},
+			{logicalLen: 10, physLen: 1, codec: compress.None, records: 1, version: BlockFormatVersion},
 		}), "shorter than a header"},
 		// No block holds no records, so a zero is a field nobody wrote — and it
 		// is the one damaged value that reads LOW, which makes a retention walk
 		// keep what it was told to drop rather than refuse to decode.
 		"a block claiming no records": {encodeBlockTable([]blockRef{
-			{logicalLen: 10, physLen: blockHeaderLen, codec: compress.None},
+			{logicalLen: 10, physLen: blockHeaderLen, codec: compress.None, version: BlockFormatVersion},
 		}), "claims no records"},
 	} {
 		t.Run(name, func(t *testing.T) {

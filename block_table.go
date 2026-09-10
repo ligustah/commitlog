@@ -3,6 +3,7 @@ package commitlog
 import (
 	"hash/crc32"
 
+	"github.com/ligustah/commitlog/blockv3"
 	"github.com/ligustah/commitlog/compress"
 	"github.com/pkg/errors"
 )
@@ -13,13 +14,20 @@ const blocksSuffix = ".blocks"
 const (
 	blockTableMagic = 0x42 // 'B'
 	// blockTableVersion 2 added the per-block record count, alongside
-	// BlockFormatVersion 2 adding it to the header the table summarises.
-	blockTableVersion = 2
+	// BlockFormatVersion 2 adding it to the header the table summarises; 3
+	// added each block's format version, so a table can describe a segment
+	// holding version-3 blocks — whose logical length is NOT in their header,
+	// which is what makes the table worth having for them.
+	blockTableVersion = 3
 	// blockTableHeaderLen is magic, version, and the block count.
 	blockTableHeaderLen = 1 + 1 + 4
 	// blockTableEntryLen is one block: its uncompressed length, its physical
-	// length (header included), its codec, and its record count.
-	blockTableEntryLen = 4 + 4 + 1 + 4
+	// length (header included), its codec, its record count and its format
+	// version.
+	blockTableEntryLen = 4 + 4 + 1 + 4 + 1
+	// blockTableEntryLenV2 is an entry of a version-2 table, which has no
+	// format byte: every block it describes is BlockFormatVersion.
+	blockTableEntryLenV2 = 4 + 4 + 1 + 4
 )
 
 // ErrBlockTableFormat means the object holding a block table is not one.
@@ -75,6 +83,7 @@ func encodeBlockTable(blocks []blockRef) []byte {
 		encoding.PutUint32(buf[at+4:], uint32(b.physLen))
 		buf[at+8] = byte(b.codec)
 		encoding.PutUint32(buf[at+9:], uint32(b.records))
+		buf[at+13] = b.version
 		at += blockTableEntryLen
 	}
 	encoding.PutUint32(buf[at:], crc32.ChecksumIEEE(buf[:at]))
@@ -97,12 +106,20 @@ func decodeBlockTable(buf []byte) ([]blockRef, error) {
 	if buf[0] != blockTableMagic {
 		return nil, errors.Wrapf(ErrBlockTableFormat, "magic 0x%02x", buf[0])
 	}
-	if buf[1] != blockTableVersion {
+	// Version 2 tables are read: they were written by the previous release for
+	// segments holding only version-2 blocks, and a tier full of them must not
+	// walk every object because the entry grew a byte.
+	entryLen := blockTableEntryLen
+	switch buf[1] {
+	case blockTableVersion:
+	case 2:
+		entryLen = blockTableEntryLenV2
+	default:
 		return nil, errors.Wrapf(ErrBlockTableFormat, "version %d, want %d",
 			buf[1], blockTableVersion)
 	}
 	n := int(encoding.Uint32(buf[2:]))
-	want := blockTableHeaderLen + n*blockTableEntryLen + 4
+	want := blockTableHeaderLen + n*entryLen + 4
 	if len(buf) != want {
 		return nil, errors.Wrapf(ErrBlockTableFormat,
 			"%d blocks need %d bytes, object is %d", n, want, len(buf))
@@ -119,6 +136,10 @@ func decodeBlockTable(buf []byte) ([]blockRef, error) {
 		pLen := int64(encoding.Uint32(body[at+4:]))
 		codec := compress.Codec(body[at+8])
 		records := int64(encoding.Uint32(body[at+9:]))
+		version := byte(BlockFormatVersion)
+		if entryLen == blockTableEntryLen {
+			version = body[at+13]
+		}
 		if pLen < blockHeaderLen {
 			return nil, errors.Wrapf(ErrBlockTableFormat,
 				"block %d is %d bytes, shorter than a header", i, pLen)
@@ -132,6 +153,13 @@ func decodeBlockTable(buf []byte) ([]blockRef, error) {
 			return nil, errors.Wrapf(ErrBlockTableFormat,
 				"block %d claims no records", i)
 		}
+		// A format this build does not read. Zero included: the field is
+		// written from a blockRef, and a blockRef whose version was never set
+		// describes a block nothing can decode.
+		if version != BlockFormatVersion && version != blockv3.Version {
+			return nil, errors.Wrapf(ErrBlockTableFormat,
+				"block %d has format version %d", i, version)
+		}
 		blocks = append(blocks, blockRef{
 			logicalStart: logical,
 			logicalLen:   uLen,
@@ -139,10 +167,11 @@ func decodeBlockTable(buf []byte) ([]blockRef, error) {
 			physLen:      pLen,
 			codec:        codec,
 			records:      records,
+			version:      version,
 		})
 		logical += uLen
 		phys += pLen
-		at += blockTableEntryLen
+		at += entryLen
 	}
 	return blocks, nil
 }

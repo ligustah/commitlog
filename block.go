@@ -2,6 +2,7 @@ package commitlog
 
 import (
 	"fmt"
+	"github.com/ligustah/commitlog/blockv3"
 	"sync"
 
 	"github.com/ligustah/commitlog/compress"
@@ -61,10 +62,21 @@ type blockRef struct {
 	// drops records from it, after which the span between the first and the
 	// last counts the holes as well. See segment.MessageCount.
 	records int64
+	// version is the block's format: BlockFormatVersion for a 15-byte header
+	// over the log's own framing, blockv3.Version for a 76-byte header over
+	// delta-encoded records that decode to that framing.
+	version byte
 }
 
-func (b blockRef) payloadStart() int64 { return b.physStart + blockHeaderLen }
-func (b blockRef) payloadLen() int64   { return b.physLen - blockHeaderLen }
+func (b blockRef) headerLen() int64 {
+	if b.version == blockv3.Version {
+		return blockv3.HeaderLen
+	}
+	return blockHeaderLen
+}
+
+func (b blockRef) payloadStart() int64 { return b.physStart + b.headerLen() }
+func (b blockRef) payloadLen() int64   { return b.physLen - b.headerLen() }
 
 // encodeBlockHeader writes a block header for a payload with the given codec,
 // lengths and record count.

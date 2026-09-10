@@ -1192,12 +1192,18 @@ func readMessageMetadata(ctx context.Context, reader contextReader, hdrBuf []byt
 	// Every Raw handed out here has therefore survived a bounds-checked parse,
 	// which is what makes a later Raw.Headers() — the same walk, unchecked — safe
 	// on it.
+	pid, pepoch, seq, nonce, hasID := identityFromHeaders(headers)
 	return MessageMetadata{
-		Offset:      offset,
-		Timestamp:   fh.timestamp,
-		LeaderEpoch: fh.leaderEpoch,
-		Attributes:  int8(buf[5]),
-		Headers:     headers,
-		Raw:         SerializedMessage(buf),
+		Offset:        offset,
+		Timestamp:     fh.timestamp,
+		LeaderEpoch:   fh.leaderEpoch,
+		Attributes:    int8(buf[5]),
+		ProducerID:    pid,
+		ProducerEpoch: pepoch,
+		Sequence:      seq,
+		Nonce:         nonce,
+		HasIdentity:   hasID,
+		Headers:       headers,
+		Raw:           SerializedMessage(buf),
 	}, payloadBuf, nil
 }

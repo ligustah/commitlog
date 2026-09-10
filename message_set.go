@@ -157,6 +157,16 @@ type MessageMetadata struct {
 	Timestamp   int64
 	LeaderEpoch uint64
 	Attributes  int8
+	// ProducerID, ProducerEpoch, Sequence and Nonce are the record's producer
+	// identity, valid when HasIdentity is set. Read from the same headers
+	// whether the record was appended carrying them or synthesized from a
+	// version-3 block's header, so one accessor serves both formats. Nonce is
+	// zero when the record is not transactional.
+	ProducerID    uint64
+	ProducerEpoch uint32
+	Sequence      int32
+	Nonce         uint64
+	HasIdentity   bool
 	// Headers values are subslices of Raw and share its lifetime.
 	Headers map[string][]byte
 	// Raw is the full message (Key() and Value() work), BORROWED rather than

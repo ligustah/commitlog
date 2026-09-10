@@ -2588,6 +2588,29 @@ run_guard "a block read returns its first unit whole" block_replication.go   $'	
 # payload stops it.
 run_guard "a block read at an anchor does not decode" block_replication.go   $'		if a.Offset < offset {'   $'		if true {'   '^TestReadBlocksOverATieredSegmentIssuesNoDecode$'
 
+# Version-3 blocks at open. A payload the file does not hold in full is a torn
+# tail and ends the walk; a payload that is all there and does not decode is
+# damage and refuses the open. Each arm is falsified on its own subtest.
+run_guard "a torn version-3 payload ends the walk" segment.go   $'	if phys+physLen > size {
+		return blockRef{}, true, nil
+	}
+	raw := make([]byte, physLen)'   $'	raw := make([]byte, physLen)'   '^TestATornVersion3TailIsDiscardedAndADamagedOneRefused$/^cut_inside_the_payload$'
+
+run_guard "a damaged version-3 block refuses the open" segment.go   $'	framing, err := decodeV3Block(raw, nil)
+	if err != nil {
+		return blockRef{}, false, err
+	}'   $'	framing, err := decodeV3Block(raw, nil)
+	if err != nil {
+		return blockRef{}, true, nil
+	}'   '^TestATornVersion3TailIsDiscardedAndADamagedOneRefused$/^payload_damaged$'
+
+# The block table refuses a format byte this build does not read, zero included.
+run_guard "a block table entry names a format this build reads" block_table.go   $'		if version != BlockFormatVersion && version != blockv3.Version {'   $'		if false {'   '^TestTheBlockTableCarriesEachBlocksFormat$'
+
+# A record has identity only when all three identity headers are present and
+# sized; without the check every record claims one.
+run_guard "identity needs all three headers" blockv3_read.go   $'	if !hasPID || !hasEpoch || !hasSeq || len(p) != 8 || len(e) != 4 || len(s) != 4 {'   $'	if false {'   '^TestAVersion3BlockReadsAsItsRecords$'
+
 
 echo
 if [ "$failures" -ne 0 ]; then
