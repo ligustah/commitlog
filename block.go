@@ -66,6 +66,17 @@ type blockRef struct {
 	// over the log's own framing, blockv3.Version for a 76-byte header over
 	// delta-encoded records that decode to that framing.
 	version byte
+	// flags is a version-3 block's flag byte; zero for a version-2 block.
+	flags byte
+}
+
+// mergeable reports whether a rewrite may fold this block's records in with
+// its neighbours'. A version-3 block that still carries its producer identity,
+// or is a control block, is one batch a replica, consumer or mirror wants
+// whole: a rewrite carries it verbatim or not at all.
+func (b blockRef) mergeable() bool {
+	return b.version != blockv3.Version ||
+		(b.flags&blockv3.FlagStripped != 0 && b.flags&blockv3.FlagControl == 0)
 }
 
 func (b blockRef) headerLen() int64 {

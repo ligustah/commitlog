@@ -2136,7 +2136,7 @@ run_guard "the block format version moved with the record count" block.go   '	Bl
 # version in the repo: a v1 segment read as v2 puts every block boundary after
 # the first four bytes off, and the reader does not find that out until a CRC
 # somewhere downstream disagrees.
-run_guard "the block table version moved with the record count" block_table.go   '	blockTableVersion = 3'   '	blockTableVersion = 1'   '^TestAV1BlockTableIsRefusedByItsVersion$'
+run_guard "the block table version moved with the record count" block_table.go   '	blockTableVersion = 4'   '	blockTableVersion = 1'   '^TestAV1BlockTableIsRefusedByItsVersion$'
 
 # The digest is a CACHE, so its version mismatch is a soft failure by design —
 # loadKeyDigest returns nil and the caller rebuilds. That is why it went longest

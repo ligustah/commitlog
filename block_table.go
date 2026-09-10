@@ -14,17 +14,19 @@ const blocksSuffix = ".blocks"
 const (
 	blockTableMagic = 0x42 // 'B'
 	// blockTableVersion 2 added the per-block record count, alongside
-	// BlockFormatVersion 2 adding it to the header the table summarises; 3
-	// added each block's format version, so a table can describe a segment
-	// holding version-3 blocks — whose logical length is NOT in their header,
-	// which is what makes the table worth having for them.
-	blockTableVersion = 3
+	// BlockFormatVersion 2 adding it to the header the table summarises; 4
+	// added each block's format version and, for a version-3 block, its
+	// flags — so a table can describe a segment holding version-3 blocks,
+	// whose logical length is NOT in their header, and say which of them a
+	// rewrite may merge without reading one. (3, the same without the flags,
+	// was never written outside this package's tests and is refused.)
+	blockTableVersion = 4
 	// blockTableHeaderLen is magic, version, and the block count.
 	blockTableHeaderLen = 1 + 1 + 4
 	// blockTableEntryLen is one block: its uncompressed length, its physical
-	// length (header included), its codec, its record count and its format
-	// version.
-	blockTableEntryLen = 4 + 4 + 1 + 4 + 1
+	// length (header included), its codec, its record count, its format
+	// version and its flags.
+	blockTableEntryLen = 4 + 4 + 1 + 4 + 1 + 1
 	// blockTableEntryLenV2 is an entry of a version-2 table, which has no
 	// format byte: every block it describes is BlockFormatVersion.
 	blockTableEntryLenV2 = 4 + 4 + 1 + 4
@@ -74,10 +76,11 @@ func maxBlockTableBytes(phys int64) int64 {
 // to check for.
 //
 // A table describing only version-2 blocks is written in the version-2 layout,
-// which the previous release reads. The format byte exists for version-3
-// blocks, and a segment holding none has nothing to say with it — while a
-// table the previous release refuses would make a rollback fail to open every
-// segment sealed since the upgrade, over a field that carried no information.
+// which the previous release reads. The format and flag bytes exist for
+// version-3 blocks, and a segment holding none has nothing to say with them —
+// while a table the previous release refuses would make a rollback fail to
+// open every segment sealed since the upgrade, over fields that carried no
+// information.
 func encodeBlockTable(blocks []blockRef) []byte {
 	version, entryLen := byte(2), blockTableEntryLenV2
 	for _, b := range blocks {
@@ -98,6 +101,7 @@ func encodeBlockTable(blocks []blockRef) []byte {
 		encoding.PutUint32(buf[at+9:], uint32(b.records))
 		if version == blockTableVersion {
 			buf[at+13] = b.version
+			buf[at+14] = b.flags
 		}
 		at += entryLen
 	}
@@ -151,9 +155,9 @@ func decodeBlockTable(buf []byte) ([]blockRef, error) {
 		pLen := int64(encoding.Uint32(body[at+4:]))
 		codec := compress.Codec(body[at+8])
 		records := int64(encoding.Uint32(body[at+9:]))
-		version := byte(BlockFormatVersion)
+		version, flags := byte(BlockFormatVersion), byte(0)
 		if entryLen == blockTableEntryLen {
-			version = body[at+13]
+			version, flags = body[at+13], body[at+14]
 		}
 		if pLen < blockHeaderLen {
 			return nil, errors.Wrapf(ErrBlockTableFormat,
@@ -183,6 +187,7 @@ func decodeBlockTable(buf []byte) ([]blockRef, error) {
 			codec:        codec,
 			records:      records,
 			version:      version,
+			flags:        flags,
 		})
 		logical += uLen
 		phys += pLen

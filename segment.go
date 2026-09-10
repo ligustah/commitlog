@@ -1095,6 +1095,7 @@ func (s *segment) scanV3Block(phys, logical, size int64) (b blockRef, done bool,
 		codec:        h.Codec,
 		records:      int64(h.Records),
 		version:      blockv3.Version,
+		flags:        h.Flags,
 	}, false, nil
 }
 
@@ -1939,7 +1940,15 @@ func (s *segment) WriteBlock(data []byte, codec compress.Codec, logicalLen int64
 	}
 	s.dirtyData = true
 	s.dirtyIndex = true
-	if err := s.appendBlockBytes(data, codec, logicalLen, len(entries), data[1]); err != nil {
+	var flags byte
+	if data[1] == blockv3.Version {
+		h, err := blockv3.DecodeHeader(data)
+		if err != nil {
+			return errors.Wrap(ErrMessageSetRefused, err.Error())
+		}
+		flags = h.Flags
+	}
+	if err := s.appendBlockBytes(data, codec, logicalLen, len(entries), data[1], flags); err != nil {
 		return err
 	}
 	s.noteWrittenLocked(entries)
@@ -2014,12 +2023,12 @@ func (s *segment) appendBlock(p []byte, records int) error {
 	buf := make([]byte, 0, len(hdr)+len(payload))
 	buf = append(buf, hdr...)
 	buf = append(buf, payload...)
-	return s.appendBlockBytes(buf, codec, int64(len(p)), records, BlockFormatVersion)
+	return s.appendBlockBytes(buf, codec, int64(len(p)), records, BlockFormatVersion, 0)
 }
 
 // appendBlockBytes writes an already-framed block (header and payload) to the
 // backing and enters it in the block table. The caller holds s.Lock.
-func (s *segment) appendBlockBytes(buf []byte, codec compress.Codec, logicalLen int64, records int, version byte) error {
+func (s *segment) appendBlockBytes(buf []byte, codec compress.Codec, logicalLen int64, records int, version, flags byte) error {
 	n, err := s.backing.Write(buf)
 	if err != nil {
 		return errors.Wrap(err, "block write failed")
@@ -2032,6 +2041,7 @@ func (s *segment) appendBlockBytes(buf []byte, codec compress.Codec, logicalLen 
 		codec:        codec,
 		records:      int64(records),
 		version:      version,
+		flags:        flags,
 	})
 	s.position += logicalLen
 	s.physPosition += int64(n)
@@ -2064,8 +2074,17 @@ func (s *segment) needsBlockConsolidation() bool {
 		// cost nothing is paying.
 		return false
 	}
+	// Only the blocks a rewrite may merge count. A segment of identity-bearing
+	// version-3 blocks keeps its count through a rewrite, and a count that
+	// cannot come down must not schedule one every tick.
+	var mergeable int64
+	for _, b := range s.blocks {
+		if b.mergeable() {
+			mergeable++
+		}
+	}
 	targetBlocks := s.position/cleanBlockTarget + 1
-	return int64(len(s.blocks)) > 4*targetBlocks
+	return mergeable >= 1024 && mergeable > 4*targetBlocks
 }
 
 // ReadAt reads len(p) bytes from the segment's logical byte space starting at

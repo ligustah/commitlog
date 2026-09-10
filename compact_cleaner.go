@@ -808,6 +808,104 @@ func (w *blockWriter) flush() error {
 	return nil
 }
 
+// rewriteWalk feeds a source segment's records to keep, block by block, so a
+// rewrite can carry a version-3 block a merge must not touch — one still
+// bearing its producer identity, or a control block — whole. A mergeable
+// block's frames, and every frame of a segment with no block layout, go
+// through keep as they are scanned. Any other block is scanned first and put
+// to whole: a block that may pass untouched is written into the rewrite
+// verbatim, and one that may not has its frames kept between two flushes of
+// bw, so what survives of it never shares a block with a neighbour's records.
+//
+// A scan that stops short is what is returned as ErrSegmentUnreadable; an
+// error keep returns comes back as it is.
+func rewriteWalk(what string, seg *segment, ss *segmentScanner, bw *blockWriter,
+	keep func(messageSet) error, whole func([]messageSet) bool) error {
+
+	unreadable := func(err error) error {
+		return fmt.Errorf("%w: %s of segment %d: %w", ErrSegmentUnreadable, what, seg.BaseOffset, err)
+	}
+	if err := seg.ensureBlocksLoaded(); err != nil {
+		return unreadable(err)
+	}
+	layout, blocked := seg.blockTailFrom(0)
+	if !blocked {
+		for {
+			ms, _, err := ss.Scan()
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+				return unreadable(err)
+			}
+			if err := keep(ms); err != nil {
+				return err
+			}
+		}
+	}
+	var br *blockReader
+	defer func() {
+		if br != nil {
+			br.close()
+		}
+	}()
+	for _, b := range layout.blocks {
+		end := b.logicalStart + b.logicalLen
+		if b.mergeable() {
+			for ss.pos < end {
+				ms, _, err := ss.Scan()
+				if err != nil {
+					return unreadable(err)
+				}
+				if err := keep(ms); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		var (
+			frames  []messageSet
+			framing []byte
+		)
+		for ss.pos < end {
+			ms, _, err := ss.Scan()
+			if err != nil {
+				return unreadable(err)
+			}
+			frames = append(frames, ms)
+			framing = append(framing, ms...)
+		}
+		if err := bw.flush(); err != nil {
+			return err
+		}
+		// A rewrite into a segment with no block layout has nowhere to put a
+		// block; its framing is what goes in, whole or not.
+		if whole(frames) && bw.seg.BlockMode() {
+			if br == nil {
+				br = seg.newBlockReader()
+			}
+			data, err := br.read(b)
+			if err != nil {
+				return unreadable(err)
+			}
+			entries := entriesForMessageSet(bw.seg.Position(), framing)
+			if err := bw.seg.WriteBlock(data, b.codec, int64(len(framing)), entries); err != nil {
+				return err
+			}
+			continue
+		}
+		for _, ms := range frames {
+			if err := keep(ms); err != nil {
+				return err
+			}
+		}
+		if err := bw.flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropSet,
 	bw *blockWriter, sc *blockCache) (*segment, int, error) {
 
@@ -835,20 +933,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		residualStrippable = false
 	)
 	defer ss.Close()
-	for {
-		ms, _, err := ss.Scan()
-		if err != nil {
-			// The rewrite is about to REPLACE this segment, so a scan that
-			// stopped early would install a copy missing everything past the
-			// damage and then delete the original — silently, reporting success.
-			// The partial copy is thrown away (by the deferred disposal above)
-			// and the source left exactly as it is.
-			if !errors.Is(err, io.EOF) {
-				return nil, 0, fmt.Errorf("%w: rewrite of segment %d: %w",
-					ErrSegmentUnreadable, seg.BaseOffset, err)
-			}
-			break
-		}
+	keep := func(ms messageSet) error {
 		var (
 			offset = ms.Offset()
 			msg    = ms.Message()
@@ -856,7 +941,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 		disp := c.classify(spec, offset, msg, drops)
 		if disp == dispRemove {
 			removed++
-			continue
+			return nil
 		}
 		out := []byte(ms)
 		if disp == dispStrip {
@@ -882,7 +967,7 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 					slog.String("path", c.Path), slog.Int64("offset", offset),
 					slog.String("err", err.Error()))
 			case err != nil:
-				return nil, removed, err
+				return err
 			case changed:
 				out = sf
 				stripped++
@@ -891,9 +976,25 @@ func (c *compactCleaner) cleanSegment(spec CleanSpec, seg *segment, drops *dropS
 			offset >= spec.StripBelow && hasAnyHeader(msg, spec.StripHeaders) {
 			residualStrippable = true
 		}
-		if err := bw.add(out); err != nil {
-			return nil, removed, err
+		return bw.add(out)
+	}
+	// A block passes whole when the pass would keep every record in it as it
+	// is. A block the pass would strip or thin is one batch no longer, and
+	// goes the way its records go.
+	whole := func(frames []messageSet) bool {
+		for _, ms := range frames {
+			if c.classify(spec, ms.Offset(), ms.Message(), drops) != dispRetain {
+				return false
+			}
 		}
+		return true
+	}
+	// A scan that stopped early would install a copy missing everything past
+	// the damage and then delete the original — silently, reporting success.
+	// rewriteWalk reports it instead; the partial copy is thrown away (by the
+	// deferred disposal above) and the source left exactly as it is.
+	if err := rewriteWalk("rewrite", seg, ss, bw, keep, whole); err != nil {
+		return nil, removed, err
 	}
 	if err := bw.flush(); err != nil {
 		return nil, removed, err
@@ -1072,34 +1173,18 @@ func consolidateOne(seg *segment, bw *blockWriter, sc *blockCache) (*segment, er
 	// release to the iteration is this function's point — moving it earlier
 	// within the iteration is a commit-point change, and a separate question.
 	defer ss.Close() // nolint: errcheck — read-only
-	for {
-		ms, _, err := ss.Scan()
-		if err != nil {
-			// The same duty cleanSegment carries, and for the same reason: Replace
-			// below renames this copy over the source's files and closes the
-			// source, so a walk that stopped early installs a PREFIX and deletes
-			// the file that held the rest. The loop this replaced was
-			//
-			//	for ms, _, err := ss.Scan(); err == nil; ms, _, err = ss.Scan()
-			//
-			// which cannot tell io.EOF from a read failure — both simply end it,
-			// and what comes after it is the install. A damaged segment therefore
-			// lost every record past the damage and the pass returned nil.
-			//
-			// Reached on the DEFAULT configuration: this pass is the else-branch
-			// of `if l.Compact`, so it is what every non-compacted log runs on
-			// every automatic clean tick. The compaction path had the check from
-			// the start, which is why no test caught this one — they all set
-			// Compact: true to get there.
-			if !errors.Is(err, io.EOF) {
-				return nil, fmt.Errorf("%w: consolidation of segment %d: %w",
-					ErrSegmentUnreadable, seg.BaseOffset, err)
-			}
-			break
-		}
-		if err := bw.add(ms); err != nil {
-			return nil, err
-		}
+	// The same duty cleanSegment carries, and for the same reason: Replace
+	// below renames this copy over the source's files and closes the source,
+	// so a walk that stopped early would install a PREFIX and delete the file
+	// that held the rest. rewriteWalk refuses to end short of the table.
+	//
+	// Reached on the DEFAULT configuration: this pass is the else-branch of
+	// `if l.Compact`, so it is what every non-compacted log runs on every
+	// automatic clean tick.
+	whole := func([]messageSet) bool { return true }
+	keep := func(ms messageSet) error { return bw.add(ms) }
+	if err := rewriteWalk("consolidation", seg, ss, bw, keep, whole); err != nil {
+		return nil, err
 	}
 	if err := bw.flush(); err != nil {
 		return nil, err
