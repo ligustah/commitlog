@@ -95,8 +95,11 @@ start at the tail. Both requested by durable_streams.
 
 ### Notes
 
-- Untagged until durable_streams has run its broker suites against the
-  checkout; the replication tests there are the coverage this package lacks.
+- Tagged after durable_streams' broker suites (peer, replica, contract,
+  daemon, embed, cmd, client) passed against `ba7529f` with replication on
+  `ReadBlocks`/`AppendBlock`: two brokers replicating zstd blocks byte-identical
+  with zero re-encodes. The version-3 read path and the `blockv3` package landed
+  after that run and are inert until something writes a version-3 block.
 
 ## v0.104.2 — 2026-08-23
 
