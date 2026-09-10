@@ -1616,7 +1616,7 @@ run_guard "each tier draws its own budget" compact_cleaner.go   '			b = budgetFo
 # AppendMessageSet checks the caller's offsets against the tail. Neutralized by
 # accepting whatever arrives, which is what the path did before: a set starting
 # at or below the tail written verbatim, and the log holding one offset twice.
-run_guard "an appended set is checked against the tail" commitlog.go   '	if err := checkAppendedSet(segment.NextOffset()-1, entries); err != nil {
+run_guard "an appended set is checked against the tail" commitlog.go   '	if err := checkAppendedSet(segment.NextOffset()-1, entries, len(ms)); err != nil {
 		return nil, err
 	}' '	if false {
 		return nil, nil
@@ -1671,9 +1671,9 @@ run_guard "a missing CopyTier store is permanent" copy_tier.go   '		return error
 # was unfalsifiable until readMessageSetFrom was split out of the resolve and a
 # test could hand in an already-replaced segment.
 run_guard "a fetch re-resolves across a swap" commitlog.go   '		if !segmentSwapped(err) {
-			return out, err
+			return err
 		}' '		if true {
-			return out, err
+			return err
 		}'   '^TestReadMessageSetWhileCompactionReplacesSegments$'
 
 run_guard "a swap is not replica damage" commitlog.go   '			if segmentSwapped(err) && len(out) == 0 {' '			if false && len(out) == 0 {'   '^TestAReadOfAReplacedSegmentIsNotReportedAsDamage$'
@@ -1730,7 +1730,8 @@ run_guard "a torn tail stops at the watermark" segment.go   '	if committedThroug
 # end of the file: at byte 0 that is every record in the segment, and mid-file it
 # is every record past the flipped byte, acknowledged ones included. Either way
 # the open succeeded and the watermark was clamped down to match.
-run_guard "a corrupt block header refuses the open" segment.go   '			return errors.Wrapf(err, "block header at byte %d of %d", phys, size)' '			break'   '^TestACorruptBlockHeaderIsNotATornTail$'
+run_guard "a corrupt block header refuses the open" segment.go   '			// watermark, applied where no offsets exist yet to compare against.
+			return errors.Wrapf(err, "block header at byte %d of %d", phys, size)' '			break'   '^TestACorruptBlockHeaderIsNotATornTail$'
 
 # Same line, opposite claim: the wrap is UNCONDITIONAL. scanBlocks used to run
 # `if errors.Is(err, ErrBlockFormat) { return err }` first, and it protected
@@ -2130,7 +2131,7 @@ run_guard "the block format version moved with the record count" block.go   '	Bl
 # version in the repo: a v1 segment read as v2 puts every block boundary after
 # the first four bytes off, and the reader does not find that out until a CRC
 # somewhere downstream disagrees.
-run_guard "the block table version moved with the record count" block_table.go   '	blockTableVersion = 2'   '	blockTableVersion = 1'   '^TestAV1BlockTableIsRefusedByItsVersion$'
+run_guard "the block table version moved with the record count" block_table.go   '	blockTableVersion = 3'   '	blockTableVersion = 1'   '^TestAV1BlockTableIsRefusedByItsVersion$'
 
 # The digest is a CACHE, so its version mismatch is a soft failure by design —
 # loadKeyDigest returns nil and the caller rebuilds. That is why it went longest
@@ -2535,7 +2536,7 @@ run_guard "a replication fetch on a deleted log names the log" commitlog.go   $'
 # Narrowed with the return line, which differs where the `if` does not -- `nil`
 # here, `0` in the timestamp arm, because one returns a byte slice and the other
 # an offset. Indentation is NOT a discriminator; do not reach for it next time.
-run_guard "a replication fetch on a closed log names the log" commitlog.go   $'		if l.IsClosed() {\n			return nil, ErrCommitLogClosed'   $'		if false {\n			return nil, ErrCommitLogClosed'   '^TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment$/^closed$'
+run_guard "a replication fetch on a closed log names the log" commitlog.go   $'		if l.IsClosed() {\n			return ErrCommitLogClosed'   $'		if false {\n			return ErrCommitLogClosed'   '^TestAReplicationFetchOnADeadLogNamesTheLogNotTheSegment$/^closed$'
 
 # And the timestamp door, which is the fifth path the same defect reached. Both
 # public lookups route through earliestOffsetAfterTimestampLocked, so the pair is
@@ -2610,6 +2611,44 @@ run_guard "a block table entry names a format this build reads" block_table.go  
 # A record has identity only when all three identity headers are present and
 # sized; without the check every record claims one.
 run_guard "identity needs all three headers" blockv3_read.go   $'	if !hasPID || !hasEpoch || !hasSeq || len(p) != 8 || len(e) != 4 || len(s) != 4 {'   $'	if false && (!hasPID || !hasEpoch || !hasSeq || len(p) != 8 || len(e) != 4 || len(s) != 4) {'   '^TestAVersion3BlockReadsAsItsRecords$'
+
+# AppendBatch's refusals. A batch under version 3 is one block, so it is one
+# timestamp, one epoch and one kind; the identity header names are the log's
+# under either format.
+run_guard "a batch identity header is refused" append_batch.go   $'			if _, taken := m.Headers[k]; taken {'   $'			if _, taken := m.Headers[k]; false && taken {'   '^TestAppendBatchRefusalsWriteNothing$'
+
+run_guard "a batch carries one timestamp" append_batch.go   $'		if m.Timestamp != 0 && stamp != 0 && m.Timestamp != stamp {'   $'		if false && m.Timestamp != stamp {'   '^TestAppendBatchRefusalsWriteNothing$'
+
+run_guard "a batch carries one epoch" append_batch.go   $'		if m.LeaderEpoch != epoch {'   $'		if false && m.LeaderEpoch != epoch {'   '^TestAppendBatchRefusalsWriteNothing$'
+
+run_guard "a batch is control or data, not both" append_batch.go   $'		if (m.Attributes&AttrControl != 0) != control {'   $'		if false && (m.Attributes&AttrControl != 0) != control {'   '^TestAppendBatchRefusalsWriteNothing$'
+
+# Under version 2 the identity goes on each record as headers; a sequence that
+# is not by index reads back as a different batch.
+run_guard "a version-2 batch stamps the sequence by index" append_batch.go   $'		headers[hdrSequence] = be32(uint32(meta.BaseSequence + int32(i)))'   $'		headers[hdrSequence] = be32(0)'   '^TestAppendBatchReadsTheSameUnderEitherFormat$'
+
+# AppendPreframed's refusals, and the rewrite that makes the block the log's.
+run_guard "an identity-bearing block is sequence-by-index" append_batch.go   $'			if r.OffsetDelta != uint32(i) {'   $'			if false && r.OffsetDelta != uint32(i) {'   '^TestAppendPreframedRefusalsWriteNothing$'
+
+run_guard "a block's transactional flag agrees with its nonce" append_batch.go   $'	if (h.Flags&blockv3.FlagTransactional != 0) != (h.TxNonce != 0) {'   $'	if false && (h.Flags&blockv3.FlagTransactional != 0) != (h.TxNonce != 0) {'   '^TestAppendPreframedRefusalsWriteNothing$'
+
+run_guard "a version-2 log takes no pre-framed block" append_batch.go   $'	if l.BlockFormat != blockv3.Version {
+		return nil, errors.Wrapf(ErrMessageSetRefused,'   $'	if false {
+		return nil, errors.Wrapf(ErrMessageSetRefused,'   '^TestAppendPreframedRefusalsWriteNothing$'
+
+run_guard "a pre-framed block is rewritten to the tail" append_batch.go   $'	if err := blockv3.Rewrite(block, h.BaseOffset, h.LeaderEpoch, h.BaseTimestamp); err != nil {'   $'	if err := blockv3.Rewrite(block, 9_000, 77, 5); err != nil {'   '^TestAppendPreframedRewritesOnlyTheHeader$'
+
+# The option: validated at open, and under version 3 a codec-less segment is
+# still block-framed, or the batch has nowhere to be a block.
+run_guard "the block format option is validated" commitlog.go   $'		return nil, errors.Wrapf(ErrInvalidOptions, "unknown block format %d", opts.BlockFormat)'   $'		opts.BlockFormat = BlockFormatVersion'   '^TestBlockFormatIsValidatedAtOpen$'
+
+run_guard "a version-3 log with no codec is block-framed" segment.go   $'		s.blockMode = s.codec != compress.None || s.format == blockv3.Version'   $'		s.blockMode = s.codec != compress.None'   '^TestVersion3WithNoCodecIsBlockFramed$'
+
+# The inspector decodes a version-3 block as its framing; without the arm it
+# decompresses the payload as if it were version 2 and walks records.
+run_guard "the inspector walks version-3 blocks" inspect.go   $'		if info.Version == blockv3.Version {
+			// The framing a version-3 block decodes to'   $'		if false {
+			// The framing a version-3 block decodes to'   '^TestVersion3WithNoCodecIsBlockFramed$'
 
 
 echo
