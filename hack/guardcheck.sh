@@ -2709,6 +2709,8 @@ run_guard "a replicated version-3 block is stored as it is" block_replication.go
 # drop reset the pass compacts a log that asked for no compaction.
 run_guard "a strip spec runs on a log without compaction" clean.go   $'	if l.Compact || stripOnly {'   $'	if l.Compact || (stripOnly && false) {'   '^TestAStripOnlyPassOnANonCompactedLog$'
 
+run_guard "a strip on a log without compaction is opt-in" clean.go   $'	stripOnly := !l.Compact && spec.StripUncompacted && spec.StripBelow > 0'   $'	stripOnly := !l.Compact && (spec.StripUncompacted || true) && spec.StripBelow > 0'   '^TestAStripOnlyPassOnANonCompactedLog$'
+
 run_guard "a strip-only pass removes nothing for its key" compact_cleaner.go   $'			merged.drops[i], merged.gcSegs[i] = nil, false'   $'			merged.gcSegs[i] = false'   '^TestAStripOnlyPassOnANonCompactedLog$'
 
 

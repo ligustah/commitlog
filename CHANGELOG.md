@@ -46,12 +46,13 @@ byte is 3 because the block header this replaces already stamps 2.
   word. `Block.LogicalLen` for a version-3 block is the framing its records
   decode to.
 
-- **A strip spec runs on a log without compaction.** A `CleanSpec` naming
-  `StripBelow` and `StripHeaders` on a log without `Options.Compact` runs the
-  compaction pass with the key removals turned off: decided records lose
-  their headers, markers below the boundary go, nothing is removed for its
-  key, and the stripped blocks consolidate. Until this, a non-compacted log
-  had no way to make its identity-bearing blocks mergeable.
+- **`CleanSpec.StripUncompacted`.** Set, a spec naming `StripBelow` and
+  `StripHeaders` runs on a log without `Options.Compact` too: the compaction
+  pass with the key removals turned off, so decided records lose their
+  headers, markers below the boundary go, nothing is removed for its key,
+  and the stripped blocks consolidate. Off by default, such a log keeps
+  ignoring `StripBelow` as it always has. Until this, a non-compacted log had
+  no way to make its identity-bearing blocks mergeable.
 
 - **Inspect walks version-3 blocks.** `BlockInfo.Version`; `Blocks()` and
   `Records()` read both formats; `SegmentFormat.Readable()` is true for 3.

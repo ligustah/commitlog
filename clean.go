@@ -248,11 +248,8 @@ type CleanSpec struct {
 	// and rewrites the survivors without StripHeaders. Offsets, timestamps,
 	// leader epochs, keys, values and attribute bits survive the rewrite.
 	//
-	// Not only under Options.Compact. A log that never compacts still owes
-	// its decided records this: a spec naming StripBelow and StripHeaders
-	// runs the same pass minus the removal of superseded keys, and the
-	// stripped blocks then consolidate, which identity-bearing blocks never
-	// do (see ReadBlocks).
+	// On a log without Options.Compact this is ignored unless
+	// StripUncompacted is set.
 	//
 	// Independent of Ceiling, and legitimately above it. Where the two overlap
 	// the ceiling wins: classify retains everything at or above spec.ceiling
@@ -275,6 +272,16 @@ type CleanSpec struct {
 	// caller with entirely different per-record bookkeeping uses it the same
 	// way.
 	StripHeaders []string
+	// StripUncompacted runs the strip on a log without Options.Compact. Such
+	// a log otherwise ignores StripBelow, and with it keeps every record's
+	// identity for good — which is what its identity-bearing version-3
+	// blocks need shed before they can be merged (see ReadBlocks). Set, the
+	// pass is compaction's minus the removal of superseded keys: records
+	// below StripBelow lose StripHeaders, markers below it go, nothing is
+	// removed for its key, and the stripped blocks consolidate. Off by
+	// default, so a caller that sends StripBelow on every clean sees no
+	// change on a log it never asked to compact.
+	StripUncompacted bool
 	// Aborted reports whether the data record at offset belongs to an
 	// aborted transaction. Consulted only below Ceiling; must be safe for
 	// concurrent use. Aborted records are removed and never counted
@@ -734,7 +741,7 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int6
 	// A strip is compaction's pass with the key removals turned off, and a
 	// log that never compacts is exactly the one whose identity-bearing
 	// blocks nothing else ever makes mergeable.
-	stripOnly := !l.Compact && spec.StripBelow > 0 && len(spec.StripHeaders) > 0
+	stripOnly := !l.Compact && spec.StripUncompacted && spec.StripBelow > 0 && len(spec.StripHeaders) > 0
 	if l.Compact || stripOnly {
 		// spec is a value, so this resolution is this pass's alone.
 		spec.ceiling = spec.Ceiling.Or(l.HighWatermark())

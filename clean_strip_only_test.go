@@ -9,9 +9,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A log that never compacts still strips: a spec naming StripBelow runs the
-// pass minus the key removals, so every record survives — one key repeated
-// 1100 times included — with its identity gone, the marker below the boundary
+// A log that never compacts strips only when asked: a spec naming StripBelow
+// is ignored on it until StripUncompacted is set, and then runs the pass
+// minus the key removals, so every record survives — one key repeated 1100
+// times included — with its identity gone, the marker below the boundary
 // removed, and the once identity-bearing blocks consolidated.
 func TestAStripOnlyPassOnANonCompactedLog(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
@@ -40,6 +41,13 @@ func TestAStripOnlyPassOnANonCompactedLog(t *testing.T) {
 
 	spec := CleanSpec{StripBelow: boundary,
 		StripHeaders: []string{hdrProducerID, hdrProducerEpoch, hdrSequence, hdrNonce}}
+	_, err = l.CleanWithSpec(spec)
+	require.NoError(t, err)
+	require.Same(t, seg0, l.segments[0], "not asked: the strip spec is ignored on a log without Compact")
+	require.Equal(t, before, readFrom(t, l))
+	require.True(t, identities(t, l)[0].hasIdentity)
+
+	spec.StripUncompacted = true
 	verified, err := l.CleanWithSpec(spec)
 	require.NoError(t, err)
 	require.Equal(t, boundary-1, verified, "the pass verified the whole sealed prefix")
