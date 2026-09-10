@@ -201,6 +201,11 @@ guard_finish() {
   fi
   local -a extra=()
   if [ "$mode" = "race" ]; then extra=(-race); fi
+  # The guarded file's own module. ./... stops at a nested module even under
+  # go.work, so a guard in compress/ or blockv3/ selects nothing from the root
+  # and reads as a test that never ran.
+  local pkgs="./..."
+  case "$1" in */*) pkgs="./${1%/*}/..." ;; esac
 
   # A build failure must NOT count as coverage. The first version of this
   # script neutralized guards with `if false {`, which orphaned imports; the
@@ -214,15 +219,15 @@ guard_finish() {
     git checkout -- "$@"
     return 0
   fi
-  # ./... rather than `.`, and -v so the run can be asked whether it ran
-  # anything. Both are the same defect: `go test -run` with a pattern that
-  # matches nothing exits 0, and this script reads 0 as "passed without the
-  # guard". So a guard whose test lives in a subpackage — compress/ — reported
-  # NO COVERAGE for a test that was never selected, and a guard whose test_re
-  # went stale after a rename would have reported it too, which is the same
-  # answer for a working guard and a broken one.
+  # The module's packages rather than `.`, and -v so the run can be asked
+  # whether it ran anything. Both are the same defect: `go test -run` with a
+  # pattern that matches nothing exits 0, and this script reads 0 as "passed
+  # without the guard". So a guard whose test lives in a subpackage — compress/
+  # — reported NO COVERAGE for a test that was never selected, and a guard
+  # whose test_re went stale after a rename would have reported it too, which
+  # is the same answer for a working guard and a broken one.
   local out rc
-  out=$(go test -run "$test_re" -count=1 -timeout 300s ${extra[@]+"${extra[@]}"} -v ./... 2>&1)
+  out=$(go test -run "$test_re" -count=1 -timeout 300s ${extra[@]+"${extra[@]}"} -v "$pkgs" 2>&1)
   rc=$?
   # Matched with bash's own pattern operator rather than `printf | grep -q`.
   # That pipeline is a trap under the `set -o pipefail` on line 39: grep -q
