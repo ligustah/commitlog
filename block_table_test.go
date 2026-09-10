@@ -87,7 +87,7 @@ func TestADamagedBlockTableIsRefused(t *testing.T) {
 			b[blockTableHeaderLen] ^= 0xff
 			return b
 		}), "crc "},
-		"trailing byte": {append(append([]byte{}, good...), 0), "object is 39"},
+		"trailing byte": {append(append([]byte{}, good...), 0), "object is 37"},
 		"a block shorter than its own header": {encodeBlockTable([]blockRef{
 			{logicalLen: 10, physLen: 1, codec: compress.None, records: 1, version: BlockFormatVersion},
 		}), "shorter than a header"},

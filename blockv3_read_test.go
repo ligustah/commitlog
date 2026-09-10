@@ -277,9 +277,20 @@ func TestTheBlockTableCarriesEachBlocksFormat(t *testing.T) {
 		{logicalLen: 100, physLen: 60, codec: compress.Snappy, records: 3, version: BlockFormatVersion},
 		{logicalStart: 100, logicalLen: 900, physStart: 60, physLen: 300, codec: compress.Zstd, records: 40, version: blockv3.Version},
 	}
-	got, err := decodeBlockTable(encodeBlockTable(blocks))
+	mixed := encodeBlockTable(blocks)
+	require.Equal(t, byte(blockTableVersion), mixed[1])
+	got, err := decodeBlockTable(mixed)
 	require.NoError(t, err)
 	require.Equal(t, blocks, got)
+
+	// Only version-2 blocks: the previous release's layout, so a rollback
+	// still opens every segment sealed since the upgrade.
+	v2Only := encodeBlockTable(blocks[:1])
+	require.Equal(t, byte(2), v2Only[1])
+	require.Len(t, v2Only, blockTableHeaderLen+blockTableEntryLenV2+4)
+	got, err = decodeBlockTable(v2Only)
+	require.NoError(t, err)
+	require.Equal(t, blocks[:1], got)
 
 	v2 := make([]byte, blockTableHeaderLen+blockTableEntryLenV2+4)
 	v2[0], v2[1] = blockTableMagic, 2

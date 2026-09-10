@@ -72,10 +72,23 @@ func maxBlockTableBytes(phys int64) int64 {
 // there is no way for a start to disagree with the lengths around it — an
 // inconsistency the format simply cannot express is better than one a reader has
 // to check for.
+//
+// A table describing only version-2 blocks is written in the version-2 layout,
+// which the previous release reads. The format byte exists for version-3
+// blocks, and a segment holding none has nothing to say with it — while a
+// table the previous release refuses would make a rollback fail to open every
+// segment sealed since the upgrade, over a field that carried no information.
 func encodeBlockTable(blocks []blockRef) []byte {
-	buf := make([]byte, blockTableHeaderLen+len(blocks)*blockTableEntryLen+4)
+	version, entryLen := byte(2), blockTableEntryLenV2
+	for _, b := range blocks {
+		if b.version != BlockFormatVersion {
+			version, entryLen = blockTableVersion, blockTableEntryLen
+			break
+		}
+	}
+	buf := make([]byte, blockTableHeaderLen+len(blocks)*entryLen+4)
 	buf[0] = blockTableMagic
-	buf[1] = blockTableVersion
+	buf[1] = version
 	encoding.PutUint32(buf[2:], uint32(len(blocks)))
 	at := blockTableHeaderLen
 	for _, b := range blocks {
@@ -83,8 +96,10 @@ func encodeBlockTable(blocks []blockRef) []byte {
 		encoding.PutUint32(buf[at+4:], uint32(b.physLen))
 		buf[at+8] = byte(b.codec)
 		encoding.PutUint32(buf[at+9:], uint32(b.records))
-		buf[at+13] = b.version
-		at += blockTableEntryLen
+		if version == blockTableVersion {
+			buf[at+13] = b.version
+		}
+		at += entryLen
 	}
 	encoding.PutUint32(buf[at:], crc32.ChecksumIEEE(buf[:at]))
 	return buf

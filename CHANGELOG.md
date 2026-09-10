@@ -72,8 +72,10 @@ start at the tail. Both requested by durable_streams.
 
   A version-3 header does not carry the block's logical length, which is the
   length of that framing. The block table sidecar now records each block's
-  format (table version 3; version-2 tables still read), so a sealed segment
-  opens without a decode; an unsealed one decodes each version-3 block once at
+  format (table version 3; version-2 tables still read, and a segment holding
+  only version-2 blocks still WRITES one, so a rollback to v0.104 opens every
+  segment sealed since the upgrade), so a sealed segment opens without a
+  decode; an unsealed one decodes each version-3 block once at
   open, which is the cost durable_streams chose over teaching every walker a
   second format. A torn version-3 tail ends the walk like a torn version-2
   block; a version-3 block that is all there and does not decode refuses the
