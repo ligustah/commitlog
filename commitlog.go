@@ -1348,7 +1348,7 @@ func (l *commitLog) AppendMessageSet(ms []byte) ([]int64, error) {
 		basePosition = segment.Position()
 		entries      = entriesForMessageSet(basePosition, ms)
 	)
-	if err := checkAppendedSet(segment.NextOffset()-1, entries); err != nil {
+	if err := checkAppendedSet(segment.NextOffset()-1, entries, len(ms)); err != nil {
 		return nil, err
 	}
 	return l.append(segment, ms, entries)
@@ -1359,8 +1359,10 @@ func (l *commitLog) AppendMessageSet(ms []byte) ([]int64, error) {
 // AppendMessageSet takes the caller's framing verbatim, and until this existed
 // nothing on that path compared those offsets to anything at all.
 //
-// tail is the log's newest offset, or -1 for a log with nothing in it.
-func checkAppendedSet(tail int64, entries []*entry) error {
+// tail is the log's newest offset, or -1 for a log with nothing in it. setLen
+// is the length of the bytes entries were parsed from: the frames must tile
+// them exactly, or the set ends inside a frame the parse stopped short of.
+func checkAppendedSet(tail int64, entries []*entry, setLen int) error {
 	if len(entries) == 0 {
 		// entriesForMessageSet yields nothing for any input shorter than one
 		// header, so this is also what stops a short or garbled frame reaching
@@ -1387,18 +1389,36 @@ func checkAppendedSet(tail int64, entries []*entry) error {
 				entries[i].Offset, entries[i-1].Offset, i)
 		}
 	}
+	last := entries[len(entries)-1]
+	if framed := last.Position + int64(last.Size) - entries[0].Position; framed != int64(setLen) {
+		// The parse stopped at a frame the bytes could not hold. Writing what
+		// it did parse would append a prefix of the set and report success for
+		// all of it.
+		return errors.Wrapf(ErrMessageSetRefused,
+			"%d bytes hold %d bytes of whole frames; the set ends inside a frame",
+			setLen, framed)
+	}
 	return nil
 }
 
 func (l *commitLog) append(segment *segment, ms []byte, entries []*entry) ([]int64, error) {
+	return l.appendWith(segment, entries, func() error {
+		return segment.WriteMessageSet(ms, entries)
+	})
+}
+
+// appendWith is the bookkeeping every append shares — the epoch history, the
+// committed readers' wake — around a write the caller supplies. entries is the
+// framing write lands, already checked by checkAppendedSet.
+func (l *commitLog) appendWith(segment *segment, entries []*entry, write func() error) ([]int64, error) {
 	// The log's tail BEFORE these records land. An epoch that opens with this
 	// batch anchors here, which is what NewLeaderEpoch would have stored, and
-	// WriteMessageSet below moves it -- so it has to be read first. On a segment
-	// the split just created this is still the log's tail, because an empty
+	// the write below moves it -- so it has to be read first. On a segment the
+	// split just created this is still the log's tail, because an empty
 	// segment's NextOffset is its base and the base is the previous tail plus
 	// one.
 	tailBeforeBatch := segment.NextOffset() - 1
-	if err := segment.WriteMessageSet(ms, entries); err != nil {
+	if err := write(); err != nil {
 		return nil, err
 	}
 	var (
@@ -1503,28 +1523,41 @@ func (l *commitLog) ReadMessageSet(offset int64, maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, errors.Wrap(ErrInvalidOptions, "maxBytes must be positive")
 	}
+	var out []byte
+	err := l.readResolving(func() (err error) {
+		out, err = l.readMessageSetOnce(offset, maxBytes)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// readResolving runs attempt until it succeeds, the log is gone, or it fails
+// for a reason other than a compaction swap. Each attempt is expected to take
+// its own segmentsSnapshot(), so a retry resolves against the post-swap log.
+func (l *commitLog) readResolving(attempt func() error) error {
 	var err error
 	for range readerResolveAttempts {
-		var out []byte
-		out, err = l.readMessageSetOnce(offset, maxBytes)
-		if err == nil {
-			return out, nil
+		if err = attempt(); err == nil {
+			return nil
 		}
 		// The log's own state is tested BEFORE the swap sentinels, in
 		// newSourceReader's order and for its reason: "the log is gone" explains
 		// any error the resolve produced, and a caller that cannot tell it from a
 		// compaction swap has to guess whether to retry.
 		if l.IsDeleted() {
-			return nil, ErrCommitLogDeleted
+			return ErrCommitLogDeleted
 		}
 		if l.IsClosed() {
-			return nil, ErrCommitLogClosed
+			return ErrCommitLogClosed
 		}
 		if !segmentSwapped(err) {
-			return out, err
+			return err
 		}
 	}
-	return nil, err
+	return err
 }
 
 func (l *commitLog) readMessageSetOnce(offset int64, maxBytes int) ([]byte, error) {

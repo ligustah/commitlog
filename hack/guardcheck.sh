@@ -2555,6 +2555,39 @@ run_guard "a timestamp lookup on a deleted log names the log" commitlog.go   $'	
 
 run_guard "a timestamp lookup on a closed log names the log" commitlog.go   $'			if l.IsClosed() {'   $'			if false {'   '^TestATimestampLookupOnADeadLogNamesTheLogNotTheSegment$/^EarliestOffsetAfterTimestamp$/^closed$'
 
+# A Follow reader at exactly the next offset parks at the tail. Without the arm
+# the lookup falls through to the refusal every other above-tail start gets.
+run_guard "a follow reader at the next offset parks" reader.go   $'		case next == offset:
+			seg = active'   $'		case false:
+			seg = active'   '^TestAFollowReaderAtTheNextOffsetParksInsteadOfFailing$'
+
+# The message-set parse and the check behind it. The parse stops at a frame the
+# bytes cannot hold rather than slicing past the end; the check refuses a set
+# the frames do not tile. Each is falsified on its own: without the parse guard
+# the test panics, without the tiling check a prefix of the set is written.
+run_guard "the frame parse stops at a frame the bytes cannot hold" message_set.go   $'		if size < 0 || int(size) > len(ms)-msgSetHeaderLen {'   $'		if false {'   '^TestAMessageSetCutInsideAFrameIsRefusedNotPanicked$'
+
+run_guard "an appended set is tiled by whole frames" commitlog.go   $'framed != int64(setLen) {'   $'false && framed != int64(setLen) {'   '^TestAMessageSetCutInsideAFrameIsRefusedNotPanicked$'
+
+# AppendBlock's own refusals, beyond the ones it shares with AppendMessageSet.
+run_guard "an appended block's length matches its header" block_replication.go   $'len(b.Data) != want {'   $'false && len(b.Data) != want {'   '^TestAppendBlockRefusalsWriteNothing$'
+
+run_guard "an appended block's record count matches its payload" block_replication.go   $'	if len(entries) != int(records) {'   $'	if false && len(entries) != int(records) {'   '^TestAppendBlockRefusalsWriteNothing$'
+
+run_guard "an appended block's decoded length matches its header" block_replication.go   $'	if len(logical) != int(uLen) {'   $'	if false && len(logical) != int(uLen) {'   '^TestAppendBlockRefusalsWriteNothing$'
+
+# A raw destination takes the block's framing. Without the arm WriteBlock enters
+# a block into a segment that has no block layout.
+run_guard "a raw segment takes a block's framing" block_replication.go   $'	if !segment.BlockMode() {'   $'	if false {'   '^TestBlocksAcrossALegacySegmentAtEitherEnd$'
+
+# ReadBlocks hands the first unit back whole however small the budget.
+run_guard "a block read returns its first unit whole" block_replication.go   $'		if (len(head) > 0 || len(blocks) > 0) && b.physLen > int64(budget) {'   $'		if b.physLen > int64(budget) {'   '^TestReadBlocksReturnsTheFirstUnitWholeAndNothingPartial$'
+
+# ReadBlocks asks the index before findEntry, because findEntry decodes the
+# block it lands in. Without the arm the tiered read decodes and the damaged
+# payload stops it.
+run_guard "a block read at an anchor does not decode" block_replication.go   $'		if a.Offset < offset {'   $'		if true {'   '^TestReadBlocksOverATieredSegmentIssuesNoDecode$'
+
 
 echo
 if [ "$failures" -ne 0 ]; then

@@ -567,11 +567,39 @@ func (r *uncommittedReader) waitForData(ctx context.Context, seg *segment) error
 // starting at the given offset.
 func (l *commitLog) newReaderUncommitted(offset int64, noWait bool) (contextReader, error) {
 	seg, contains := findSegmentContains(l.segmentsSnapshot(), offset)
-	if seg == nil {
-		return nil, ErrSegmentNotFound
-	}
 	position := int64(0)
-	if contains {
+	switch {
+	case seg == nil && noWait:
+		return nil, ErrSegmentNotFound
+	case seg == nil:
+		// No segment reaches offset, so nothing holds it — but a FOLLOW reader
+		// asking for the log's next offset is not ahead of anything it cannot
+		// wait for: that offset is exactly the one the next append writes, at
+		// the active segment's current end. Park there instead of refusing,
+		// which is what a caller that only wants NEW records has to be able to
+		// ask for without polling construction until the first record lands.
+		//
+		// Only the next offset. Anything higher would be served from the tail
+		// too, and a reader that silently starts below the offset it named is
+		// the case From warns about.
+		//
+		// Position is read BEFORE NextOffset. An append between the two moves
+		// both, and reading them in this order makes the stale one the
+		// position: NextOffset then exceeds offset and the lookup runs again,
+		// against a snapshot that now holds the record. The other order could
+		// pair a fresh position with a stale tail and park past a record it
+		// owes.
+		active := l.activeSegment()
+		position = active.Position()
+		switch next := active.NextOffset(); {
+		case next == offset:
+			seg = active
+		case next > offset:
+			return l.newReaderUncommitted(offset, noWait)
+		default:
+			return nil, ErrSegmentNotFound
+		}
+	case contains:
 		e, err := seg.findEntry(offset)
 		if err != nil {
 			return nil, err

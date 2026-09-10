@@ -260,6 +260,14 @@ type CommitLog interface {
 	//     watermark, which never exceeds the tail, so it waits rather than
 	//     failing.
 	//
+	//     One exception, for the reader that wants only what comes next: an
+	//     Uncommitted reader that is also Follow and starts at EXACTLY
+	//     NewestOffset()+1 parks at the tail and serves the next append. That
+	//     is the offset the next record is guaranteed to land at, so the read
+	//     starts where it was asked to. Any higher start is still refused —
+	//     serving it from the tail would start the read below the offset the
+	//     caller named.
+	//
 	//     A start offset merely BELOW the oldest surviving record is served FROM
 	//     the oldest survivor, so reading from 0 over a log that retention has
 	//     since trimmed is fine and starts at the oldest record present. Nothing
@@ -854,6 +862,44 @@ type CommitLog interface {
 	// retention has passed carries on from what remains rather than failing.
 	// ErrSegmentNotFound if the log holds no segment at or after offset.
 	ReadMessageSet(offset int64, maxBytes int) ([]byte, error)
+
+	// ReadBlocks is ReadMessageSet for a caller that stores blocks verbatim,
+	// so a replica can hold the leader's physical blocks byte for byte without
+	// either side running a codec.
+	//
+	// head is the logical framing — what ReadMessageSet returns — from offset
+	// to the END of the block holding it, and is empty when offset is that
+	// block's first record. blocks are the whole physical blocks that follow,
+	// each acceptable to AppendBlock. Together they cover a contiguous range
+	// starting at offset. maxBytes bounds len(head) plus the sum of len(Data);
+	// as with ReadMessageSet the first unit is returned whole even when it
+	// alone exceeds maxBytes, so a caller is never starved.
+	//
+	// A segment that is not block-framed — one written with no codec — yields
+	// everything as head and no blocks. The segment-boundary, clamp-to-oldest
+	// and ErrSegmentNotFound rules are ReadMessageSet's.
+	ReadBlocks(offset int64, maxBytes int) (head []byte, blocks []Block, err error)
+
+	// AppendBlock is AppendMessageSet for a block obtained from ReadBlocks on
+	// another log. It decodes the payload to run exactly the checks
+	// AppendMessageSet runs — whole frames, first offset strictly above the
+	// tail, ascending offsets, ErrMessageSetRefused otherwise — then writes
+	// Data to the active segment WITHOUT re-encoding, indexes it as one block,
+	// and updates the tail, the write times and the leader-epoch history as
+	// any append does. Returns the offsets appended.
+	//
+	// The block keeps the codec it came with, whatever this log's own codec
+	// is; reads take the codec from each block. On an active segment that is
+	// not block-framed the decoded framing is written as a message set
+	// instead, so the call never fails for want of a mode.
+	//
+	// A header that does not parse, a length that disagrees with len(Data), a
+	// payload that does not decode to the length the header promises, or a
+	// record count the payload does not bear out is ErrMessageSetRefused, and
+	// nothing is written. A block format version this build does not write is
+	// ErrBlockFormat: the bytes are what another build meant, and the remedy
+	// is that build.
+	AppendBlock(b Block) ([]int64, error)
 
 	// Clean applies retention and compaction rules against the log, if
 	// applicable.

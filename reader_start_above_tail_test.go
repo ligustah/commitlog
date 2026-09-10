@@ -18,6 +18,9 @@ import (
 // newest+1, so the uncommitted reader -- which is handed the caller's offset
 // verbatim -- is refused. A committed reader is bounded by the watermark, which
 // never exceeds the tail, so it waits at the boundary instead of failing.
+//
+// The one uncommitted reader that is NOT refused is a Follow reader at exactly
+// newest+1; see reader_tail_park_test.go.
 func TestAStartOffsetAboveTheTailIsRefusedOnlyForAnUncommittedReader(t *testing.T) {
 	l, cleanup := setupWithOptions(t, Options{
 		Path: tempDir(t), MaxSegmentBytes: 1 << 20,

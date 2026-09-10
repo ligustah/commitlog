@@ -5,6 +5,59 @@ compaction. Extracted from [liftbridge-io/liftbridge](https://github.com/liftbri
 internal commitlog package in June 2024; this changelog covers the standalone
 library from that fork onward.
 
+## v0.105.0 — 2026-09-10
+
+Replication in the units the log is stored in, and a Follow reader that can
+start at the tail. Both requested by durable_streams.
+
+### Added
+
+- **`ReadBlocks` and `AppendBlock`.** A follower can now store the leader's
+  physical blocks verbatim. `ReadBlocks(offset, maxBytes)` returns the logical
+  framing from `offset` to the end of its block as `head`, then whole blocks —
+  header and payload as they sit on disk, each with the first offset, the last
+  offset it accounts for, its record count and its uncompressed length, none of
+  which needs a decode. `AppendBlock` decodes once to run exactly the checks
+  `AppendMessageSet` runs, then writes the block byte for byte, keeping the
+  codec it came with; a raw destination takes the framing instead. The replica's
+  segment file ends up identical to the leader's.
+
+  The leader side issues no decode, and the test that says so does it by making
+  a decode impossible: the store object's payload is damaged after the offload
+  and `ReadBlocks` still returns it, where `ReadMessageSet` cannot. That test
+  caught the first draft, which reached `findEntry` for the start position —
+  and on a block segment `findEntry` scans forward INSIDE the block, which is a
+  decode. The read now asks the sparse index first and scans only for an offset
+  inside a block, where the head it produces needs the decode anyway.
+
+  `Block.LastOffset` is the offset before the NEXT block's first record, not the
+  block's own last record — that is inside the payload. On a compacted source
+  the two differ, and a follower resuming at `LastOffset+1` misses nothing
+  either way. The spec asked for a last timestamp as well; there is none to give
+  without a decode, so it is not there.
+
+- **A `Follow` reader at exactly `NewestOffset()+1` parks at the tail.** That
+  offset is where the next append lands, so a reader that wants only new
+  records can wait for them instead of polling `NewReader` until the first one
+  arrives. Every other start above the tail is still refused, and so is the
+  next offset without `Follow`: serving a higher start from the tail would
+  begin the read below the offset the caller named, and a bounded read of a
+  range that holds nothing is a different answer from an empty log.
+
+### Fixed
+
+- **A message set cut inside a frame panicked the library.** The framing parse
+  took the size field on faith and sliced past the end of the bytes, so a
+  transport that delivered a truncated set to `AppendMessageSet` crashed the
+  process that handed it in — the caller's broker, not the library. The parse
+  now stops at a frame the bytes cannot hold, and `checkAppendedSet` refuses a
+  set the frames do not tile, so a prefix is never written as the whole.
+
+### Notes
+
+- Untagged until durable_streams has run its broker suites against the
+  checkout; the replication tests there are the coverage this package lacks.
+
 ## v0.104.2 — 2026-08-23
 
 Two public `-1` returns now say they are `-1`. Documentation and tests only; no

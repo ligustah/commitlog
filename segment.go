@@ -1839,6 +1839,47 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 		}
 		s.position += int64(n)
 	}
+	s.noteWrittenLocked(entries)
+	return n, nil
+}
+
+// WriteBlock appends one physical block VERBATIM — header and payload as another
+// log stored them — and indexes it as one block. entries is the framing the
+// payload decodes to, which the caller has already parsed and checked; only its
+// first entry reaches the sparse index, exactly as WriteMessageSet does.
+//
+// The block's own codec is kept, whatever this segment's is: reads take the
+// codec from each blockRef, so a segment can hold blocks from more than one
+// writer. The caller must have checked that this segment is in block mode; a
+// raw segment has no block layout to append to.
+func (s *segment) WriteBlock(data []byte, codec compress.Codec, logicalLen int64, entries []*entry) error {
+	s.Lock()
+	defer s.Unlock()
+	if s.closed {
+		return ErrSegmentClosed
+	}
+	if len(entries) == 0 {
+		return errors.Wrap(ErrMessageSetRefused, "write with no entries")
+	}
+	s.dirtyData = true
+	s.dirtyIndex = true
+	if err := s.appendBlockBytes(data, codec, logicalLen, len(entries)); err != nil {
+		return err
+	}
+	s.noteWrittenLocked(entries)
+	return s.Index.writeEntries(entries[:1])
+}
+
+// BlockMode reports whether appends to this segment are stored as blocks.
+func (s *segment) BlockMode() bool {
+	s.RLock()
+	defer s.RUnlock()
+	return s.blockMode
+}
+
+// noteWrittenLocked records the offsets and times a write just landed and wakes
+// anything parked for it. The caller holds s.Lock and has written the bytes.
+func (s *segment) noteWrittenLocked(entries []*entry) {
 	// Guard on firstOffset, not firstWriteTime: messages appended without
 	// timestamps leave firstWriteTime 0 forever, so every batch would
 	// overwrite firstOffset with its own first offset — a live handle then
@@ -1860,7 +1901,6 @@ func (s *segment) write(p []byte, entries []*entry) (n int, err error) {
 		s.lastWriteTime = last.Timestamp
 	}
 	s.notifyWaiters()
-	return n, nil
 }
 
 // compressMinBlock is the smallest payload worth running the codec on.
@@ -1898,19 +1938,25 @@ func (s *segment) appendBlock(p []byte, records int) error {
 	buf := make([]byte, 0, len(hdr)+len(payload))
 	buf = append(buf, hdr...)
 	buf = append(buf, payload...)
+	return s.appendBlockBytes(buf, codec, int64(len(p)), records)
+}
+
+// appendBlockBytes writes an already-framed block (header and payload) to the
+// backing and enters it in the block table. The caller holds s.Lock.
+func (s *segment) appendBlockBytes(buf []byte, codec compress.Codec, logicalLen int64, records int) error {
 	n, err := s.backing.Write(buf)
 	if err != nil {
 		return errors.Wrap(err, "block write failed")
 	}
 	s.blocks = append(s.blocks, blockRef{
 		logicalStart: s.position,
-		logicalLen:   int64(len(p)),
+		logicalLen:   logicalLen,
 		physStart:    s.physPosition,
 		physLen:      int64(n),
 		codec:        codec,
 		records:      int64(records),
 	})
-	s.position += int64(len(p))
+	s.position += logicalLen
 	s.physPosition += int64(n)
 	return nil
 }

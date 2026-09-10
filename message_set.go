@@ -60,7 +60,12 @@ func entriesForMessageSet(basePos int64, ms []byte) []*entry {
 		return entries
 	}
 	var n int64
-	for len(ms) > 0 {
+	// Stops at the first frame the bytes cannot hold, and leaves it to the
+	// caller to notice the set was not tiled: the size field sets the reach of
+	// the next slice, and this used to take it on faith, so a set cut inside a
+	// frame — one transport error away on the replication path — sliced past
+	// the end and panicked the process that handed it in.
+	for len(ms) >= msgSetHeaderLen {
 		var (
 			relPos      = n
 			m           = messageSet(ms)
@@ -69,6 +74,9 @@ func entriesForMessageSet(basePos int64, ms []byte) []*entry {
 			leaderEpoch = m.LeaderEpoch()
 			size        = m.Size()
 		)
+		if size < 0 || int(size) > len(ms)-msgSetHeaderLen {
+			break
+		}
 		entries = append(entries, &entry{
 			Offset:      offset,
 			Timestamp:   timestamp,
