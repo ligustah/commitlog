@@ -2673,17 +2673,17 @@ run_guard "the inspector walks version-3 blocks" inspect.go   $'		if info.Versio
 # block table and both open paths carry.
 run_guard "a whole identity-bearing block passes a rewrite verbatim" compact_cleaner.go   $'		if whole(frames) && bw.seg.BlockMode() {'   $'		if false {'   '^TestACleanCarriesIdentityBearingBlocksWhole$'
 
-run_guard "a block that does not pass whole is kept apart" compact_cleaner.go   $'		for _, ms := range frames {
+run_guard "a control block's survivors are kept apart" compact_cleaner.go   $'		for _, ms := range frames {
 			if err := keep(ms); err != nil {
 				return err
 			}
 		}
-		if err := bw.flush(); err != nil {'   $'		for _, ms := range frames {
+		if control {'   $'		for _, ms := range frames {
 			if err := keep(ms); err != nil {
 				return err
 			}
 		}
-		if err := error(nil); err != nil {'   '^TestACleanCarriesIdentityBearingBlocksWhole$'
+		if control && false {'   '^TestACleanCarriesIdentityBearingBlocksWhole$'
 
 run_guard "an identity-bearing or control block is not mergeable" block.go   $'	return b.version != blockv3.Version ||
 		(b.flags&blockv3.FlagStripped != 0 && b.flags&blockv3.FlagControl == 0)'   $'	return true || b.version != blockv3.Version'   '^TestAConsolidationMergesStrippedBlocksOnly$'
@@ -2703,6 +2703,13 @@ run_guard "the block table reads each block's flags" block_table.go   $'			versi
 # AppendBlock's version-3 arm. Without it a version-3 block reaches the
 # version-2 header parse and is refused as another build's.
 run_guard "a replicated version-3 block is stored as it is" block_replication.go   $'	if len(b.Data) > 1 && b.Data[0] == blockMagic && b.Data[1] == blockv3.Version {'   $'	if false && b.Data[1] == blockv3.Version {'   '^TestAVersion3LogReplicatesByteForByte$'
+
+# The strip-only pass. Without the arm a non-compacted log's strip spec falls
+# through to plain consolidation and every identity survives; without the
+# drop reset the pass compacts a log that asked for no compaction.
+run_guard "a strip spec runs on a log without compaction" clean.go   $'	if l.Compact || stripOnly {'   $'	if l.Compact || (stripOnly && false) {'   '^TestAStripOnlyPassOnANonCompactedLog$'
+
+run_guard "a strip-only pass removes nothing for its key" compact_cleaner.go   $'			merged.drops[i], merged.gcSegs[i] = nil, false'   $'			merged.gcSegs[i] = false'   '^TestAStripOnlyPassOnANonCompactedLog$'
 
 
 echo

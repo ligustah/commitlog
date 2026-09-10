@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
+	"github.com/ligustah/commitlog/blockv3"
 )
 
 // compactCleanerOptions contains configuration settings for the
@@ -164,6 +166,13 @@ func (c *compactCleaner) compact(spec CleanSpec, segments []*segment) ([]*segmen
 	merged, err := c.mergeDigests(spec, segments, digests)
 	if err != nil {
 		return nil, 0, -1, err
+	}
+	if spec.stripOnly {
+		// The merge still ran: it is what says which segments carry strip
+		// work. What it found to remove for a key is not this pass's to take.
+		for i := range merged.drops {
+			merged.drops[i], merged.gcSegs[i] = nil, false
+		}
 	}
 
 	var (
@@ -814,8 +823,10 @@ func (w *blockWriter) flush() error {
 // block's frames, and every frame of a segment with no block layout, go
 // through keep as they are scanned. Any other block is scanned first and put
 // to whole: a block that may pass untouched is written into the rewrite
-// verbatim, and one that may not has its frames kept between two flushes of
-// bw, so what survives of it never shares a block with a neighbour's records.
+// verbatim, and one that may not has its frames kept — a control block's
+// between two flushes of bw, so what survives of it never shares a block
+// with a neighbour's records; a data block's beside its neighbours', since
+// what the pass leaves of it is stripped or thinned and one batch no longer.
 //
 // A scan that stops short is what is returned as ErrSegmentUnreadable; an
 // error keep returns comes back as it is.
@@ -875,12 +886,12 @@ func rewriteWalk(what string, seg *segment, ss *segmentScanner, bw *blockWriter,
 			frames = append(frames, ms)
 			framing = append(framing, ms...)
 		}
-		if err := bw.flush(); err != nil {
-			return err
-		}
 		// A rewrite into a segment with no block layout has nowhere to put a
 		// block; its framing is what goes in, whole or not.
 		if whole(frames) && bw.seg.BlockMode() {
+			if err := bw.flush(); err != nil {
+				return err
+			}
 			if br == nil {
 				br = seg.newBlockReader()
 			}
@@ -894,13 +905,21 @@ func rewriteWalk(what string, seg *segment, ss *segmentScanner, bw *blockWriter,
 			}
 			continue
 		}
+		control := b.flags&blockv3.FlagControl != 0
+		if control {
+			if err := bw.flush(); err != nil {
+				return err
+			}
+		}
 		for _, ms := range frames {
 			if err := keep(ms); err != nil {
 				return err
 			}
 		}
-		if err := bw.flush(); err != nil {
-			return err
+		if control {
+			if err := bw.flush(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

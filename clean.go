@@ -239,11 +239,20 @@ type CleanSpec struct {
 	// LOG's high watermark, and a caller must not be able to hand the pass a
 	// resolved bound that disagrees with the one it asked for.
 	ceiling int64
+	// stripOnly marks a pass on a log without Options.Compact: the strip
+	// runs, nothing is removed for its key. Derived by cleanPass.
+	stripOnly bool
 	// StripBelow: records strictly below it are DECIDED, and nothing above
-	// the log needs their per-record bookkeeping any more. Compaction removes
+	// the log needs their per-record bookkeeping any more. The pass removes
 	// control records (AttrControl) below it, removes aborted data records,
 	// and rewrites the survivors without StripHeaders. Offsets, timestamps,
 	// leader epochs, keys, values and attribute bits survive the rewrite.
+	//
+	// Not only under Options.Compact. A log that never compacts still owes
+	// its decided records this: a spec naming StripBelow and StripHeaders
+	// runs the same pass minus the removal of superseded keys, and the
+	// stripped blocks then consolidate, which identity-bearing blocks never
+	// do (see ReadBlocks).
 	//
 	// Independent of Ceiling, and legitimately above it. Where the two overlap
 	// the ceiling wins: classify retains everything at or above spec.ceiling
@@ -722,9 +731,14 @@ func (l *commitLog) clean(spec CleanSpec, segments []*segment) ([]*segment, int6
 		return cleaned, -1, err
 	}
 	verified := int64(-1)
-	if l.Compact {
+	// A strip is compaction's pass with the key removals turned off, and a
+	// log that never compacts is exactly the one whose identity-bearing
+	// blocks nothing else ever makes mergeable.
+	stripOnly := !l.Compact && spec.StripBelow > 0 && len(spec.StripHeaders) > 0
+	if l.Compact || stripOnly {
 		// spec is a value, so this resolution is this pass's alone.
 		spec.ceiling = spec.Ceiling.Or(l.HighWatermark())
+		spec.stripOnly = stripOnly
 		compacted, v, err := l.compactCleaner.CompactSpec(spec, cleaned)
 		if err != nil {
 			if compacted == nil {
