@@ -2700,6 +2700,10 @@ run_guard "the block table writes each block's flags" block_table.go   $'			buf[
 
 run_guard "the block table reads each block's flags" block_table.go   $'			version, flags = body[at+13], body[at+14]'   $'			version, flags = body[at+13], 0'   '^TestTheBlockTableCarriesEachBlocksFormat$'
 
+# AppendBlock's version-3 arm. Without it a version-3 block reaches the
+# version-2 header parse and is refused as another build's.
+run_guard "a replicated version-3 block is stored as it is" block_replication.go   $'	if len(b.Data) > 1 && b.Data[0] == blockMagic && b.Data[1] == blockv3.Version {'   $'	if false {'   '^TestAVersion3LogReplicatesByteForByte$'
+
 
 echo
 if [ "$failures" -ne 0 ]; then
