@@ -1,6 +1,7 @@
 package commitlog
 
 import (
+	"context"
 	"testing"
 
 	"github.com/ligustah/commitlog/blockv3"
@@ -112,6 +113,40 @@ func TestAppendBatchReadsTheSameUnderEitherFormat(t *testing.T) {
 	_, blocks, err = v2.ReadBlocks(2, 1<<20)
 	require.NoError(t, err)
 	require.Equal(t, BlockFormatVersion, blocks[0].Data[1], "the version-2 log stored headers on records")
+}
+
+// A zero BatchMeta is no identity: the batch reads back as Append's would,
+// and under version 3 it is a stripped block.
+func TestAZeroBatchMetaIsAnIdentitylessBatch(t *testing.T) {
+	v3, cleanup3 := v3Log(t, compress.Snappy)
+	defer cleanup3()
+	v2, cleanup2 := blockLog(t, compress.Snappy)
+	defer cleanup2()
+	for _, l := range []*commitLog{v3, v2} {
+		msgs := batchMsgs(40)
+		msgs[3].Headers = map[string][]byte{"trace": []byte("t")}
+		offs, err := l.AppendBatch(BatchMeta{}, msgs)
+		require.NoError(t, err)
+		require.Len(t, offs, 40)
+		for _, id := range identities(t, l) {
+			require.False(t, id.hasIdentity)
+		}
+	}
+	require.Equal(t, readFrom(t, v2), readFrom(t, v3))
+	_, blocks, err := v3.ReadBlocks(0, 1<<20)
+	require.NoError(t, err)
+	h, err := blockv3.DecodeHeader(blocks[0].Data)
+	require.NoError(t, err)
+	require.Equal(t, blockv3.FlagStripped, h.Flags)
+	_, blocks, err = v2.ReadBlocks(0, 1<<20)
+	require.NoError(t, err)
+	require.Equal(t, BlockFormatVersion, blocks[0].Data[1])
+	r, err := v2.NewReader(From(3), Uncommitted())
+	require.NoError(t, err)
+	msg, _, _, _, err := r.ReadMessage(context.Background(), make([]byte, HeaderBufferLen))
+	require.NoError(t, err)
+	require.Equal(t, map[string][]byte{"trace": []byte("t")}, SerializedMessage(msg).Headers(),
+		"no identity headers were stamped")
 }
 
 // Under version 3 a log with no codec is still block-framed, and Append

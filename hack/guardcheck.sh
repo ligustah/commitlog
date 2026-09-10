@@ -2628,6 +2628,10 @@ run_guard "a batch carries one epoch" append_batch.go   $'		if m.LeaderEpoch != 
 
 run_guard "a batch is control or data, not both" append_batch.go   $'		if (m.Attributes&AttrControl != 0) != control {'   $'		if false && (m.Attributes&AttrControl != 0) != control {'   '^TestAppendBatchRefusalsWriteNothing$'
 
+# A zero BatchMeta under version 3 is a STRIPPED block; without the flag its
+# records read back as producer 0's.
+run_guard "a zero BatchMeta writes a stripped block" append_batch.go   $'		h.Flags |= blockv3.FlagStripped'   $'		h.Flags |= 0'   '^TestAZeroBatchMetaIsAnIdentitylessBatch$'
+
 # Under version 2 the identity goes on each record as headers; a sequence that
 # is not by index reads back as a different batch.
 run_guard "a version-2 batch stamps the sequence by index" append_batch.go   $'		headers[hdrSequence] = be32(uint32(meta.BaseSequence + int32(i)))'   $'		headers[hdrSequence] = be32(0)'   '^TestAppendBatchReadsTheSameUnderEitherFormat$'

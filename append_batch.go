@@ -10,7 +10,8 @@ import (
 
 // BatchMeta is the producer identity of one appended batch: record i of the
 // batch has sequence BaseSequence+i, and Nonce names its transaction, zero for
-// none.
+// none. The zero value is no identity at all: the batch reads back as one
+// Append wrote, whichever block format stores it.
 type BatchMeta struct {
 	ProducerID    uint64
 	ProducerEpoch uint32
@@ -35,6 +36,9 @@ func (l *commitLog) AppendBatch(meta BatchMeta, msgs []*Message) ([]int64, error
 		}
 	}
 	if l.BlockFormat != blockv3.Version {
+		if meta == (BatchMeta{}) {
+			return l.Append(msgs)
+		}
 		return l.appendStamped(meta, msgs)
 	}
 	var (
@@ -92,6 +96,11 @@ func (l *commitLog) AppendBatch(meta BatchMeta, msgs []*Message) ([]int64, error
 	}
 	if meta.Nonce != 0 {
 		h.Flags |= blockv3.FlagTransactional
+	}
+	if meta == (BatchMeta{}) {
+		// No identity is what a stripped block carries, so that is the block
+		// an identity-less batch becomes: its records read back with none.
+		h.Flags |= blockv3.FlagStripped
 	}
 	recs := make([]blockv3.Record, len(msgs))
 	for i, m := range msgs {
